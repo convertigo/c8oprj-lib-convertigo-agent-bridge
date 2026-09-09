@@ -209,8 +209,9 @@ same context.
   Full settings discovery repairs this managed configuration through
   `lib_ConvertigoMCP._setupVibe` and invalidates the cached model catalog before
   starting ACP discovery.
-- Use Vibe's native `glm-5-2` model and migrate the former managed
-  `zai-glm-5-2` preset without touching user-defined model presets.
+- Keep a managed `glm-5-2` preset targeting `zai-glm-5-2`: account-routed
+  models are not guaranteed CLI defaults. Migrate the former managed alias
+  without deleting its model definition or touching user-defined presets.
 - Synchronize generalist Vibe guidance through
   `lib_ConvertigoMCP._setupVibe`. The generated entry point is
   `skills/convertigo-vibe-generalist/SKILL.md`; never copy or direct the agent

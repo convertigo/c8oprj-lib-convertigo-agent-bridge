@@ -4272,6 +4272,9 @@
       providers = providers || [];
       for (var i = 0; i < providers.length; i++) {
         var provider = providers[i] || {};
+        if (provider.source && (provider.source.discoveryError || provider.source.modelCatalogRefreshRequired)) {
+          continue;
+        }
         var cacheKey = providerCacheKey(provider);
         if (cacheKey.length && provider.models && provider.models.length) {
           persistent.value.providers[cacheKey] = compactProviderSettingsCache(provider);
@@ -4337,7 +4340,7 @@
     provider.supports = cached.supports || provider.supports || {};
     provider.source = provider.source || {};
     provider.source.settingsCached = true;
-    provider.source.settingsCachedAt = Number(cached.cachedAt || 0);
+    provider.source.settingsCachedAt = provider.source.modelCatalogRefreshRequired ? 0 : Number(cached.cachedAt || 0);
     return provider;
   }
 
@@ -4377,6 +4380,9 @@
   }
 
   function providerSettingsCacheFresh(provider, maxAgeMs) {
+    if (provider && provider.source && provider.source.modelCatalogRefreshRequired) {
+      return false;
+    }
     var cachedAt = Number(provider && provider.source && provider.source.settingsCachedAt || 0);
     return cachedAt > 0 && now() - cachedAt < maxAgeMs;
   }
@@ -5755,7 +5761,7 @@
         temperature: "1.0",
         inputPrice: "1.4",
         outputPrice: "4.4",
-        builtIn: true
+        builtIn: false
       };
     }
     return {
@@ -5771,7 +5777,11 @@
 
   function migrateManagedVibeModelPresets(text) {
     var removed = [];
+    var hasGlm = false;
     var result = String(text || "").replace(/(^|\n)\[\[models\]\]([\s\S]*?)(?=\n\[\[|\n\[|$)/g, function (match, prefix, block) {
+      var name = parseTomlValue(block, "name");
+      var alias = parseTomlValue(block, "alias");
+      hasGlm = hasGlm || name === "zai-glm-5-2" || alias === "glm-5-2" || alias === "zai-glm-5-2";
       var managed = parseTomlValue(block, "name") === "zai-glm-5-2"
         && parseTomlValue(block, "alias") === "zai-glm-5-2"
         && parseTomlValue(block, "provider") === "mistral"
@@ -5782,16 +5792,21 @@
         return match;
       }
       removed.push("zai-glm-5-2");
-      return prefix;
+      return match.replace(/(alias\s*=\s*["'])zai-glm-5-2(["'])/, "$1glm-5-2$2");
     });
     var migratedActiveModel = false;
     if (removed.length && /^\s*active_model\s*=\s*["']zai-glm-5-2["']/m.test(result)) {
       result = result.replace(/^(\s*active_model\s*=\s*["'])zai-glm-5-2(["'])/m, "$1glm-5-2$2");
       migratedActiveModel = true;
     }
+    if (!hasGlm) {
+      // GLM can be account-routed, but is not a guaranteed CLI default.
+      result = result.replace(/\s*$/, "") + '\n\n[[models]]\nname = "zai-glm-5-2"\nprovider = "mistral"\nalias = "glm-5-2"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\n';
+    }
     return {
       text: result.replace(/\n{3,}/g, "\n\n"),
       removed: removed,
+      added: !hasGlm,
       migratedActiveModel: migratedActiveModel
     };
   }
@@ -5801,13 +5816,15 @@
     if (!configFile.isFile()) {
       return { path: filePath(configFile), removed: [], migratedActiveModel: false };
     }
-    var patched = migrateManagedVibeModelPresets(readTextFile(configFile));
-    if (patched.removed.length) {
+    var original = readTextFile(configFile);
+    var patched = migrateManagedVibeModelPresets(original);
+    if (patched.text !== original) {
       writeTextFile(configFile, patched.text);
     }
     return {
       path: filePath(configFile),
       removed: patched.removed,
+      added: patched.added,
       migratedActiveModel: patched.migratedActiveModel
     };
   }
@@ -5870,7 +5887,7 @@
         ''
       );
     }
-    var text = lines.join("\n");
+    var text = migrateManagedVibeModelPresets(lines.join("\n")).text;
     return {
       path: filePath(configFile),
       model: spec.activeModel,
@@ -6708,6 +6725,8 @@
     provider.source.error = "";
     provider.source.settingsCached = false;
     provider.source.settingsCachedAt = 0;
+    provider.source.modelCatalogRefreshRequired = false;
+    delete provider.source.discoveryError;
     return provider;
   }
 
@@ -6800,7 +6819,8 @@
     var presenceOnly = boolValue(options.runtimePresenceOnly, false);
     var capabilityProfile = publicAgentCapabilityProfile(options);
     var profileSupported = capabilityProfile.supportedProviders.indexOf("vibe") >= 0;
-    var setup = presenceOnly ? detectRuntimePresence(options) : detectRuntime(options);
+    // Settings read installed metadata; execution is checked by ACP discovery/start.
+    var setup = detectRuntimePresence(options);
     var managedVibeReady = commandPathStartsWith(setup.vibe, setup.venvDir) && commandPathStartsWith(setup.vibeAcp, setup.venvDir);
     var runtimeCommand = managedVibeReady ? setup.vibe : { found: false, path: "", version: "" };
     var runtime = runtimeUpdateStatus("vibe", runtimeCommand, vibeLatestVersion(options, setup), "pypi");
@@ -6809,7 +6829,7 @@
       var vibeConfigFile = new File(setup.vibeHome, "config.toml");
       if (vibeConfigFile.isFile() && vibeConfigRequiresAuthMigration(readTextFile(vibeConfigFile))) {
         skills = installAgentSkills(options, "vibe", setup.vibeHome);
-        setup = detectRuntime(options);
+        setup = detectRuntimePresence(options);
       }
     }
     var selectedFile = setup.vibeHome.length ? new File(setup.vibeHome, "config.toml") : null;
@@ -6868,11 +6888,19 @@
     provider = hydrateProviderSettingsFromCache(setup.workspaceRoot, provider, true);
     if (!presenceOnly && managedVibeReady && commandPathStartsWith({ path: setup.vibeHome }, setup.installDir)) {
       var presetUpdate = migrateManagedVibeConfig(setup.vibeHome);
-      if (presetUpdate.removed.length) {
+      if (presetUpdate.removed.length || presetUpdate.added) {
         provider.source = provider.source || {};
+        provider.source.modelCatalogRefreshRequired = true;
         provider.source.settingsCachedAt = 0;
         provider.source.modelPresetsRemoved = presetUpdate.removed;
         provider.source.activeModelMigrated = presetUpdate.migratedActiveModel;
+      }
+      var configuredModels = parseVibeModelsFromConfig(new File(setup.vibeHome, "config.toml")).models;
+      if (configuredModels.some(function (model) {
+        return !provider.models.some(function (cached) { return cached.id === model.id; });
+      })) {
+        provider.source.modelCatalogRefreshRequired = true;
+        provider.source.settingsCachedAt = 0;
       }
     }
     return provider;

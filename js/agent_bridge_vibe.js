@@ -460,11 +460,21 @@
         mcpEndpoint: options.mcpEndpoint,
         model: "",
         reasoningEffort: "",
+        mcpBearerToken: options.mcpBearerToken,
+        mcpBearerTokenHandle: options.mcpBearerTokenHandle,
+        nocodeMcpToken: options.nocodeMcpToken || options.noCodeMcpToken,
+        nocodeMcpTokenHandle: options.nocodeMcpTokenHandle || options.noCodeMcpTokenHandle,
         install: false,
         autoConfigure: true,
         requestTimeoutMs: options.settingsTimeoutMs || options.requestTimeoutMs || 60000
       });
-      return started && started.ok !== false && started.providerSettings ? started.providerSettings : provider;
+      if (started && started.ok !== false && started.providerSettings) {
+        return started.providerSettings;
+      }
+      provider.source = provider.source || {};
+      provider.source.discoveryError = started && started.error ? String(started.error) : "Vibe model discovery returned no catalog";
+      provider.source.settingsCachedAt = 0;
+      return provider;
     } catch (e) {
       provider.source = provider.source || {};
       provider.source.discoveryError = String(e);
