@@ -202,3 +202,70 @@ assert.equal(vibeModelSpec("glm-5-2").supportsImages, false, "GLM 5.2 through Mi
 assert.equal(vibeModelSpec("vibe-thinking").supportsImages, true);
 assert.match(migrateManagedVibeModelPresets('active_model = "glm-5-2"\n\n[[models]]\nname = "zai-glm-5-2"\nprovider = "mistral"\nalias = "glm-5-2"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\nsupports_images = true\n').text, /supports_images = false/, "managed GLM presets are migrated to the verified vision flag");
 console.log("Vibe image attachment contract OK");
+
+// Browser login: setup sequences route login/loginStatus to the provider login functions.
+{
+  const originalClaudeStart = C8O.agentBridge.claudeLoginStart;
+  const originalClaudeStatus = C8O.agentBridge.claudeLoginStatus;
+  const originalVibeStart = C8O.agentBridge.vibeLoginStart;
+  const originalVibeStatus = C8O.agentBridge.vibeLoginStatus;
+  assert.equal(typeof originalClaudeStart, "function");
+  assert.equal(typeof originalClaudeStatus, "function");
+  assert.equal(typeof originalVibeStart, "function");
+  assert.equal(typeof originalVibeStatus, "function");
+  const calls = [];
+  C8O.agentBridge.claudeLoginStart = (o) => { calls.push("claude:start:" + String(o.forceLogin)); return { ok: true, status: "waiting_for_login" }; };
+  C8O.agentBridge.claudeLoginStatus = () => { calls.push("claude:status"); return { ok: true, status: "authenticated" }; };
+  C8O.agentBridge.vibeLoginStart = (o) => { calls.push("vibe:start:" + String(o.forceLogin)); return { ok: true, status: "waiting_for_login" }; };
+  C8O.agentBridge.vibeLoginStatus = () => { calls.push("vibe:status"); return { ok: true, status: "authenticated" }; };
+  try {
+    assert.equal(C8O.agentBridge.claudeSetup({ login: "true", forceLogin: "true" }).status, "waiting_for_login");
+    assert.equal(C8O.agentBridge.claudeSetup({ claudeLoginStatus: true }).status, "authenticated");
+    assert.equal(C8O.agentBridge.claudeSetup({ login: true, loginStatus: true }).status, "authenticated", "status wins over start");
+    assert.equal(C8O.agentBridge.vibeSetup({ vibeLogin: "true", forceLogin: false }).status, "waiting_for_login");
+    assert.equal(C8O.agentBridge.vibeSetup({ loginStatus: "true" }).status, "authenticated");
+    assert.deepEqual(calls, ["claude:start:true", "claude:status", "claude:status", "vibe:start:false", "vibe:status"]);
+  } finally {
+    C8O.agentBridge.claudeLoginStart = originalClaudeStart;
+    C8O.agentBridge.claudeLoginStatus = originalClaudeStatus;
+    C8O.agentBridge.vibeLoginStart = originalVibeStart;
+    C8O.agentBridge.vibeLoginStatus = originalVibeStatus;
+  }
+}
+
+// The Vibe login helper drives the Mistral browser sign-in headlessly and never prints the key.
+{
+  const script = vibeLoginScriptSource();
+  assert.match(script, /from vibe\.setup\.auth import BrowserSignInError, BrowserSignInService, HttpBrowserSignInGateway/);
+  assert.match(script, /emit\('C8O_SIGN_IN_URL', attempt\.sign_in_url\)/);
+  assert.match(script, /emit\('C8O_LOGIN_COMPLETED', env_key\)/);
+  assert.match(script, /write_env\(pathlib\.Path\(home\) \/ '\.env', env_key, api_key\)/);
+  assert.doesNotMatch(script, /emit\([^)]*api_key\)/, "the API key must never reach the bridge output");
+  assert.match(script, /os\.chmod\(tmp, 0o600\)/);
+  const output = "C8O_SIGN_IN_URL https://console.mistral.ai/codestral/cli/authenticate?process_id=abc&code=1\nC8O_SIGN_IN_EXPIRES_AT 2026-09-14T16:00:00+00:00\n";
+  assert.equal(output.match(/C8O_SIGN_IN_URL\s+(\S+)/)[1], "https://console.mistral.ai/codestral/cli/authenticate?process_id=abc&code=1");
+  assert.equal(loginProcessUrl("Opening browser to sign in…\nIf the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&state=x\nPaste code here if prompted >"), "https://claude.com/cai/oauth/authorize?code=true&state=x");
+  assert.match(loginProcessOutput({ stdoutFile: null, stderrFile: null }), /^\s*$/);
+}
+
+// Authentication descriptors expose the provider login action the Assistant relies on.
+{
+  const vibeAuth = inspectVibeAuthentication("/nonexistent/vibe-home-" + Date.now());
+  assert.equal(vibeAuth.configured, false);
+  assert.equal(vibeAuth.action, "vibe_login");
+  assert.equal(authenticationInfo(false, "", "claude_login").action, "claude_login");
+  assert.match(claudeSource, /new ProcessBuilder\(toJavaList\(\[setup\.claude\.path, "auth", "login"\]\)\)/);
+  assert.match(claudeSource, /env\.BROWSER = browserScript/);
+  assert.match(claudeSource, /claudeHomeScope = "user"/);
+  assert.match(vibeSource, /vibeHomeScope = "user"/);
+  assert.match(commonSource, /function vibeCredentialSourceDirs/);
+  assert.match(vibeSource, /bootstrapVibeHome\(setup\.vibeHome, options\)/);
+}
+
+// Claude Code MCP timeouts are raised for long-running Convertigo tools.
+{
+  const env = claudeRuntimeEnv({}, "/managed/claude-home");
+  assert.equal(env.MCP_TOOL_TIMEOUT, "600000");
+  assert.equal(env.MCP_TIMEOUT, "60000");
+  assert.equal(claudeRuntimeEnv({ claudeMcpToolTimeoutMs: "900000" }, "").MCP_TOOL_TIMEOUT, "900000");
+}

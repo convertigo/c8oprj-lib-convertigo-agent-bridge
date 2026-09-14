@@ -55,3 +55,20 @@ const unchanged = { id: 'vibe', source: {} };
 cacheSandbox.hydrateProviderSettingsFromCache('', unchanged, true);
 assert.equal(cacheSandbox.providerSettingsCacheFresh(unchanged, 60000), true);
 console.log('Vibe repeated cache hydration invalidation tests passed');
+
+// Playwright MCP is launched through node + cli.js (no npx .cmd shim) and a stale command rewrites the config.
+{
+  const toml = '[[mcp_servers]]\nname = "Convertigo"\ntransport = "http"\nurl = "http://localhost:18080/convertigo/api/mcp?jsonOnly=true"\n\n[[mcp_servers]]\nname = "playwright"\ntransport = "stdio"\ncommand = "D:\\\\Studio 8\\\\nodes\\\\npx.cmd"\nargs = [\n    "--cdp-endpoint",\n    "http://127.0.0.1:40250",\n]\n';
+  const regex = /\ncommand\s*=\s*\[\s*"((?:[^"\\]|\\.)*)"/;
+  const playwrightBlock = toml.match(/\[\[mcp_servers\]\]([\s\S]*?)(?=\n\[\[mcp_servers\]\]|$)/g).find((block) => /name\s*=\s*["']playwright["']/.test(block));
+  assert.equal(playwrightBlock.match(regex), null, "a legacy string command must not be recognised so the config is rewritten");
+  const listForm = playwrightBlock.replace(/\ncommand = "([^\n]*)"/, '\ncommand = [\n    "$1",\n]');
+  assert.equal(listForm.match(regex)[1].replace(/\\(.)/g, "$1"), "D:\\Studio 8\\nodes\\npx.cmd", "the list form must be parsed and unescaped");
+  const commonText2 = fs.readFileSync("js/agent_bridge_common.js", "utf8");
+  assert.match(commonText2, /'command = ' \+ tomlArray\(\[playwright\.command\]\)/, "Vibe stdio command must be written as a TOML list (Vibe shlex-splits strings)");
+  const commonText = fs.readFileSync("js/agent_bridge_common.js", "utf8");
+  assert.match(commonText, /function playwrightMcpDirectLaunch\(options, installDir\)/);
+  assert.match(commonText, /"@playwright\/mcp"\), "cli\.js"\)/);
+  assert.match(fs.readFileSync("js/agent_bridge_vibe.js", "utf8"), /trim\(setup\.config\.selected\.playwrightCommand\) === expectedPlaywrightCommand/);
+  assert.match(fs.readFileSync("js/agent_bridge_claude.js", "utf8"), /var direct = playwrightMcpDirectLaunch\(options, installDir\);/);
+}

@@ -370,6 +370,23 @@ utilise donc `vibe-home` par defaut et accepte aussi `credentialsPolicy` :
 Les valeurs des variables ne sont jamais retournees dans les evenements ou les
 status, seuls les noms de variables injectees le sont.
 
+### Connexion navigateur Mistral (Vibe)
+
+Vibe n'expose son sign-in navigateur que dans l'onboarding interactif
+(`vibe --setup`) ou via ACP `authenticate`. Le bridge pilote le meme service
+Python sans terminal : `agent_vibe_setup` avec `login=true` (alias `vibeLogin`,
+`forceLogin`) execute `agents/vibe/c8o_vibe_browser_login.py` avec le Python du
+venv gere et `VIBE_HOME` = home scope `user`. Le script cree la tentative de
+connexion Mistral AI Studio, ecrit `C8O_SIGN_IN_URL <url>` (repris dans
+`verificationUrl`), attend la confirmation navigateur puis enregistre
+`MISTRAL_API_KEY` dans `<VIBE_HOME>/.env` (mode 600). La cle n'apparait jamais
+dans la sortie du bridge. `loginStatus=true` suit le processus
+(`waiting_for_login`, `authenticated`, `error`), abandonne apres 15 minutes.
+Les homes scope `conversation` recuperent ensuite ce `.env` par le bootstrap
+(source la plus recente entre le home scope `user` et `~/.vibe`). Sans
+identifiants, `authentication.action` vaut `vibe_login` ; une cle stockee par
+`vibe --setup` dans le trousseau macOS (`ai.mistral.vibe`) est aussi reconnue.
+
 ## Validation locale
 
 Validation faite le 2026-08-24 sur le port hotfix local de developpement :
@@ -436,10 +453,19 @@ Authentification : comme pour Codex, le bridge copie le fichier
 vers le home gere, ou l'extrait du trousseau macOS (`Claude Code-credentials`).
 `ANTHROPIC_API_KEY` et `CLAUDE_CODE_OAUTH_TOKEN` sont acceptes depuis
 l'environnement. Sans identifiants, `agent_claude_setup` retourne
-`authentication_required` ; l'utilisateur doit lancer `claude auth login` ou
-`claude setup-token` sur le poste.
+`authentication_required` avec `authentication.action = "claude_login"`.
 
-L'automatisation du viewer Studio par Playwright MCP n'est pas cablee pour Claude
-dans cette premiere version ; `CLAUDE.md` demande a l'agent de signaler un
-resultat "implemente mais non valide en navigateur" plutot que de contourner.
-Le pack Flow reste reserve a Codex.
+Connexion navigateur : `agent_claude_setup` avec `login=true` (alias
+`claudeLogin`, `forceLogin` pour forcer une nouvelle session) lance
+`claude auth login` dans le home scope `user`, avec `BROWSER` pointe sur un petit
+script (`agents/claude/claude-login-browser.sh`) qui enregistre l'URL OAuth au
+lieu d'ouvrir un navigateur ; la reponse expose `verificationUrl` (callback
+`localhost` gere par le CLI) que l'Assistant ouvre dans le navigateur de
+l'utilisateur, exactement comme `codex login`. Sur Windows le CLI ouvre lui-meme
+le navigateur par defaut. `loginStatus=true` suit le processus
+(`waiting_for_login`, `authenticated`, `error`) ; a la fin, `claude auth status`
+fait foi puis les identifiants sont resynchronises dans le home gere. Le
+processus est abandonne apres 15 minutes.
+
+L'automatisation du viewer Studio passe par le serveur Playwright MCP decrit dans
+la section dediee. Le pack Flow reste reserve a Codex.

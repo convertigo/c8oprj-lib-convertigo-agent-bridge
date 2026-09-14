@@ -2014,6 +2014,25 @@
     return npx.found ? npx.path : "npx";
   }
 
+  function playwrightMcpDirectLaunch(options, installDir) {
+    // Prefer `node <prefix>/node_modules/@playwright/mcp/cli.js`: Vibe (Python asyncio)
+    // and Claude Code spawn stdio MCP servers without a shell, so the npx `.cmd`
+    // shim fails on Windows ([WinError 2]) and the launcher shebang is not honoured.
+    options = options || {};
+    var cli = new File(childPath(childPath(codexNodeModulesPath(installDir), "@playwright/mcp"), "cli.js"));
+    if (!cli.isFile()) {
+      return null;
+    }
+    var node = detectNodeRuntime(options);
+    if (!node.found) {
+      return null;
+    }
+    return {
+      command: node.path,
+      args: [filePath(cli), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"]
+    };
+  }
+
   function codexPlaywrightMcpInlineCdpEndpointEnabled(options) {
     options = options || {};
     if (!resolvePlaywrightMcpCdpEndpoint(options).length) {
@@ -3271,7 +3290,25 @@
     return report;
   }
 
-  function bootstrapVibeHome(homePath) {
+  function vibeCredentialSourceDirs(options, homeDir) {
+    options = options || {};
+    var sources = [];
+    try {
+      var workspaceRoot = resolveWorkspaceRoot(options);
+      var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
+      var userHome = resolveVibeHome({
+        vibeHomeScope: "user",
+        userId: trim(options.userId) || contextUserId()
+      }, installDir);
+      if (trim(userHome.path).length && filePath(new File(userHome.path)) !== filePath(homeDir)) {
+        sources.push(new File(userHome.path));
+      }
+    } catch (_ignoreVibeUserHome) {}
+    sources.push(new File(String(System.getProperty("user.home")), ".vibe"));
+    return sources;
+  }
+
+  function bootstrapVibeHome(homePath, options) {
     var report = {
       attempted: false,
       ok: true,
@@ -3290,8 +3327,7 @@
     try {
       var homeDir = new File(report.home);
       ensureDirectory(homeDir);
-      var userVibe = new File(String(System.getProperty("user.home")), ".vibe");
-      syncAgentUserFile(userVibe, homeDir, ".env", report);
+      syncNewestAgentUserFile(vibeCredentialSourceDirs(options, homeDir), homeDir, ".env", report);
       report.message = "Scoped VIBE_HOME credentials synchronized";
     } catch (e) {
       report.ok = false;
@@ -3630,7 +3666,25 @@
     if (vibeEnvHasApiKey(userEnv)) {
       return authenticationInfo(true, "user_home", "");
     }
-    return authenticationInfo(false, "", "mistral_api_key");
+    if (vibeKeychainHasApiKey()) {
+      return authenticationInfo(true, "keychain", "");
+    }
+    return authenticationInfo(false, "", "vibe_login");
+  }
+
+  var VIBE_KEYCHAIN_SERVICE = "ai.mistral.vibe";
+
+  function vibeKeychainHasApiKey() {
+    // Vibe itself stores the key in the macOS Keychain when `vibe --setup` is used on the workstation.
+    if (!isMacOsHost()) {
+      return false;
+    }
+    try {
+      var probe = runCommand(["/usr/bin/security", "find-generic-password", "-s", VIBE_KEYCHAIN_SERVICE, "-a", "MISTRAL_API_KEY"], { timeoutMs: 8000 });
+      return probe.ok === true;
+    } catch (_ignoreVibeKeychain) {
+      return false;
+    }
   }
 
   function projectWorkspaceRoot(projectName) {
@@ -5738,6 +5792,7 @@
       break;
     }
     info.playwrightEndpoint = "";
+    info.playwrightCommand = "";
     var playwrightPattern = /\[\[mcp_servers\]\]([\s\S]*?)(?=\n\[\[mcp_servers\]\]|$)/g;
     var playwrightMatch;
     while ((playwrightMatch = playwrightPattern.exec(text)) !== null) {
@@ -5747,6 +5802,10 @@
       }
       var cdpMatch = playwrightBlock.match(/"--cdp-endpoint",\s*"([^"]+)"/);
       info.playwrightEndpoint = cdpMatch ? cdpMatch[1] : "";
+      // Only the list form is considered valid; a legacy string command is reported
+      // empty so the config gets rewritten.
+      var commandMatch = playwrightBlock.match(/\ncommand\s*=\s*\[\s*"((?:[^"\\]|\\.)*)"/);
+      info.playwrightCommand = commandMatch ? commandMatch[1].replace(/\\(.)/g, "$1") : "";
       break;
     }
     info.valid = info.hasMcpServers && info.hasConvertigoServer && info.hasHttpTransport && info.endpoint.length > 0;
@@ -5944,7 +6003,9 @@
         '[[mcp_servers]]',
         'name = "playwright"',
         'transport = "stdio"',
-        'command = "' + tomlString(playwright.command) + '"',
+        '# `command` is a list on purpose: Vibe shlex-splits a string command, which',
+        '# breaks Windows paths (backslashes, spaces).',
+        'command = ' + tomlArray([playwright.command]),
         'args = ' + tomlArray(playwright.args),
         'startup_timeout_sec = 30.0',
         '',
@@ -5992,6 +6053,10 @@
     // Vibe spawns stdio MCP servers from its Python process, whose PATH does not
     // include the Studio Node runtime: run the npx launcher through the explicit
     // node binary instead of relying on its shebang.
+    var direct = playwrightMcpDirectLaunch(options, installDir);
+    if (direct !== null) {
+      return direct;
+    }
     var npx = codexPlaywrightMcpCommand(options, installDir);
     var args = ["--prefix", codexNpmPrefix(installDir), codexPlaywrightMcpBinaryName(options), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"];
     var node = detectNodeRuntime(options);
@@ -7700,6 +7765,69 @@
     }
     entry.lastAccess = now();
     return event;
+  }
+
+  // Browser login helpers shared by the resident providers ------------------
+
+  var AGENT_LOGIN_REGISTRY_KEY = "lib_ConvertigoAgentBridge.agentLoginRegistry.v1";
+  var AGENT_LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
+
+  function providerLoginRegistry() {
+    var store = getServerStore();
+    if (store !== null) {
+      var registry = store.get(AGENT_LOGIN_REGISTRY_KEY);
+      if (registry === null || typeof registry === "undefined") {
+        registry = new ConcurrentHashMap();
+        store.set(AGENT_LOGIN_REGISTRY_KEY, registry);
+      }
+      return registry;
+    }
+    if (!C8O.agentBridge._fallbackAgentLoginRegistry) {
+      C8O.agentBridge._fallbackAgentLoginRegistry = new ConcurrentHashMap();
+    }
+    return C8O.agentBridge._fallbackAgentLoginRegistry;
+  }
+
+  function loginProcessOutput(entry) {
+    var output = "";
+    try { output += readTextFile(entry.stdoutFile); } catch (_ignoreLoginOut) {}
+    try { output += "\n" + readTextFile(entry.stderrFile); } catch (_ignoreLoginErr) {}
+    output = output.replace(/(access_token|refresh_token|id_token|api_key|apikey)\s*[:=]\s*[^\s]+/gi, "$1=<redacted>");
+    if (output.length > 8000) {
+      output = "... " + output.substring(output.length - 8000);
+    }
+    return output;
+  }
+
+  function loginProcessUrl(output) {
+    var match = String(output || "").match(/https:\/\/[^\s<>'\"\u001b]+/i);
+    return match ? match[0].replace(/[),.;]+$/, "") : "";
+  }
+
+  function loginProcessExitCode(entry, alive) {
+    if (alive) {
+      return -1;
+    }
+    try { return Number(entry.process.exitValue()); } catch (_ignoreLoginExit) {}
+    return -1;
+  }
+
+  function expireLoginProcess(entry, timeoutMs) {
+    var limit = intValue(timeoutMs, AGENT_LOGIN_TIMEOUT_MS, 60000, 3600000);
+    if (processAlive(entry.process) && (now() - Number(entry.startedAt || 0)) > limit) {
+      try { entry.process.destroy(); } catch (_ignoreLoginTimeoutDestroy) {}
+      entry.timedOut = true;
+      return true;
+    }
+    return entry.timedOut === true;
+  }
+
+  function isMacOsHost() {
+    try {
+      return String(System.getProperty("os.name") || "").toLowerCase().indexOf("mac") !== -1;
+    } catch (_ignoreOsName) {
+      return false;
+    }
   }
 
   function processAlive(process) {

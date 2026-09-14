@@ -18,6 +18,11 @@ responseTimeout: 900
       mcpEndpoint: typeof mcpEndpoint === "undefined" ? "" : mcpEndpoint,
       claudePath: typeof claudePath === "undefined" ? "" : claudePath,
       install: typeof install === "undefined" ? "" : install,
+      login: typeof login === "undefined" ? "" : login,
+      loginStatus: typeof loginStatus === "undefined" ? "" : loginStatus,
+      claudeLogin: typeof claudeLogin === "undefined" ? "" : claudeLogin,
+      claudeLoginStatus: typeof claudeLoginStatus === "undefined" ? "" : claudeLoginStatus,
+      forceLogin: typeof forceLogin === "undefined" ? "" : forceLogin,
       nodeVersion: typeof nodeVersion === "undefined" ? "" : nodeVersion,
       nodeDir: typeof nodeDir === "undefined" ? "" : nodeDir,
       npmPath: typeof npmPath === "undefined" ? "" : npmPath,
@@ -121,3 +126,23 @@ responseTimeout: 900
   comment: Alias of nocodeMcpTokenHandle.
 ↓mcpBearerTokenHandle [variables.RequestableVariable-1789369797839]: 
   comment: Opaque server-side handle of the managed MCP bearer token.
+↓login [variables.RequestableVariable-1789480000001]: 
+  comment: When true, starts the Claude browser sign-in (`claude auth login`) in the user scoped CLAUDE_CONFIG_DIR and returns the URL to open.
+  description: When true, starts the Claude browser sign-in (`claude auth login`) in the user scoped CLAUDE_CONFIG_DIR and returns the URL to open.
+  schemaType: xsd:boolean
+↓loginStatus [variables.RequestableVariable-1789480000003]: 
+  comment: When true, reports the state of the pending Claude browser sign-in without starting a new one.
+  description: When true, reports the state of the pending Claude browser sign-in without starting a new one.
+  schemaType: xsd:boolean
+↓claudeLogin [variables.RequestableVariable-1789480000005]: 
+  comment: Alias of login.
+  description: Alias of login.
+  schemaType: xsd:boolean
+↓claudeLoginStatus [variables.RequestableVariable-1789480000007]: 
+  comment: Alias of loginStatus.
+  description: Alias of loginStatus.
+  schemaType: xsd:boolean
+↓forceLogin [variables.RequestableVariable-1789480000009]: 
+  comment: When true, starts a new browser sign-in even when usable credentials already exist.
+  description: When true, starts a new browser sign-in even when usable credentials already exist.
+  schemaType: xsd:boolean
