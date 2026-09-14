@@ -1,0 +1,123 @@
+comment: Check or install the local Claude Code runtime used by the agent bridge.
+responseTimeout: 900
+↓Run [steps.SimpleStep-1789369797771]: 
+  expression: |
+    'include("js/vibe_agent_bridge.js");
+    result = C8O.agentBridge.claudeSetup({
+      workspaceRoot: typeof workspaceRoot === "undefined" ? "" : workspaceRoot,
+      installDir: typeof installDir === "undefined" ? "" : installDir,
+      claudeHome: typeof claudeHome === "undefined" ? "" : claudeHome,
+      claudeHomeScope: typeof claudeHomeScope === "undefined" ? "" : claudeHomeScope,
+      userId: typeof userId === "undefined" ? "" : userId,
+      conversationId: typeof conversationId === "undefined" ? "" : conversationId,
+      projectId: typeof projectId === "undefined" ? "" : projectId,
+      agentProfile: typeof agentProfile === "undefined" ? "" : agentProfile,
+      skillProfile: typeof skillProfile === "undefined" ? "" : skillProfile,
+      assistantContext: typeof assistantContext === "undefined" ? "" : assistantContext,
+      assistantSurface: typeof assistantSurface === "undefined" ? "" : assistantSurface,
+      mcpEndpoint: typeof mcpEndpoint === "undefined" ? "" : mcpEndpoint,
+      claudePath: typeof claudePath === "undefined" ? "" : claudePath,
+      install: typeof install === "undefined" ? "" : install,
+      nodeVersion: typeof nodeVersion === "undefined" ? "" : nodeVersion,
+      nodeDir: typeof nodeDir === "undefined" ? "" : nodeDir,
+      npmPath: typeof npmPath === "undefined" ? "" : npmPath,
+      allowNodeDownload: typeof allowNodeDownload === "undefined" ? "" : allowNodeDownload,
+      claudePackage: typeof claudePackage === "undefined" ? "" : claudePackage,
+      claudeVersion: typeof claudeVersion === "undefined" ? "" : claudeVersion,
+      claudeInstallMethod: typeof claudeInstallMethod === "undefined" ? "" : claudeInstallMethod,
+      claudeInstallTimeoutMs: typeof claudeInstallTimeoutMs === "undefined" ? "" : claudeInstallTimeoutMs,
+      forceClaudeInstall: typeof forceClaudeInstall === "undefined" ? "" : forceClaudeInstall,
+      mcpSkillsSourceDir: typeof mcpSkillsSourceDir === "undefined" ? "" : mcpSkillsSourceDir,
+      skipSkillsInstall: typeof skipSkillsInstall === "undefined" ? "" : skipSkillsInstall,
+      agentRevealMode: typeof agentRevealMode === "undefined" ? "" : agentRevealMode,
+      viewerDebugPort: typeof viewerDebugPort === "undefined" ? "" : viewerDebugPort,
+      nocodeMcpToken: typeof nocodeMcpToken === "undefined" ? "" : nocodeMcpToken,
+      noCodeMcpToken: typeof noCodeMcpToken === "undefined" ? "" : noCodeMcpToken,
+      mcpBearerToken: typeof mcpBearerToken === "undefined" ? "" : mcpBearerToken,
+      nocodeMcpTokenHandle: typeof nocodeMcpTokenHandle === "undefined" ? "" : nocodeMcpTokenHandle,
+      noCodeMcpTokenHandle: typeof noCodeMcpTokenHandle === "undefined" ? "" : noCodeMcpTokenHandle,
+      mcpBearerTokenHandle: typeof mcpBearerTokenHandle === "undefined" ? "" : mcpBearerTokenHandle
+    });'
+↓result [steps.JsonToXmlStep-1789369797773]: 
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: result
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓workspaceRoot [variables.RequestableVariable-1789369797775]: 
+  comment: Optional Convertigo user workspace root. Defaults to Engine.USER_WORKSPACE_PATH.
+↓installDir [variables.RequestableVariable-1789369797777]: 
+  comment: Optional installation directory. Defaults to <workspaceRoot>/agents/claude.
+↓claudeHome [variables.RequestableVariable-1789369797779]: 
+  comment: Optional explicit CLAUDE_CONFIG_DIR. When empty, the bridge resolves it from claudeHomeScope.
+↓claudeHomeScope [variables.RequestableVariable-1789369797781]: 
+  comment: 'CLAUDE_CONFIG_DIR isolation scope: default, shared, user, or conversation. Defaults to visible user-scoped workspace home.'
+↓userId [variables.RequestableVariable-1789369797783]: 
+  comment: User identifier used for user or conversation scoped homes.
+↓conversationId [variables.RequestableVariable-1789369797785]: 
+  comment: Conversation identifier used for conversation scoped homes.
+↓projectId [variables.RequestableVariable-1789369797787]: 
+  comment: Optional project identifier included in scoped homes.
+↓agentProfile [variables.RequestableVariable-1789369797789]: 
+  comment: Agent profile used to select the managed skill pack, for example nocode or generalist.
+↓skillProfile [variables.RequestableVariable-1789369797791]: 
+  comment: Skill profile used to select the managed skill pack, for example nocode or generalist.
+↓assistantContext [variables.RequestableVariable-1789369797793]: 
+  comment: Assistant context supplied by the embedding surface, for example nocode.
+↓assistantSurface [variables.RequestableVariable-1789369797795]: 
+  comment: Assistant surface supplied by the embedding surface, for example nocode or studio.
+↓mcpEndpoint [variables.RequestableVariable-1789369797797]: 
+  comment: Optional MCP endpoint. Defaults to /api/mcp on the current Convertigo endpoint.
+↓claudePath [variables.RequestableVariable-1789369797799]: 
+  comment: Optional Claude Code CLI executable path.
+↓install [variables.RequestableVariable-1789369797801]: 
+  comment: When true, installs the Claude Code CLI if it is missing.
+  schemaType: xsd:boolean
+↓nodeVersion [variables.RequestableVariable-1789369797803]: 
+  comment: Optional Node.js version used by the Convertigo workspace Node installer.
+↓nodeDir [variables.RequestableVariable-1789369797805]: 
+  comment: Optional Node.js installation directory override.
+↓npmPath [variables.RequestableVariable-1789369797807]: 
+  comment: Optional npm executable path override.
+↓allowNodeDownload [variables.RequestableVariable-1789369797809]: 
+  comment: When false, setup fails instead of downloading Node.js through Convertigo ProcessUtils.
+  schemaType: xsd:boolean
+↓claudePackage [variables.RequestableVariable-1789369797811]: 
+  comment: Optional npm package name for Claude Code. Defaults to @anthropic-ai/claude-code.
+↓claudeVersion [variables.RequestableVariable-1789369797813]: 
+  comment: Optional npm package version for Claude Code. Defaults to latest.
+↓claudeInstallMethod [variables.RequestableVariable-1789369797815]: 
+  comment: Claude install method. Only npm is currently supported.
+↓claudeInstallTimeoutMs [variables.RequestableVariable-1789369797817]: 
+  comment: Timeout in milliseconds for npm install. Defaults to 600000.
+↓forceClaudeInstall [variables.RequestableVariable-1789369797819]: 
+  comment: When true, reinstall Claude Code even when an executable is already found.
+  schemaType: xsd:boolean
+↓mcpSkillsSourceDir [variables.RequestableVariable-1789369797821]: 
+  comment: Optional lib_ConvertigoMCP project directory used to synchronize base agent skills.
+↓skipSkillsInstall [variables.RequestableVariable-1789369797823]: 
+  comment: When true, skips synchronization of the lib_ConvertigoMCP skill pack into the agent home.
+  schemaType: xsd:boolean
+↓agentRevealMode [variables.RequestableVariable-1789369797825]: 
+  comment: When true, the managed MCP configuration declares the Convertigo reveal mode header.
+↓viewerDebugPort [variables.RequestableVariable-1789369797827]: 
+  comment: Optional Studio viewer debug port declared as an MCP header.
+↓nocodeMcpToken [variables.RequestableVariable-1789369797829]: 
+  comment: Optional direct NoCode MCP token. Prefer nocodeMcpTokenHandle when available.
+↓noCodeMcpToken [variables.RequestableVariable-1789369797831]: 
+  comment: Alias of nocodeMcpToken.
+↓mcpBearerToken [variables.RequestableVariable-1789369797833]: 
+  comment: Optional direct MCP bearer token. Prefer mcpBearerTokenHandle when available.
+↓nocodeMcpTokenHandle [variables.RequestableVariable-1789369797835]: 
+  comment: Opaque server-side handle of the NoCode MCP token.
+↓noCodeMcpTokenHandle [variables.RequestableVariable-1789369797837]: 
+  comment: Alias of nocodeMcpTokenHandle.
+↓mcpBearerTokenHandle [variables.RequestableVariable-1789369797839]: 
+  comment: Opaque server-side handle of the managed MCP bearer token.

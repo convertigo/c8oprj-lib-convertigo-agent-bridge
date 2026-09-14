@@ -18,6 +18,13 @@
   var NOCODE_MCP_TOKEN_ENV = "C8O_NOCODE_MCP_TOKEN";
   var MCP_TOKEN_ENV = "CONVERTIGO_MCP_TOKEN";
   var MCP_GUIDANCE_VERSION = "2026-09-04.vibe-serial-transport-v1";
+  // GLM 5.2 routed through the Mistral account has no vision: Mistral answers
+  // "Image input is not enabled for this model" (400, code 3051) when an image
+  // block is sent. Verified on 2026-09-14; flip only after a new live check.
+  var VIBE_GLM_SUPPORTS_IMAGES = false;
+  var VIBE_IMAGE_MIME_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+  var VIBE_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+  var VIBE_MAX_IMAGES_PER_MESSAGE = 8;
   var STUDIO_ROUTER_SKILL_SLUG = "convertigo-studio";
   var MANAGED_SKILL_BUNDLE_STATE_FILE = "managed-skill-bundle.json";
   var FLOW_MINIMUM_CONVERTIGO_VERSION = "8.5.0";
@@ -30,7 +37,7 @@
       authoringPolicy: "legacy-only",
       aliases: ["generalist", "legacy"],
       capabilityIds: ["convertigo-legacy"],
-      supportedProviders: ["codex", "vibe"],
+      supportedProviders: ["codex", "vibe", "claude"],
       mcpPath: FALLBACK_MCP_PATH,
       mcpServerName: "convertigo",
       setupProject: "lib_ConvertigoMCP",
@@ -45,7 +52,7 @@
       authoringPolicy: "nocode",
       aliases: ["nocode", "no-code", "c8oforms", "forms"],
       capabilityIds: ["convertigo-nocode"],
-      supportedProviders: ["codex", "vibe"],
+      supportedProviders: ["codex", "vibe", "claude"],
       mcpPath: FALLBACK_MCP_PATH,
       mcpServerName: "convertigo",
       setupProject: "lib_ConvertigoMCP",
@@ -164,7 +171,8 @@
       "currentUrl", "currentRoute", "currentPath", "currentFormId", "currentFormUrl",
       "nocodeCurrentUrl", "nocodeCurrentRoute", "nocodeCurrentFormId", "nocodeCurrentFormUrl",
       "formId", "pageId", "applicationId", "currentPage", "currentApplicationId",
-      "codexHomeScope", "vibeHomeScope", "homeScope", "codexHome", "vibeHome", "agentHome",
+      "codexHomeScope", "vibeHomeScope", "claudeHomeScope", "homeScope", "codexHome", "vibeHome", "claudeHome", "agentHome",
+      "claudePath",
       "mcpEndpoint", "workspaceRoot", "settingsTimeoutMs", "modelsTimeoutMs",
       "model", "reasoningEffort", "reasoningLevel", "serviceTier", "savePreferences",
       "checkUpdates", "refreshUpdateCheck", "updateCheckTimeoutMs", "updateCheckCacheMs", "runtimePresenceOnly",
@@ -532,6 +540,9 @@
     if (normalized === "vibe") {
       return trim(env.MISTRAL_BASE_URL || env.MISTRAL_API_URL) || "https://api.mistral.ai";
     }
+    if (normalized === "claude") {
+      return trim(env.ANTHROPIC_BASE_URL) || "https://api.anthropic.com";
+    }
     return "";
   }
 
@@ -779,7 +790,7 @@
     writeTextFile(file, JSON.stringify(value || {}, null, 2));
   }
 
-  function managedSkillBundleSlugs(options) {
+  function managedSkillBundleSlugs(options, provider) {
     if (normalizeSkillProfile(options || {}) === "nocode") {
       return ["convertigo-nocode"];
     }
@@ -787,7 +798,7 @@
       STUDIO_ROUTER_SKILL_SLUG,
       "convertigo-generalist"
     ];
-    if (flowCapabilityAvailable()) {
+    if (normalizeProvider(provider || (options && options.provider)) !== "claude" && flowCapabilityAvailable()) {
       slugs.push("convertigo-flow-mcp");
       slugs.push("convertigo-flow-backend");
       slugs.push("convertigo-flow-frontend-svelte");
@@ -804,9 +815,9 @@
     return values.length ? hashShort(values.join("\n")) : "";
   }
 
-  function managedSkillBundleState(options, homePath) {
+  function managedSkillBundleState(options, homePath, provider) {
     var home = trim(homePath);
-    var slugs = managedSkillBundleSlugs(options);
+    var slugs = managedSkillBundleSlugs(options, provider);
     var skillHashes = {};
     var missing = [];
     if (home.length) {
@@ -2534,8 +2545,8 @@
     ].join("\n");
   }
 
-  function buildConvertigoStudioRouterSkill() {
-    if (!flowCapabilityAvailable()) {
+  function buildConvertigoStudioRouterSkill(legacyOnly) {
+    if (legacyOnly === true || !flowCapabilityAvailable()) {
       return [
         "---",
         "name: convertigo-studio",
@@ -2544,7 +2555,7 @@
         "",
         "# Convertigo Studio router",
         "",
-        "This is a Low Code Studio session. The `convertigo` MCP server is installed in this Codex home.",
+        "This is a Low Code Studio session. The `convertigo` MCP server is installed in this agent home.",
         "The No Code capability is unavailable to the Studio user and must never be used from this session.",
         "",
         "## Mandatory workflow",
@@ -2584,10 +2595,10 @@
     ].join("\n");
   }
 
-  function installStudioRouterSkill(homePath, dryRun) {
+  function installStudioRouterSkill(homePath, dryRun, legacyOnly) {
     var codexHome = new File(effectiveCodexHomePath(homePath));
     var skillFile = new File(new File(new File(codexHome, "skills"), STUDIO_ROUTER_SKILL_SLUG), "SKILL.md");
-    var write = writeManagedTextFile(skillFile, buildConvertigoStudioRouterSkill(), dryRun === true);
+    var write = writeManagedTextFile(skillFile, buildConvertigoStudioRouterSkill(legacyOnly === true), dryRun === true);
     return {
       status: write.status,
       path: filePath(skillFile)
@@ -2986,6 +2997,9 @@
 
   function installAgentSkills(options, provider, homePath) {
     options = options || {};
+    if (normalizeProvider(provider) === "claude" && typeof installClaudeSkills === "function") {
+      return installClaudeSkills(options, homePath);
+    }
     if (normalizeProvider(provider) === "codex") {
       var codexReport;
       if (normalizeSkillProfile(options) !== "nocode") {
@@ -3744,6 +3758,9 @@
     if (provider === "mistral-vibe" || provider === "vibe-acp") {
       return "vibe";
     }
+    if (provider === "claude-code" || provider === "anthropic-claude" || provider === "anthropic" || provider === "claude-cli") {
+      return "claude";
+    }
     return provider.length ? provider.replace(/[^a-z0-9_.-]/g, "_") : "vibe";
   }
 
@@ -3754,6 +3771,9 @@
     }
     if (provider === "vibe") {
       return "Vibe";
+    }
+    if (provider === "claude") {
+      return "Claude";
     }
     return provider;
   }
@@ -5713,6 +5733,20 @@
       info.endpoint = match ? match[1] : "";
       var bearerMatch = block.match(/api_key_env\s*=\s*["']([^"']+)["']/);
       info.bearerTokenEnv = bearerMatch ? bearerMatch[1] : "";
+      var viewerPortMatch = block.match(/["']X-Convertigo-Viewer-Debug-Port["']\s*=\s*["'](\d+)["']/);
+      info.viewerDebugPort = viewerPortMatch ? Number(viewerPortMatch[1]) : 0;
+      break;
+    }
+    info.playwrightEndpoint = "";
+    var playwrightPattern = /\[\[mcp_servers\]\]([\s\S]*?)(?=\n\[\[mcp_servers\]\]|$)/g;
+    var playwrightMatch;
+    while ((playwrightMatch = playwrightPattern.exec(text)) !== null) {
+      var playwrightBlock = playwrightMatch[1];
+      if (!/name\s*=\s*["']playwright["']/.test(playwrightBlock)) {
+        continue;
+      }
+      var cdpMatch = playwrightBlock.match(/"--cdp-endpoint",\s*"([^"]+)"/);
+      info.playwrightEndpoint = cdpMatch ? cdpMatch[1] : "";
       break;
     }
     info.valid = info.hasMcpServers && info.hasConvertigoServer && info.hasHttpTransport && info.endpoint.length > 0;
@@ -5738,7 +5772,8 @@
         thinking: "high",
         temperature: "1.0",
         inputPrice: "1.5",
-        outputPrice: "7.5"
+        outputPrice: "7.5",
+        supportsImages: true
       };
     }
     if (lower === "mistral-medium-3.5") {
@@ -5749,7 +5784,8 @@
         thinking: "high",
         temperature: "1.0",
         inputPrice: "1.5",
-        outputPrice: "7.5"
+        outputPrice: "7.5",
+        supportsImages: true
       };
     }
     if (lower === "zai-glm-5-2" || lower === "glm-5-2") {
@@ -5761,7 +5797,8 @@
         temperature: "1.0",
         inputPrice: "1.4",
         outputPrice: "4.4",
-        builtIn: false
+        builtIn: false,
+        supportsImages: VIBE_GLM_SUPPORTS_IMAGES
       };
     }
     return {
@@ -5794,6 +5831,10 @@
       removed.push("zai-glm-5-2");
       return match.replace(/(alias\s*=\s*["'])zai-glm-5-2(["'])/, "$1glm-5-2$2");
     });
+    var glmImagesLine = "supports_images = " + (VIBE_GLM_SUPPORTS_IMAGES ? "true" : "false");
+    result = result.replace(/((?:^|\n)\[\[models\]\]\s*\nname\s*=\s*["']zai-glm-5-2["'][\s\S]*?)(supports_images\s*=\s*(?:true|false))/g, function (match, head, current) {
+      return current === glmImagesLine ? match : head + glmImagesLine;
+    });
     var migratedActiveModel = false;
     if (removed.length && /^\s*active_model\s*=\s*["']zai-glm-5-2["']/m.test(result)) {
       result = result.replace(/^(\s*active_model\s*=\s*["'])zai-glm-5-2(["'])/m, "$1glm-5-2$2");
@@ -5801,7 +5842,7 @@
     }
     if (!hasGlm) {
       // GLM can be account-routed, but is not a guaranteed CLI default.
-      result = result.replace(/\s*$/, "") + '\n\n[[models]]\nname = "zai-glm-5-2"\nprovider = "mistral"\nalias = "glm-5-2"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\n';
+      result = result.replace(/\s*$/, "") + '\n\n[[models]]\nname = "zai-glm-5-2"\nprovider = "mistral"\nalias = "glm-5-2"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\nsupports_images = ' + (VIBE_GLM_SUPPORTS_IMAGES ? 'true' : 'false') + '\n';
     }
     return {
       text: result.replace(/\n{3,}/g, "\n\n"),
@@ -5865,6 +5906,7 @@
         'input_price = ' + spec.inputPrice,
         'output_price = ' + spec.outputPrice,
         spec.thinking.length ? 'thinking = "' + tomlString(spec.thinking) + '"' : '',
+        'supports_images = ' + (spec.supportsImages === true ? 'true' : 'false'),
         'auto_compact_threshold = 200000',
         ''
       );
@@ -5877,6 +5919,7 @@
       'startup_timeout_sec = 60.0',
       ''
     );
+    var viewerDebugPort = intValue(options && options.viewerDebugPort, 0, 0, 65535);
     if (usesProtectedConvertigoMcp(mcpEndpoint, options)) {
       lines.push(
         '[mcp_servers.auth]',
@@ -5886,6 +5929,29 @@
         'api_key_format = "Bearer {token}"',
         ''
       );
+      if (viewerDebugPort >= 1024) {
+        lines.push(
+          '[mcp_servers.auth.headers]',
+          '"X-Convertigo-Viewer-Debug-Port" = "' + String(viewerDebugPort) + '"',
+          ''
+        );
+      }
+    }
+    var playwright = vibePlaywrightServer(options);
+    if (playwright !== null) {
+      lines.push(
+        '# The Studio JxBrowser CDP endpoint is written here because this Vibe home is viewer-scoped.',
+        '[[mcp_servers]]',
+        'name = "playwright"',
+        'transport = "stdio"',
+        'command = "' + tomlString(playwright.command) + '"',
+        'args = ' + tomlArray(playwright.args),
+        'startup_timeout_sec = 30.0',
+        '',
+        '[mcp_servers.env]',
+        'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"',
+        ''
+      );
     }
     var text = migrateManagedVibeModelPresets(lines.join("\n")).text;
     return {
@@ -5893,6 +5959,57 @@
       model: spec.activeModel,
       bytes: writeTextFile(configFile, text)
     };
+  }
+
+  function vibePlaywrightEnabled(options) {
+    options = options || {};
+    if (boolValue(options.disablePlaywrightMcp || options.skipPlaywrightMcpConfig, false)) {
+      return false;
+    }
+    if (normalizeSkillProfile(options) === "nocode") {
+      return false;
+    }
+    if (!resolvePlaywrightMcpCdpEndpoint(options).length) {
+      return false;
+    }
+    if (trim(options.vibeHome).length) {
+      return true;
+    }
+    var scopeOption = trim(options.vibeHomeScope || options.homeScope || options.scope);
+    return !scopeOption.length || normalizeScope(scopeOption) === "conversation";
+  }
+
+  function vibePlaywrightServer(options) {
+    options = options || {};
+    if (!vibePlaywrightEnabled(options)) {
+      return null;
+    }
+    var workspaceRoot = resolveWorkspaceRoot(options);
+    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
+    if (!new File(childPath(childPath(codexNodeModulesPath(installDir), "@playwright/mcp"), "package.json")).isFile()) {
+      return null;
+    }
+    // Vibe spawns stdio MCP servers from its Python process, whose PATH does not
+    // include the Studio Node runtime: run the npx launcher through the explicit
+    // node binary instead of relying on its shebang.
+    var npx = codexPlaywrightMcpCommand(options, installDir);
+    var args = ["--prefix", codexNpmPrefix(installDir), codexPlaywrightMcpBinaryName(options), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"];
+    var node = detectNodeRuntime(options);
+    if (node.found && /\.js$/i.test(npx)) {
+      return { command: node.path, args: [npx].concat(args) };
+    }
+    return { command: npx, args: args };
+  }
+
+  function ensureVibePlaywrightRuntime(options, installDir) {
+    if (boolValue(options.skipPlaywrightInstall || options.skipVibePlaywrightInstall, false)) {
+      return { attempted: false, installed: false, reused: false, skipped: true, method: "skipped", steps: [], timestamp: now() };
+    }
+    try {
+      return ensureCodexPlaywrightRuntime(options, installDir);
+    } catch (playwrightError) {
+      return { attempted: true, installed: false, reused: false, skipped: false, method: "npm", error: String(playwrightError), steps: [], timestamp: now() };
+    }
   }
 
   function detectRuntime(options) {
@@ -7013,7 +7130,7 @@
       sessionIds: {},
       tombstones: []
     };
-    var providers = ["codex", "vibe"];
+    var providers = ["codex", "vibe", "claude"];
     for (var providerIndex = 0; providerIndex < providers.length; providerIndex++) {
       var provider = providers[providerIndex];
       var usersRoot = new File(new File(new File(workspaceRoot, "agents"), provider), "users");
@@ -7055,12 +7172,12 @@
           if (externalSessionId.length) {
             references.sessionIds[externalSessionId] = true;
           }
-          if (provider === "codex" && conversationId.length) {
+          if ((provider === "codex" || provider === "claude") && conversationId.length) {
             var expected = new File(
               new File(
                 new File(
                   new File(
-                    new File(workspaceRoot, "agents/codex"),
+                    new File(workspaceRoot, "agents/" + provider),
                     "homes/users"
                   ),
                   userDir.getName()
@@ -7071,7 +7188,7 @@
             );
             addProtectedHome(references.homePaths, expected);
           }
-          addProtectedHome(references.homePaths, record.codexHome || record.agentHome || "");
+          addProtectedHome(references.homePaths, record.codexHome || record.claudeHome || record.agentHome || "");
         }
       }
     }
@@ -7089,20 +7206,25 @@
       }
     }
 
-    var pidDir = codexPidRegistryDir(workspaceRoot);
-    if (pidDir !== null && pidDir.isDirectory()) {
+    var pidProviders = ["codex", "claude"];
+    for (var pidProviderIndex = 0; pidProviderIndex < pidProviders.length; pidProviderIndex++) {
+      var pidDir = providerPidRegistryDir(workspaceRoot, pidProviders[pidProviderIndex]);
+      if (pidDir === null || !pidDir.isDirectory()) {
+        continue;
+      }
       var pidFiles = pidDir.listFiles();
-      if (pidFiles !== null) {
-        for (var pidIndex = 0; pidIndex < pidFiles.length; pidIndex++) {
-          var pidFile = pidFiles[pidIndex];
-          var pidRecord = readJsonFile(pidFile);
-          var pid = pidRecord === null ? 0 : Number(pidRecord.pid || 0);
-          if (pid > 0 && processHandleAlive(pid)) {
-            references.conversationIds[trim(pidRecord.handle)] = true;
-            addProtectedHome(references.homePaths, pidRecord.codexHome || "");
-          } else {
-            try { pidFile["delete"](); } catch (_ignoreDeadCleanupPidFile) {}
-          }
+      if (pidFiles === null) {
+        continue;
+      }
+      for (var pidIndex = 0; pidIndex < pidFiles.length; pidIndex++) {
+        var pidFile = pidFiles[pidIndex];
+        var pidRecord = readJsonFile(pidFile);
+        var pid = pidRecord === null ? 0 : Number(pidRecord.pid || 0);
+        if (pid > 0 && processHandleAlive(pid)) {
+          references.conversationIds[trim(pidRecord.handle)] = true;
+          addProtectedHome(references.homePaths, pidRecord.codexHome || "");
+        } else {
+          try { pidFile["delete"](); } catch (_ignoreDeadCleanupPidFile) {}
         }
       }
     }
@@ -7334,6 +7456,9 @@
     }
     if (!provider.length || provider === "vibe") {
       providers.push(vibeSettings(options));
+    }
+    if ((!provider.length || provider === "claude") && typeof claudeSettings === "function") {
+      providers.push(claudeSettings(options));
     }
     var settingsWorkspaceRoot = trim(options.workspaceRoot);
     if (!settingsWorkspaceRoot.length) {
@@ -7678,6 +7803,10 @@
   }
 
   function codexPidRegistryDir(workspaceRoot) {
+    return providerPidRegistryDir(workspaceRoot, "codex");
+  }
+
+  function providerPidRegistryDir(workspaceRoot, provider) {
     var root = trim(workspaceRoot);
     if (!root.length) {
       root = engineWorkspaceRoot();
@@ -7685,15 +7814,24 @@
     if (!root.length) {
       return null;
     }
-    return new File(new File(new File(root, "agents"), "codex"), "app-server-pids");
+    var providerDir = normalizeProvider(provider || "codex");
+    return new File(new File(new File(root, "agents"), providerDir), "app-server-pids");
   }
 
   function codexPidFile(workspaceRoot, handle) {
-    var dir = codexPidRegistryDir(workspaceRoot);
+    return providerPidFile(workspaceRoot, "codex", handle);
+  }
+
+  function providerPidFile(workspaceRoot, provider, handle) {
+    var dir = providerPidRegistryDir(workspaceRoot, provider);
     if (dir === null) {
       return null;
     }
     return new File(dir, safePathPart(handle) + ".json");
+  }
+
+  function entryUsesPidTree(entry) {
+    return entry && (entry.protocol === "codex-app-server" || entry.protocol === "claude-stream-json");
   }
 
   function registryContainsPid(pid) {
@@ -7710,7 +7848,7 @@
   }
 
   function writeEntryPidFile(entry) {
-    if (!entry || entry.protocol !== "codex-app-server") {
+    if (!entryUsesPidTree(entry)) {
       return;
     }
     var pid = processPid(entry.process);
@@ -7719,7 +7857,7 @@
     }
     entry.pid = pid;
     if (!trim(entry.pidFile).length) {
-      var file = codexPidFile(entry.workspaceRoot || "", entry.handle);
+      var file = providerPidFile(entry.workspaceRoot || "", entry.provider, entry.handle);
       entry.pidFile = file === null ? "" : filePath(file);
     }
     if (!trim(entry.pidFile).length) {
@@ -7749,7 +7887,11 @@
   }
 
   function sweepCodexAppServerPidFiles(workspaceRoot, maxIdleMs) {
-    var dir = codexPidRegistryDir(workspaceRoot);
+    return sweepProviderPidFiles(workspaceRoot, "codex", maxIdleMs);
+  }
+
+  function sweepProviderPidFiles(workspaceRoot, provider, maxIdleMs) {
+    var dir = providerPidRegistryDir(workspaceRoot, provider);
     var result = { stopped: [], kept: [] };
     if (dir === null || !dir.isDirectory()) {
       return result;
@@ -7788,7 +7930,7 @@
   }
 
   function writeJson(entry, message) {
-    if (entry && entry.protocol === "codex-app-server" && message && message.jsonrpc) {
+    if (entry && (entry.protocol === "codex-app-server" || entry.protocol === "claude-stream-json") && message && message.jsonrpc) {
       delete message.jsonrpc;
     }
     var text = JSON.stringify(message);
@@ -8041,6 +8183,10 @@
       handleCodexAppServerLine(entry, line, streamName);
       return;
     }
+    if (entry.protocol === "claude-stream-json") {
+      handleClaudeStreamLine(entry, line, streamName);
+      return;
+    }
     if (entry.protocol === "codex-jsonl") {
       handleCodexLine(entry, line, streamName);
       return;
@@ -8136,6 +8282,68 @@
     return waitForPending(entry, pending, timeoutMs, true);
   }
 
+  function vibeImageBlocks(value, model) {
+    var report = { blocks: [], skipped: [] };
+    var paths = [];
+    // Sequence variables reach Rhino as java.lang.String objects, not JS
+    // strings: coerce everything that is not a JS array before parsing.
+    if (value !== null && typeof value !== "undefined" && Object.prototype.toString.call(value) !== "[object Array]") {
+      value = String(value);
+    }
+    var text = typeof value === "string" ? trim(value) : "";
+    if (value && typeof value !== "string" && typeof value.length !== "undefined") {
+      for (var v = 0; v < value.length; v++) {
+        paths.push(String(value[v]));
+      }
+    } else if (text.indexOf("[") === 0) {
+      paths = parseObject(text, []);
+    } else if (text.length) {
+      paths = text.split(/\s*[\n,;]\s*/);
+    }
+    var spec = vibeModelSpec(model);
+    for (var i = 0; i < paths.length; i++) {
+      var candidate = trim(paths[i] && paths[i].path ? paths[i].path : paths[i]);
+      if (!candidate.length) {
+        continue;
+      }
+      var file = new File(candidate);
+      var lower = candidate.toLowerCase();
+      var extension = lower.lastIndexOf(".") >= 0 ? lower.substring(lower.lastIndexOf(".") + 1) : "";
+      var mimeType = VIBE_IMAGE_MIME_TYPES[extension] || "";
+      if (!mimeType.length) {
+        continue;
+      }
+      if (!file.isFile()) {
+        report.skipped.push({ path: candidate, reason: "not_found" });
+        continue;
+      }
+      if (spec.supportsImages !== true) {
+        report.skipped.push({ path: candidate, reason: "model_without_vision", model: spec.activeModel });
+        continue;
+      }
+      if (Number(file.length()) > VIBE_MAX_IMAGE_BYTES) {
+        report.skipped.push({ path: candidate, reason: "too_large" });
+        continue;
+      }
+      if (report.blocks.length >= VIBE_MAX_IMAGES_PER_MESSAGE) {
+        report.skipped.push({ path: candidate, reason: "too_many" });
+        continue;
+      }
+      try {
+        var bytes = Files.readAllBytes(file.toPath());
+        report.blocks.push({
+          type: "image",
+          mimeType: mimeType,
+          data: String(Base64.getEncoder().encodeToString(bytes)),
+          uri: file.toURI().toString()
+        });
+      } catch (readError) {
+        report.skipped.push({ path: candidate, reason: String(readError) });
+      }
+    }
+    return report;
+  }
+
   function buildMcpServers(mcpEndpoint, options) {
     options = options || {};
     var headers = [];
@@ -8144,6 +8352,15 @@
       headers.push({
         name: "Authorization",
         value: "Bearer " + bearerToken
+      });
+    }
+    var viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
+    if (viewerDebugPort >= 1024 && normalizeSkillProfile(options) !== "nocode") {
+      // The session-level server can take precedence over config.toml, so the
+      // leased Studio viewer debug port must travel with it as well.
+      headers.push({
+        name: "X-Convertigo-Viewer-Debug-Port",
+        value: String(viewerDebugPort)
       });
     }
     return [{
@@ -8299,7 +8516,7 @@
       }
     } catch (_ignoreWriterClose) {}
     var stoppedTree = false;
-    if (entry && entry.protocol === "codex-app-server" && Number(entry.pid || 0) > 0) {
+    if (entryUsesPidTree(entry) && Number(entry.pid || 0) > 0) {
       try {
         stoppedTree = destroyPidTree(Number(entry.pid));
       } catch (_ignoreDestroyTree) {}

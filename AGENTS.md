@@ -55,6 +55,56 @@ same context.
   update affects new agent processes/conversations; an already running process
   may keep its previous model catalog until it is restarted.
 
+## Claude Code Integration
+
+- Main file: `js/agent_bridge_claude.js`, loaded after the Codex file by
+  `js/vibe_agent_bridge.js`. Sequences: `agent_claude_setup`, `agent_claude_start`,
+  `agent_claude_prompt`, `agent_claude_close`.
+- Protocol `claude-stream-json`: one resident `claude -p` process per handle,
+  fed on stdin with `{"type":"user",...}` messages; `--resume <sessionId>` on
+  restart. Model or effort changes restart the process, never a second one.
+- Managed home is `<workspaceRoot>/agents/claude/homes/users/<id>/claude-home`
+  (`CLAUDE_CONFIG_DIR`). MCP is declared in `convertigo-mcp.json` with
+  `Bearer ${CONVERTIGO_MCP_TOKEN}` and passed with `--strict-mcp-config`; the
+  token only exists in the process environment.
+- Skills are delegated to `lib_ConvertigoMCP._setupClaude` with
+  `configureMcp=false`; the bridge adds the legacy-only `convertigo-studio`
+  router. Claude never receives the Flow pack or `convertigo-nocode` in the
+  Studio profile.
+- Authentication mirrors Codex: sync `.credentials.json` from `~/.claude` or the
+  user-scoped home, or import it from the macOS keychain; verify with
+  `claude auth status`. Never log or return token values.
+- Playwright viewer automation is not wired for Claude yet; `CLAUDE.md` tells
+  the agent to report unvalidated browser proof instead of bypassing.
+- Tests: `node tests/claude_provider.test.js`.
+
+## Claude and Vibe viewer automation
+
+- Claude and Vibe reuse the Codex viewer wiring: `ensureManagedViewerDebugPort`
+  leases one JxBrowser debug port per conversation, the managed home becomes
+  conversation-scoped, `X-Convertigo-Viewer-Debug-Port` is sent to the
+  Convertigo MCP, and `@playwright/mcp` is installed in the provider npm prefix
+  (`agents/claude/npm`, `agents/vibe/npm`) and declared as a stdio MCP server
+  bound to `--cdp-endpoint http://127.0.0.1:<port> --shared-browser-context`.
+- Claude declares it in the generated `convertigo-mcp.json`; Vibe declares it in
+  the managed `config.toml` (`transport = "stdio"`). Settings probes
+  (`discoverVibeSettings`) must pass `disableViewerDebugPortReservation` so they
+  never lease ports.
+- Playwright tool names are `mcp__playwright__browser_*` for Claude; the Flow
+  capability pack still requires Codex.
+
+## Vibe image attachments
+
+- `agent_vibe_prompt` accepts `images` (JSON array of local paths). `vibePrompt`
+  turns PNG/JPEG/GIF/WebP files into ACP image blocks (10 MB, 8 images max)
+  only when `vibeModelSpec(model).supportsImages` is true; otherwise the images
+  are skipped, a `warning` event is emitted and the prompt tells the agent to
+  say the model cannot see images.
+- Verified 2026-09-14: `mistral-vibe-cli-latest` (vibe-thinking, Mistral Medium
+  3.5) accepts images; `zai-glm-5-2` through Mistral returns 400 "Image input is
+  not enabled for this model". `VIBE_GLM_SUPPORTS_IMAGES` records that fact and
+  `migrateManagedVibeModelPresets` realigns existing managed presets.
+
 ## Codex Integration
 
 - Main files:

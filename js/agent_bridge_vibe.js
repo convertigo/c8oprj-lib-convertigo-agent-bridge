@@ -1,7 +1,7 @@
 // Vibe ACP provider implementation.
 // Loaded by vibe_agent_bridge.js after agent_bridge_common.js.
   C8O.agentBridge.vibeSetup = function (options) {
-    options = options || {};
+    options = optionsWithRequestFallbacks(options || {});
     var install = boolValue(options.install, false);
     var forceVibeInstall = boolValue(options.forceVibeInstall || options.forceInstall || options.force, false);
     var configure = boolValue(options.configure, false);
@@ -42,9 +42,22 @@
       }
       if (configure) {
         var expectedBearerEnv = usesProtectedConvertigoMcp(setup.mcpEndpoint, options) ? mcpBearerTokenEnv(options) : "";
+        var expectedViewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
+        if (vibePlaywrightEnabled(options) && !new File(childPath(childPath(codexNodeModulesPath(setup.installDir), "@playwright/mcp"), "package.json")).isFile()) {
+          var vibePlaywright = ensureVibePlaywrightRuntime(options, setup.installDir);
+          if (vibePlaywright.error) {
+            messages.push("Playwright MCP is not available in the managed Vibe runtime: " + vibePlaywright.error);
+          } else if (vibePlaywright.installed === true) {
+            messages.push("Playwright MCP installed in the managed Vibe runtime.");
+          }
+        }
+        var expectedPlaywright = vibePlaywrightServer(options);
+        var expectedPlaywrightEndpoint = expectedPlaywright === null ? "" : resolvePlaywrightMcpCdpEndpoint(options);
         if (setup.config.selected.valid
             && trim(setup.config.selected.endpoint) === vibeMcpTransportEndpoint(setup.mcpEndpoint)
-            && trim(setup.config.selected.bearerTokenEnv) === expectedBearerEnv) {
+            && trim(setup.config.selected.bearerTokenEnv) === expectedBearerEnv
+            && Number(setup.config.selected.viewerDebugPort || 0) === (expectedBearerEnv.length ? expectedViewerDebugPort : 0)
+            && trim(setup.config.selected.playwrightEndpoint) === expectedPlaywrightEndpoint) {
           messages.push("Local VIBE_HOME config reused: " + setup.config.selected.path);
         } else {
           var written = writeLocalVibeConfig(setup.vibeHome, setup.mcpEndpoint, options.model || options.agentModel, options);
@@ -243,19 +256,41 @@
   };
 
   C8O.agentBridge.vibeStart = function (options) {
-    options = options || {};
+    options = optionsWithRequestFallbacks(options || {});
     var requestedModel = trim(options.model || options.agentModel);
     var handle = trim(options.handle) || makeHandle("vibe");
+    try {
+      ensureManagedViewerDebugPort(options);
+    } catch (viewerDebugPortError) {
+      return { ok: false, status: "error", phase: "viewer_debug_port", error: String(viewerDebugPortError), timestamp: now() };
+    }
+    if (intValue(options.viewerDebugPort, 0, 0, 65535) >= 1024 && !trim(options.vibeHome).length) {
+      options.vibeHomeScope = "conversation";
+      options.homeScope = "conversation";
+    }
     var registry = getRegistry();
     var existing = registry.get(handle);
     var timeoutMs = intValue(options.requestTimeoutMs, 60000, 1000, 600000);
     if (existing !== null && typeof existing !== "undefined" && processAlive(existing.process)) {
       var requestedMcpTokenFingerprint = mcpBearerTokenFingerprint(options);
+      var requestedPlaywrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
+      var activePlaywrightCdpEndpoint = trim(existing.playwrightCdpEndpoint || existing.viewerCdpEndpoint);
+      var viewerChanged = requestedPlaywrightCdpEndpoint.length && activePlaywrightCdpEndpoint !== requestedPlaywrightCdpEndpoint;
       if (requestedMcpTokenFingerprint.length
           && trim(existing.mcpBearerTokenFingerprint) !== requestedMcpTokenFingerprint) {
         pushEvent(existing, "warning", {
           phase: "mcp/auth",
           message: "Vibe must restart to renew its managed Convertigo MCP authorization."
+        });
+        stopEntry(existing, true);
+        existing = null;
+      } else if (viewerChanged) {
+        pushEvent(existing, "warning", {
+          phase: "viewer",
+          reason: "playwright_endpoint_changed",
+          message: "Vibe must restart to refresh the managed Playwright MCP viewer endpoint.",
+          previousEndpoint: activePlaywrightCdpEndpoint,
+          requestedEndpoint: requestedPlaywrightCdpEndpoint
         });
         stopEntry(existing, true);
         existing = null;
@@ -311,6 +346,13 @@
       agentProfile: options.agentProfile,
       skillProfile: options.skillProfile,
       assistantContext: options.assistantContext,
+      viewerDebugPort: options.viewerDebugPort,
+      browserDebugUrl: options.browserDebugUrl,
+      browserDevToolsJsonUrl: options.browserDevToolsJsonUrl,
+      browserDevToolsWebSocketUrl: options.browserDevToolsWebSocketUrl,
+      playwrightCdpEndpoint: options.playwrightCdpEndpoint || options.viewerCdpEndpoint,
+      playwrightMcpEndpoint: options.playwrightMcpEndpoint,
+      skipPlaywrightInstall: options.skipPlaywrightInstall || options.skipVibePlaywrightInstall,
       configure: autoConfigure,
       startupPresenceOnly: true
     });
@@ -335,6 +377,10 @@
     if (vibeHome.length) {
       env.VIBE_HOME = vibeHome;
     }
+    var vibeNodePath = nodeRuntimeSearchPath(options);
+    if (vibeNodePath.length && !trim(env.PATH).length) {
+      env.PATH = vibeNodePath + String(File.pathSeparator) + String(System.getenv("PATH") || "");
+    }
     applyManagedMcpEnvironment(env, options);
     var cwd = normalizeDirectory(options.cwd, setup.setup.workspaceRoot, setup.setup.workspaceRoot);
     var mcpEndpoint = trim(options.mcpEndpoint) || setup.setup.mcpEndpoint || resolveMcpEndpoint(options);
@@ -344,6 +390,11 @@
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
+    entry.viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
+    entry.browserDebugUrl = trim(options.browserDebugUrl);
+    entry.playwrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
+    entry.viewerCdpEndpoint = trim(options.viewerCdpEndpoint || entry.playwrightCdpEndpoint);
+    entry.playwrightMcpEnabled = trim(setup.setup.config && setup.setup.config.selected && setup.setup.config.selected.playwrightEndpoint).length > 0;
     registry.put(handle, entry);
 
     try {
@@ -361,7 +412,10 @@
           injectedKeys: credentials.injectedKeys,
           sources: credentials.sources
         },
-        mcpEndpoint: mcpEndpoint
+        mcpEndpoint: mcpEndpoint,
+        viewerDebugPort: entry.viewerDebugPort,
+        playwrightCdpEndpoint: entry.playwrightCdpEndpoint,
+        playwrightMcpEnabled: entry.playwrightMcpEnabled === true
       });
 
       entry.phase = "initialize";
@@ -466,6 +520,8 @@
         nocodeMcpTokenHandle: options.nocodeMcpTokenHandle || options.noCodeMcpTokenHandle,
         install: false,
         autoConfigure: true,
+        disableViewerDebugPortReservation: true,
+        disablePlaywrightMcp: true,
         requestTimeoutMs: options.settingsTimeoutMs || options.requestTimeoutMs || 60000
       });
       if (started && started.ok !== false && started.providerSettings) {
@@ -507,12 +563,30 @@
     }
     promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
     var messageId = trim(options.messageId);
+    var promptBlocks = [{
+      type: "text",
+      text: promptText
+    }];
+    var images = vibeImageBlocks(firstDefinedOption(options, ["images", "imagePaths", "attachments"]) || optionOrRequest(options, "images"), entry.model);
+    for (var imageIndex = 0; imageIndex < images.blocks.length; imageIndex++) {
+      promptBlocks.push(images.blocks[imageIndex]);
+    }
+    if (images.skipped.length) {
+      pushEvent(entry, "warning", {
+        phase: "prompt/images",
+        message: "Some attached images were not sent to Vibe: " + JSON.stringify(images.skipped),
+        skipped: images.skipped,
+        provider: "vibe"
+      });
+      var noVision = images.skipped.filter(function (item) { return item.reason === "model_without_vision"; });
+      if (noVision.length) {
+        promptBlocks[0].text += "\n\nNote from the Agent Bridge: " + noVision.length + " attached image(s) could not be sent to the active model `"
+          + trim(noVision[0].model) + "` because it has no image input on this account. Tell the user that this model cannot see images and that Mistral Medium, Codex, or Claude can, then continue with the text of the request.";
+      }
+    }
     var params = {
       sessionId: entry.sessionId,
-      prompt: [{
-        type: "text",
-        text: promptText
-      }]
+      prompt: promptBlocks
     };
     if (messageId.length) {
       params.messageId = messageId;
@@ -523,7 +597,8 @@
       pushEvent(entry, "turn/start", {
         requestId: pending.id,
         messageId: messageId,
-        textLength: promptText.length
+        textLength: promptText.length,
+        imageCount: images.blocks.length
       });
       var wait = boolValue(options.waitForCompletion, false);
       if (wait) {
