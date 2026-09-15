@@ -380,7 +380,9 @@ venv gere et `VIBE_HOME` = home scope `user`. Le script cree la tentative de
 connexion Mistral AI Studio, ecrit `C8O_SIGN_IN_URL <url>` (repris dans
 `verificationUrl`), attend la confirmation navigateur puis enregistre
 `MISTRAL_API_KEY` dans `<VIBE_HOME>/.env` (mode 600). La cle n'apparait jamais
-dans la sortie du bridge. `loginStatus=true` suit le processus
+dans la sortie du bridge. Le suivi de la tentative tolere la limitation de debit
+de Mistral (HTTP 429 apres une minute) avec un recul progressif jusqu'a
+l'expiration ; sous Windows le script ouvre lui-meme le navigateur par defaut. `loginStatus=true` suit le processus
 (`waiting_for_login`, `authenticated`, `error`), abandonne apres 15 minutes.
 Les homes scope `conversation` recuperent ensuite ce `.env` par le bootstrap
 (source la plus recente entre le home scope `user` et `~/.vibe`). Sans

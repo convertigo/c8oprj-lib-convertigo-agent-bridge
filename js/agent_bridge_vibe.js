@@ -689,7 +689,7 @@
   // the user scoped VIBE_HOME `.env` (never in the bridge output).
 
   var VIBE_LOGIN_SCRIPT_NAME = "c8o_vibe_browser_login.py";
-  var VIBE_LOGIN_SCRIPT_VERSION = "1";
+  var VIBE_LOGIN_SCRIPT_VERSION = "3";
 
   function vibeLoginScriptSource() {
     return [
@@ -739,7 +739,7 @@
       "        return 2",
       "    try:",
       "        from vibe.core.config import DEFAULT_PROVIDERS",
-      "        from vibe.setup.auth import BrowserSignInError, BrowserSignInService, HttpBrowserSignInGateway",
+      "        from vibe.setup.auth import BrowserSignInError, BrowserSignInErrorCode, BrowserSignInService, HttpBrowserSignInGateway",
       "    except Exception as exc:",
       "        emit('C8O_LOGIN_ERROR', 'Vibe browser sign-in is not available in this runtime: ' + str(exc))",
       "        return 3",
@@ -749,23 +749,56 @@
       "        return 3",
       "    env_key = provider.api_key_env_var or 'MISTRAL_API_KEY'",
       "",
+      "    async def wait_for_completion(gateway, attempt):",
+      "        # Mistral rate-limits the poll endpoint (HTTP 429 after ~1 minute at 3 s);",
+      "        # Vibe's own service gives up after 3 consecutive failures, so poll more",
+      "        # slowly and back off on failures until the attempt expires.",
+      "        from datetime import UTC, datetime",
+      "        delay = 5.0",
+      "        while datetime.now(UTC) < attempt.expires_at:",
+      "            try:",
+      "                result = await gateway.poll(attempt.poll_url)",
+      "            except BrowserSignInError as exc:",
+      "                if exc.code is not BrowserSignInErrorCode.POLL_FAILED:",
+      "                    raise",
+      "                delay = min(delay * 2, 30.0)",
+      "                await asyncio.sleep(delay)",
+      "                continue",
+      "            delay = 5.0",
+      "            if result.status == 'pending':",
+      "                await asyncio.sleep(delay)",
+      "                continue",
+      "            if result.status == 'completed' and result.exchange_token:",
+      "                return result.exchange_token",
+      "            raise BrowserSignInError('Browser sign-in ' + str(result.status) + ((': ' + result.message) if result.message else '') + '.', code=BrowserSignInErrorCode.UNKNOWN_STATE)",
+      "        raise BrowserSignInError('Browser sign-in timed out.', code=BrowserSignInErrorCode.TIMED_OUT)",
+      "",
       "    async def run():",
-      "        service = BrowserSignInService(HttpBrowserSignInGateway(",
+      "        gateway = HttpBrowserSignInGateway(",
       "            browser_base_url=provider.browser_auth_base_url,",
       "            api_base_url=provider.browser_auth_api_base_url,",
-      "        ))",
+      "        )",
+      "        service = BrowserSignInService(gateway)",
       "        try:",
       "            attempt = await service.start_attempt()",
       "            emit('C8O_SIGN_IN_URL', attempt.sign_in_url)",
       "            emit('C8O_SIGN_IN_EXPIRES_AT', attempt.expires_at.isoformat())",
-      "            return await service.complete_attempt(attempt)",
+      "            if os.environ.get('C8O_VIBE_OPEN_BROWSER') == '1':",
+      "                try:",
+      "                    import webbrowser",
+      "                    emit('C8O_BROWSER_OPENED', str(webbrowser.open(attempt.sign_in_url)))",
+      "                except Exception as exc:",
+      "                    emit('C8O_BROWSER_OPEN_FAILED', str(exc))",
+      "            exchange_token = await wait_for_completion(gateway, attempt)",
+      "            return await gateway.exchange(attempt.process_id, exchange_token, attempt.code_verifier)",
       "        finally:",
       "            await service.aclose()",
       "",
       "    try:",
       "        api_key = asyncio.run(run())",
       "    except BrowserSignInError as exc:",
-      "        emit('C8O_LOGIN_ERROR', str(exc))",
+      "        cause = exc.__cause__",
+      "        emit('C8O_LOGIN_ERROR', str(exc) + (' (' + type(cause).__name__ + ': ' + str(cause) + ')' if cause is not None else ''))",
       "        return 4",
       "    except Exception as exc:",
       "        emit('C8O_LOGIN_ERROR', type(exc).__name__ + ': ' + str(exc))",
@@ -921,6 +954,11 @@
       PYTHONUNBUFFERED: "1",
       PYTHONIOENCODING: "utf-8"
     };
+    if (isWindows()) {
+      // Like Claude Code on Windows, let the helper open the default browser itself;
+      // the Assistant still receives the URL and may open it too.
+      env.C8O_VIBE_OPEN_BROWSER = "1";
+    }
     var nodePath = nodeRuntimeSearchPath(loginOptions);
     if (nodePath.length) {
       env.PATH = nodePath + String(File.pathSeparator) + String(System.getenv("PATH") || "");

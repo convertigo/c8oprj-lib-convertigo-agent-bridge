@@ -236,7 +236,9 @@ console.log("Vibe image attachment contract OK");
 // The Vibe login helper drives the Mistral browser sign-in headlessly and never prints the key.
 {
   const script = vibeLoginScriptSource();
-  assert.match(script, /from vibe\.setup\.auth import BrowserSignInError, BrowserSignInService, HttpBrowserSignInGateway/);
+  assert.match(script, /from vibe\.setup\.auth import BrowserSignInError, BrowserSignInErrorCode, BrowserSignInService, HttpBrowserSignInGateway/);
+  assert.match(script, /delay = min\(delay \* 2, 30\.0\)/, "poll failures (HTTP 429) must back off instead of aborting");
+  assert.match(script, /C8O_VIBE_OPEN_BROWSER/);
   assert.match(script, /emit\('C8O_SIGN_IN_URL', attempt\.sign_in_url\)/);
   assert.match(script, /emit\('C8O_LOGIN_COMPLETED', env_key\)/);
   assert.match(script, /write_env\(pathlib\.Path\(home\) \/ '\.env', env_key, api_key\)/);
