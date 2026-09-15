@@ -126,6 +126,13 @@ same context.
   the Codex process environment, and writes `bearer_token_env_var` to
   `codex-home/config.toml`; never write the raw token to config files, prompts,
   logs, or conversation records.
+- Embedded NoCode MCP requests carry `X-Convertigo-Agent-Profile: nocode`.
+  The MCP filters its catalog and rejects tools outside the explicit no-code
+  allowlist. This is a capability restriction, not authentication: bearer
+  validation and C8Oforms ACLs remain mandatory. Studio requests are unchanged.
+  Synchronize a NoCode-only `AGENTS.md` for both Codex and Vibe; never suggest
+  fallback to generic requestable/project tools. Read existing forms through
+  `nocode-form-get` before advice or edits; empty updates are never reads.
 - For Studio/generalist sessions, the Assistant supplies an opaque handle for a
   short-lived `lib_ConvertigoMCP` token. Resolve it only from the shared server
   store, inject it as `CONVERTIGO_MCP_TOKEN`, and configure Codex or Vibe to

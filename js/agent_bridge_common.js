@@ -1587,6 +1587,23 @@
     var isNoCode = capabilityProfile.id === "nocode";
     var isFlow = capabilityProfile.id === "flow";
     var isVibe = normalizeProvider(provider) === "vibe";
+    if (isNoCode) {
+      return [
+        "# Convertigo No Code Agent Instructions",
+        "You are embedded in C8Oforms, not Eclipse Studio. Follow skills/convertigo-nocode/SKILL.md before working.",
+        "Use only nocode-form-* and nocode-baserow-* tools allowed by that skill, plus log-view for narrowly scoped diagnostics.",
+        "Never fall back to requestable-execute, databaseobject-*, project tools, batch wrappers, shell, raw HTTP, or filesystem access to read or modify forms.",
+        "Read an existing form with nocode-form-get using its document id before auditing, proposing improvements, or editing. Tool names may use underscores instead of hyphens.",
+        "Use the current form/page/element context as the default target. Never infer content from the form name alone. Read results describe the saved version, not unsaved editor changes.",
+        "A review or request for suggestions does not authorize mutations. Never use an empty edit/update as a read operation.",
+        "Authentication is supplied by the host. Never request, read, expose, or print credentials. On auth_required ask the user to reconnect; on form_unavailable explain that the form is missing or inaccessible without claiming a proven permission denial.",
+        "If the required no-code tool is unavailable, report the missing capability without bypassing it.",
+        "Use semantic nocode-form-edit operations for authorized edits. Preserve unrelated fields, pages and sources.",
+        "Pass reveal:true only to supported mutation tools when the host requests reveal. Never add it to a read.",
+        "Reply in the user's language, with short factual progress updates.",
+        "Provider: " + providerLabel(provider)
+      ].join("\n");
+    }
     return [
       "# Convertigo Agent Instructions",
       "",
@@ -2117,6 +2134,8 @@
     var timeoutLine = "startup_timeout_sec = 60";
     var enabledLine = "enabled = true";
     var guidanceHeaderEntry = '"X-Convertigo-Guidance-Version" = "' + tomlEscape(codexSkillGuidanceVersion(homePath, options)) + '"';
+    var noCodeProfileHeaderEntry = normalizeSkillProfile(options) === "nocode"
+      ? '"X-Convertigo-Agent-Profile" = "nocode"' : "";
     var revealModeHeaderEntry = revealModeEnabled(options, null)
       ? '"X-Convertigo-Reveal-Mode" = "true"'
       : "";
@@ -2156,6 +2175,13 @@
         }
       }
       var guidancePattern = /(["']X-Convertigo-Guidance-Version["']\s*=\s*)["'][^"']*["']/;
+      var profilePattern = /(["']X-Convertigo-Agent-Profile["']\s*=\s*)["'][^"']*["']/;
+      if (profilePattern.test(body)) {
+        body = body.replace(profilePattern, noCodeProfileHeaderEntry);
+        body = body.replace(/^\s*,\s*|\s*,\s*$/g, "").replace(/\s*,\s*,\s*/g, ", ");
+      } else if (noCodeProfileHeaderEntry.length) {
+        body = body.length ? body + ", " + noCodeProfileHeaderEntry : noCodeProfileHeaderEntry;
+      }
       var revealModePattern = /(["']X-Convertigo-Reveal-Mode["']\s*=\s*)["'][^"']*["']/;
       var viewerDebugPortPattern = /(["']X-Convertigo-Viewer-Debug-Port["']\s*=\s*)["'][^"']*["']/;
       var mcpSessionCookiePattern = /(["']Cookie["']\s*=\s*)["'][^"']*["']/;
@@ -2834,6 +2860,9 @@
             report.generated.push("config.toml");
           }
           report.message = delegated.message;
+          if (profile === "nocode" && report.dryRun !== true) {
+            writeManagedTextFile(new File(codexHome, "AGENTS.md"), agentSkillInstructions("codex", profile), false);
+          }
           return report;
         }
         if (delegated.attempted === true && delegated.message) {
@@ -2900,6 +2929,9 @@
         report.generated.push("config.toml");
       }
       report.message = skillLabel + " skill configured";
+      if (profile === "nocode" && report.dryRun !== true) {
+        writeManagedTextFile(new File(codexHome, "AGENTS.md"), agentSkillInstructions("codex", profile), false);
+      }
     } catch (e) {
       report.ok = false;
       report.error = String(e);
@@ -5867,6 +5899,7 @@
         'api_key_env = "' + tomlString(mcpBearerTokenEnv(options)) + '"',
         'api_key_header = "Authorization"',
         'api_key_format = "Bearer {token}"',
+        normalizeSkillProfile(options) === "nocode" ? 'headers = { "X-Convertigo-Agent-Profile" = "nocode" }' : '',
         ''
       );
     }
