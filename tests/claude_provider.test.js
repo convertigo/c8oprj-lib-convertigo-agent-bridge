@@ -271,3 +271,36 @@ console.log("Vibe image attachment contract OK");
   assert.equal(env.MCP_TIMEOUT, "60000");
   assert.equal(claudeRuntimeEnv({ claudeMcpToolTimeoutMs: "900000" }, "").MCP_TOOL_TIMEOUT, "900000");
 }
+
+// Convertigo gateway profile (LiteLLM per-user key) on the Vibe provider.
+{
+  assert.equal(vibeProfile({}), "mistral");
+  assert.equal(vibeProfile({ vibeProfile: "convertigo" }), "convertigo");
+  assert.equal(vibeProfile({ provider: "convertigo" }), "convertigo");
+  assert.equal(vibeProfile({ agentMode: "gateway" }), "convertigo");
+  assert.equal(withVibeProfile({ provider: "convertigo" }, "convertigo").provider, "vibe");
+  const spec = vibeGatewayModelSpec({});
+  assert.equal(spec.name, "mistral/zai-glm-5-2");
+  assert.equal(spec.alias, "glm-5-2");
+  assert.equal(spec.provider, "convertigo");
+  assert.equal(spec.thinking, "", "thinking stays off until the gateway allows reasoning_effort");
+  assert.equal(vibeGatewayModelSpec({ llmGatewayThinking: "high" }).thinking, "high");
+  assert.equal(convertigoGatewayUrl({ llmGatewayUrl: "https://gw.example/v1/" }), "https://gw.example/v1");
+  const toml = 'active_model = "glm-5-2"\n\n[[providers]]\nname = "convertigo"\napi_base = "https://llm.convertigo.com/v1"\napi_key_env_var = "CONVERTIGO_LLM_API_KEY"\n\n[[models]]\nname = "mistral/zai-glm-5-2"\nprovider = "convertigo"\nalias = "glm-5-2"\n';
+  assert.equal(parseVibeGatewayUrl(toml), "https://llm.convertigo.com/v1");
+  assert.equal(parseVibeGatewayUrl('[[providers]]\nname = "mistral"\napi_base = "https://api.mistral.ai/v1"\n'), "");
+  const untouched = migrateManagedVibeModelPresets(toml);
+  assert.equal(untouched.text, toml, "gateway configs must not receive the Mistral GLM preset");
+  assert.equal(untouched.added, false);
+  assert.equal(inspectVibeAuthentication("/nonexistent/gateway-home-" + Date.now(), "convertigo").action, "convertigo_key");
+  assert.match(vibeSource, /C8O\.agentBridge\.vibeGatewayKeyStore = function/);
+  assert.match(commonSource, /homes-convertigo/);
+}
+
+// Convertigo mode: listed first, announces its harness, key file fallback.
+{
+  assert.match(commonSource, /providers\.push\(vibeSettings\(withVibeProfile\(options, "convertigo"\)\)\);\s*\}\s*if \(!provider\.length \|\| provider === "codex"\)/);
+  assert.match(commonSource, /harness: "vibe",/);
+  assert.match(commonSource, /function readConvertigoGatewayKeyFile/);
+  assert.match(commonSource, /"agents"\), "convertigo"\), "llm-api-key"\)/);
+}

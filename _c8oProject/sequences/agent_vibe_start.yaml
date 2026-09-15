@@ -22,6 +22,10 @@ comment: Start a long-running vibe-acp process and create an ACP session.
       autoConfigure: typeof autoConfigure === "undefined" ? "" : autoConfigure,
       install: typeof install === "undefined" ? false : install,
       model: typeof model === "undefined" ? "" : model,
+      vibeProfile: typeof vibeProfile === "undefined" ? "" : vibeProfile,
+      llmGatewayUrl: typeof llmGatewayUrl === "undefined" ? "" : llmGatewayUrl,
+      llmGatewayModel: typeof llmGatewayModel === "undefined" ? "" : llmGatewayModel,
+      llmGatewayThinking: typeof llmGatewayThinking === "undefined" ? "" : llmGatewayThinking,
       reasoningEffort: typeof reasoningEffort === "undefined" ? "" : reasoningEffort,
       pythonPath: typeof pythonPath === "undefined" ? "" : pythonPath,
       pythonInstallDir: typeof pythonInstallDir === "undefined" ? "" : pythonInstallDir,
@@ -162,3 +166,15 @@ comment: Start a long-running vibe-acp process and create an ACP session.
 ↓nocodeMcpTokenHandle [variables.RequestableVariable-1788358991057]: 
   comment: Opaque server-memory handle for the C8Oforms NoCode MCP bearer token.
   description: Opaque server-memory handle for the C8Oforms NoCode MCP bearer token.
+↓vibeProfile [variables.RequestableVariable-1789560000011]: 
+  comment: 'Vibe profile: mistral (default) or convertigo (Convertigo LiteLLM gateway).'
+  description: 'Vibe profile: mistral (default) or convertigo (Convertigo LiteLLM gateway).'
+↓llmGatewayUrl [variables.RequestableVariable-1789560000013]: 
+  comment: 'Convertigo profile only: LiteLLM gateway base URL.'
+  description: 'Convertigo profile only: LiteLLM gateway base URL.'
+↓llmGatewayModel [variables.RequestableVariable-1789560000015]: 
+  comment: 'Convertigo profile only: gateway model name.'
+  description: 'Convertigo profile only: gateway model name.'
+↓llmGatewayThinking [variables.RequestableVariable-1789560000017]: 
+  comment: 'Convertigo profile only: thinking level (off, low, medium, high).'
+  description: 'Convertigo profile only: thinking level (off, low, medium, high).'

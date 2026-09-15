@@ -8,6 +8,14 @@
     if (boolValue(options.login || options.vibeLogin, false)) {
       return C8O.agentBridge.vibeLoginStart(options);
     }
+    if (trim(options.gatewayApiKey).length) {
+      var stored = C8O.agentBridge.vibeGatewayKeyStore(options);
+      if (stored.ok !== true) {
+        return stored;
+      }
+      options.gatewayApiKey = "";
+    }
+    var profile = vibeProfile(options);
     var install = boolValue(options.install, false);
     var forceVibeInstall = boolValue(options.forceVibeInstall || options.forceInstall || options.force, false);
     var configure = boolValue(options.configure, false);
@@ -57,6 +65,7 @@
             messages.push("Playwright MCP installed in the managed Vibe runtime.");
           }
         }
+        var expectedGatewayUrl = profile === "convertigo" ? convertigoGatewayUrl(options) : "";
         var expectedPlaywright = vibePlaywrightServer(options);
         var expectedPlaywrightEndpoint = expectedPlaywright === null ? "" : resolvePlaywrightMcpCdpEndpoint(options);
         var expectedPlaywrightCommand = expectedPlaywright === null ? "" : trim(expectedPlaywright.command);
@@ -65,7 +74,8 @@
             && trim(setup.config.selected.bearerTokenEnv) === expectedBearerEnv
             && Number(setup.config.selected.viewerDebugPort || 0) === (expectedBearerEnv.length ? expectedViewerDebugPort : 0)
             && trim(setup.config.selected.playwrightEndpoint) === expectedPlaywrightEndpoint
-            && trim(setup.config.selected.playwrightCommand) === expectedPlaywrightCommand) {
+            && trim(setup.config.selected.playwrightCommand) === expectedPlaywrightCommand
+            && trim(setup.config.selected.gatewayUrl) === expectedGatewayUrl) {
           messages.push("Local VIBE_HOME config reused: " + setup.config.selected.path);
         } else {
           var written = writeLocalVibeConfig(setup.vibeHome, setup.mcpEndpoint, options.model || options.agentModel, options);
@@ -147,12 +157,12 @@
         if (fallbackSkills.error) {
           messages.push(fallbackSkills.error);
         }
-        var fallbackAuthentication = inspectVibeAuthentication(setup.vibeHome);
+        var fallbackAuthentication = inspectVibeAuthentication(setup.vibeHome, profile);
         var fallbackReady = fallbackAuthentication.configured === true && fallbackSkills.ok !== false;
         if (!fallbackReady) {
           messages.push(fallbackAuthentication.configured === true
             ? "Vibe skill configuration is required before start."
-            : "Vibe authentication is required. Configure MISTRAL_API_KEY in the Vibe profile.");
+            : vibeAuthenticationRequiredMessage(profile));
         }
         return {
           ok: fallbackReady,
@@ -186,12 +196,12 @@
     var runtimeReady = setup.vibe.found && setup.vibeAcp.found && (!workspaceFirst || (
       commandPathStartsWith(setup.vibe, setup.venvDir) && commandPathStartsWith(setup.vibeAcp, setup.venvDir)
     ));
-    var authentication = inspectVibeAuthentication(setup.vibeHome);
+    var authentication = inspectVibeAuthentication(setup.vibeHome, profile);
     var skills = installAgentSkills(options, "vibe", setup.vibeHome);
     var skillsReady = skills.ok !== false;
     var ready = runtimeReady && authentication.configured === true && skillsReady;
     if (runtimeReady && authentication.configured !== true) {
-      messages.push("Vibe authentication is required. Configure MISTRAL_API_KEY in the Vibe profile.");
+      messages.push(vibeAuthenticationRequiredMessage(profile));
     }
     if (!skillsReady) {
       messages.push(skills.error || "Vibe skill configuration is required before start.");
@@ -325,6 +335,10 @@
     }
     var autoConfigure = boolValue(options.autoConfigure, !trim(options.vibeHome).length);
     var setup = C8O.agentBridge.vibeSetup({
+      vibeProfile: vibeProfile(options),
+      llmGatewayUrl: options.llmGatewayUrl,
+      llmGatewayModel: options.llmGatewayModel,
+      llmGatewayThinking: options.llmGatewayThinking,
       workspaceRoot: options.workspaceRoot,
       installDir: options.installDir,
       vibeHome: options.vibeHome,
@@ -395,6 +409,7 @@
     var command = parseCommand(options.command, [setup.setup.vibeAcp.path || "vibe-acp"]);
     var ttlMillis = intValue(options.ttlSeconds, DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
     var entry = createEntry(handle, "vibe", "acp", command, cwd, env, ttlMillis, setup.setup.home, credentials, requestedModel || setup.setup.model);
+    entry.vibeProfile = vibeProfile(options);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
@@ -455,6 +470,7 @@
       }, timeoutMs);
       entry.sessionId = String(entry.session.sessionId || entry.session.session_id || "");
       var sessionProvider = vibeSettings({
+        vibeProfile: vibeProfile(options),
         workspaceRoot: setup.setup.workspaceRoot,
         vibeHome: setup.setup.vibeHome,
         vibeHomeScope: "explicit",
@@ -853,7 +869,38 @@
     return "vibe-login:" + filePath(new File(homePath));
   }
 
+  function vibeAuthenticationRequiredMessage(profile) {
+    return profile === "convertigo"
+      ? "Convertigo agent key is required. Provide the LiteLLM virtual key (" + CONVERTIGO_LLM_API_KEY_ENV + ") for this Studio user."
+      : "Vibe authentication is required. Configure MISTRAL_API_KEY in the Vibe profile.";
+  }
+
+  // Convertigo gateway profile: store the per-user virtual key in the user scoped home.
+  C8O.agentBridge.vibeGatewayKeyStore = function (options) {
+    options = optionsWithRequestFallbacks(options || {});
+    var key = trim(options.gatewayApiKey);
+    if (!key.length) {
+      return { ok: false, status: "error", error: "gatewayApiKey is required", timestamp: now() };
+    }
+    var keyOptions = vibeLoginOptions(withVibeProfile(options, "convertigo"));
+    var setup = detectRuntimePresence(keyOptions);
+    if (!trim(setup.vibeHome).length) {
+      return { ok: false, status: "error", error: setup.home && setup.home.error ? setup.home.error : "Managed VIBE_HOME is not available.", timestamp: now() };
+    }
+    writeEnvFileValue(new File(setup.vibeHome, ".env"), CONVERTIGO_LLM_API_KEY_ENV, key);
+    return {
+      ok: true,
+      status: "stored",
+      home: setup.vibeHome,
+      authentication: inspectVibeAuthentication(setup.vibeHome, "convertigo"),
+      timestamp: now()
+    };
+  };
+
   function vibeLoginRuntime(loginOptions) {
+    if (isConvertigoGatewayProfile(loginOptions)) {
+      return { ok: false, setup: null, error: "The Convertigo agent mode uses a managed gateway key; browser sign-in does not apply." };
+    }
     var setup = detectRuntimePresence(loginOptions);
     var python = setup.python || {};
     if (!python.found || !commandPathStartsWith(python, setup.venvDir)) {

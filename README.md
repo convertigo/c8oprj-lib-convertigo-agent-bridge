@@ -389,6 +389,29 @@ Les homes scope `conversation` recuperent ensuite ce `.env` par le bootstrap
 identifiants, `authentication.action` vaut `vibe_login` ; une cle stockee par
 `vibe --setup` dans le trousseau macOS (`ai.mistral.vibe`) est aussi reconnue.
 
+### Mode Convertigo (passerelle LiteLLM)
+
+Le mode « Convertigo » est un fournisseur logique : aucun compte personnel, la clé
+virtuelle LiteLLM de l'utilisateur (email du PSC) est consommee par un harnais,
+aujourd'hui Vibe (`harness = "vibe"` dans `agent_settings`). Options des sequences
+Vibe : `vibeProfile=convertigo` (home dedie `agents/vibe/homes-convertigo/...`,
+jamais synchronise avec `~/.vibe`), `llmGatewayUrl` (defaut
+`https://llm.convertigo.com/v1`), `llmGatewayModel` (defaut
+`mistral/zai-glm-5-2`, alias `glm-5-2`), `llmGatewayThinking` (defaut `off` tant
+que la passerelle refuse `reasoning_effort`). Le `config.toml` genere declare un
+`[[providers]] name = "convertigo"` (`backend = "generic"`, `api_style = "openai"`,
+`api_key_env_var = "CONVERTIGO_LLM_API_KEY"`).
+
+La cle est lue, dans l'ordre, depuis l'environnement `CONVERTIGO_LLM_API_KEY`,
+le `.env` du home gere, puis le fichier `<workspace>/agents/convertigo/llm-api-key`
+(premiere ligne = cle, emplacement destine a l'onboarding automatique). Elle peut
+aussi etre deposee par `agent_vibe_setup` avec `gatewayApiKey` (stockee dans le
+`.env` du home scope `user`, jamais renvoyee). `agent_settings` expose pour ce
+fournisseur `identity.email` (lu dans le PSC via `ConvertigoPlugin.decodePsc()`)
+et `gateway.{url,model,apiKeyEnv}` ; le sign-in navigateur ne s'applique pas.
+Le mode Convertigo est liste en premier et devient le fournisseur par defaut des
+qu'il est pret.
+
 ## Validation locale
 
 Validation faite le 2026-08-24 sur le port hotfix local de developpement :

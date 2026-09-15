@@ -22,6 +22,128 @@
   // "Image input is not enabled for this model" (400, code 3051) when an image
   // block is sent. Verified on 2026-09-14; flip only after a new live check.
   var VIBE_GLM_SUPPORTS_IMAGES = false;
+  // "Convertigo" agent mode: Vibe talks to the Convertigo LiteLLM gateway with a
+  // per-user virtual key instead of a personal Mistral account.
+  var CONVERTIGO_LLM_GATEWAY_URL = "https://llm.convertigo.com/v1";
+  var CONVERTIGO_LLM_GATEWAY_MODEL = "mistral/zai-glm-5-2";
+  var CONVERTIGO_LLM_GATEWAY_ALIAS = "glm-5-2";
+  var CONVERTIGO_LLM_API_KEY_ENV = "CONVERTIGO_LLM_API_KEY";
+  // The gateway rejects reasoning_effort for the Mistral provider until it allows it;
+  // keep thinking off by default and let llmGatewayThinking override it.
+  var CONVERTIGO_LLM_GATEWAY_THINKING = "off";
+
+  function vibeProfile(options) {
+    options = options || {};
+    var raw = trim(options.vibeProfile || options.gatewayProfile || options.agentMode).toLowerCase();
+    if (!raw.length) {
+      var provider = trim(options.provider || options.agent || options.agentProvider).toLowerCase();
+      raw = provider === "convertigo" ? "convertigo" : "";
+    }
+    return raw === "convertigo" || raw === "gateway" || raw === "convertigo-gateway" ? "convertigo" : "mistral";
+  }
+
+  function isConvertigoGatewayProfile(options) {
+    return vibeProfile(options) === "convertigo";
+  }
+
+  function withVibeProfile(options, profile) {
+    var copy = {};
+    for (var key in (options || {})) {
+      if (Object.prototype.hasOwnProperty.call(options, key)) {
+        copy[key] = options[key];
+      }
+    }
+    copy.vibeProfile = profile;
+    if (profile === "convertigo" && normalizeProvider(copy.provider || "vibe") === "convertigo") {
+      copy.provider = "vibe";
+    }
+    return copy;
+  }
+
+  function convertigoGatewayUrl(options) {
+    var url = trim(options && (options.llmGatewayUrl || options.gatewayUrl)) || CONVERTIGO_LLM_GATEWAY_URL;
+    return url.replace(/\/+$/, "");
+  }
+
+  function convertigoGatewayModel(options) {
+    return trim(options && (options.llmGatewayModel || options.gatewayModel)) || CONVERTIGO_LLM_GATEWAY_MODEL;
+  }
+
+  function convertigoGatewayThinking(options) {
+    var value = trim(options && (options.llmGatewayThinking || options.gatewayThinking)).toLowerCase();
+    if (value === "off" || value === "none" || value === "false") {
+      return "";
+    }
+    if (value === "low" || value === "medium" || value === "high") {
+      return value;
+    }
+    return CONVERTIGO_LLM_GATEWAY_THINKING === "off" ? "" : CONVERTIGO_LLM_GATEWAY_THINKING;
+  }
+
+  function vibeGatewayModelSpec(options) {
+    var thinking = convertigoGatewayThinking(options);
+    return {
+      activeModel: CONVERTIGO_LLM_GATEWAY_ALIAS,
+      name: convertigoGatewayModel(options),
+      alias: CONVERTIGO_LLM_GATEWAY_ALIAS,
+      provider: "convertigo",
+      thinking: thinking,
+      temperature: "1.0",
+      inputPrice: "1.4",
+      outputPrice: "4.4",
+      builtIn: false,
+      supportsImages: VIBE_GLM_SUPPORTS_IMAGES
+    };
+  }
+
+  function convertigoGatewayKeyFile(options) {
+    // Stable drop location for the per-user gateway key (filled by the future automatic
+    // onboarding, or by hand meanwhile). The first line is the key.
+    try {
+      var workspaceRoot = resolveWorkspaceRoot(options || {});
+      return new File(childPath(childPath(workspaceRoot, "agents"), "convertigo"), "llm-api-key");
+    } catch (_ignoreGatewayKeyFile) {
+      return null;
+    }
+  }
+
+  function readConvertigoGatewayKeyFile(options) {
+    try {
+      var file = convertigoGatewayKeyFile(options);
+      if (file !== null && file.isFile()) {
+        var first = trim(readTextFile(file).split(/\r?\n/)[0]);
+        return first.length && first.indexOf("#") !== 0 ? first : "";
+      }
+    } catch (_ignoreGatewayKeyRead) {}
+    return "";
+  }
+
+  function studioOwnerEmail() {
+    // The Studio PSC carries the registered owner email; the class is only present in Studio.
+    try {
+      var plugin = Packages.com.twinsoft.convertigo.eclipse.ConvertigoPlugin;
+      var properties = plugin.decodePsc();
+      var email = properties === null ? "" : trim(properties.getProperty("owner.email"));
+      return email.length ? email : "";
+    } catch (_ignoreStudioOwnerEmail) {
+      return "";
+    }
+  }
+
+  function parseVibeGatewayUrl(text) {
+    var pattern = /\[\[providers\]\]([\s\S]*?)(?=\n\[\[|\n\[|$)/g;
+    var match;
+    while ((match = pattern.exec(String(text || ""))) !== null) {
+      var block = match[1];
+      if (!/\nname\s*=\s*["']convertigo["']/.test("\n" + block)) {
+        continue;
+      }
+      var base = block.match(/\napi_base\s*=\s*["']([^"']+)["']/);
+      return base ? trim(base[1]).replace(/\/+$/, "") : "";
+    }
+    return "";
+  }
+
   var VIBE_IMAGE_MIME_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
   var VIBE_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
   var VIBE_MAX_IMAGES_PER_MESSAGE = 8;
@@ -172,6 +294,7 @@
       "nocodeCurrentUrl", "nocodeCurrentRoute", "nocodeCurrentFormId", "nocodeCurrentFormUrl",
       "formId", "pageId", "applicationId", "currentPage", "currentApplicationId",
       "codexHomeScope", "vibeHomeScope", "claudeHomeScope", "homeScope", "codexHome", "vibeHome", "claudeHome", "agentHome",
+      "vibeProfile", "gatewayProfile", "agentMode", "llmGatewayUrl", "llmGatewayModel", "llmGatewayThinking", "gatewayApiKey",
       "claudePath",
       "mcpEndpoint", "workspaceRoot", "settingsTimeoutMs", "modelsTimeoutMs",
       "model", "reasoningEffort", "reasoningLevel", "serviceTier", "savePreferences",
@@ -3293,18 +3416,22 @@
   function vibeCredentialSourceDirs(options, homeDir) {
     options = options || {};
     var sources = [];
+    var gateway = isConvertigoGatewayProfile(options);
     try {
       var workspaceRoot = resolveWorkspaceRoot(options);
       var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
       var userHome = resolveVibeHome({
         vibeHomeScope: "user",
+        vibeProfile: vibeProfile(options),
         userId: trim(options.userId) || contextUserId()
       }, installDir);
       if (trim(userHome.path).length && filePath(new File(userHome.path)) !== filePath(homeDir)) {
         sources.push(new File(userHome.path));
       }
     } catch (_ignoreVibeUserHome) {}
-    sources.push(new File(String(System.getProperty("user.home")), ".vibe"));
+    if (!gateway) {
+      sources.push(new File(String(System.getProperty("user.home")), ".vibe"));
+    }
     return sources;
   }
 
@@ -3328,6 +3455,13 @@
       var homeDir = new File(report.home);
       ensureDirectory(homeDir);
       syncNewestAgentUserFile(vibeCredentialSourceDirs(options, homeDir), homeDir, ".env", report);
+      if (isConvertigoGatewayProfile(options) && !vibeEnvHasKey(new File(homeDir, ".env"), CONVERTIGO_LLM_API_KEY_ENV)) {
+        var gatewayKey = readConvertigoGatewayKeyFile(options);
+        if (gatewayKey.length) {
+          writeEnvFileValue(new File(homeDir, ".env"), CONVERTIGO_LLM_API_KEY_ENV, gatewayKey);
+          report.copied.push(".env");
+        }
+      }
       report.message = "Scoped VIBE_HOME credentials synchronized";
     } catch (e) {
       report.ok = false;
@@ -3646,16 +3780,71 @@
     return authentication;
   }
 
-  function vibeEnvHasApiKey(file) {
+  function vibeEnvHasKey(file, name) {
     try {
       var parsed = readEnvFile(file);
-      return trim(parsed.values.MISTRAL_API_KEY).length > 0;
+      return trim(parsed.values[name]).length > 0;
     } catch (_ignoreVibeEnv) {
       return false;
     }
   }
 
-  function inspectVibeAuthentication(vibeHome) {
+  function vibeEnvHasApiKey(file) {
+    return vibeEnvHasKey(file, "MISTRAL_API_KEY");
+  }
+
+  function writeEnvFileValue(file, name, value) {
+    var lines = [];
+    try {
+      if (file.isFile()) {
+        lines = readTextFile(file).split(/\r?\n/);
+      }
+    } catch (_ignoreEnvRead) {}
+    var out = [];
+    var replaced = false;
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var body = trim(line);
+      if (body.indexOf("export ") === 0) {
+        body = trim(body.substring(7));
+      }
+      if (body.indexOf(name + "=") === 0) {
+        if (!replaced) {
+          out.push(name + "=" + value);
+          replaced = true;
+        }
+        continue;
+      }
+      if (line.length || i < lines.length - 1) {
+        out.push(line);
+      }
+    }
+    if (!replaced) {
+      out.push(name + "=" + value);
+    }
+    ensureDirectory(file.getParentFile());
+    writeTextFile(file, out.join("\n").replace(/\n*$/, "") + "\n");
+    try {
+      file.setReadable(false, false);
+      file.setReadable(true, true);
+      file.setWritable(false, false);
+      file.setWritable(true, true);
+    } catch (_ignoreEnvPermissions) {}
+  }
+
+  function inspectVibeAuthentication(vibeHome, profile) {
+    if (profile === "convertigo") {
+      if (environmentHasValue(CONVERTIGO_LLM_API_KEY_ENV)) {
+        return authenticationInfo(true, "environment", "");
+      }
+      if (trim(vibeHome).length && vibeEnvHasKey(new File(trim(vibeHome), ".env"), CONVERTIGO_LLM_API_KEY_ENV)) {
+        return authenticationInfo(true, "scoped_home", "");
+      }
+      if (readConvertigoGatewayKeyFile(null).length) {
+        return authenticationInfo(true, "key_file", "");
+      }
+      return authenticationInfo(false, "", "convertigo_key");
+    }
     if (environmentHasValue("MISTRAL_API_KEY")) {
       return authenticationInfo(true, "environment", "");
     }
@@ -3971,7 +4160,7 @@
     if (scope === "shared") {
       return {
         scope: "shared",
-        path: childPath(installDir, ".vibe-home"),
+        path: childPath(installDir, isConvertigoGatewayProfile(options) ? ".vibe-home-convertigo" : ".vibe-home"),
         explicit: false,
         userId: "",
         conversationId: "",
@@ -3980,7 +4169,7 @@
       };
     }
 
-    var root = childPath(installDir, "homes");
+    var root = childPath(installDir, isConvertigoGatewayProfile(options) ? "homes-convertigo" : "homes");
     var user = trim(options.userId) || contextUserId();
     if (scope === "user") {
       if (!user.length) {
@@ -5766,6 +5955,7 @@
       hasHttpTransport: false,
       bearerTokenEnv: "",
       endpoint: "",
+      gatewayUrl: "",
       valid: false
     };
     if (!info.exists) {
@@ -5791,6 +5981,7 @@
       info.viewerDebugPort = viewerPortMatch ? Number(viewerPortMatch[1]) : 0;
       break;
     }
+    info.gatewayUrl = parseVibeGatewayUrl(text);
     info.playwrightEndpoint = "";
     info.playwrightCommand = "";
     var playwrightPattern = /\[\[mcp_servers\]\]([\s\S]*?)(?=\n\[\[mcp_servers\]\]|$)/g;
@@ -5874,6 +6065,10 @@
   function migrateManagedVibeModelPresets(text) {
     var removed = [];
     var hasGlm = false;
+    if (parseVibeGatewayUrl(text).length) {
+      // Convertigo gateway profile: the model catalog is the gateway's, not Mistral's.
+      return { text: String(text || ""), removed: [], added: false, migratedActiveModel: false };
+    }
     var result = String(text || "").replace(/(^|\n)\[\[models\]\]([\s\S]*?)(?=\n\[\[|\n\[|$)/g, function (match, prefix, block) {
       var name = parseTomlValue(block, "name");
       var alias = parseTomlValue(block, "alias");
@@ -5933,8 +6128,25 @@
     var configDir = new File(vibeHome);
     ensureDirectory(configDir);
     var configFile = new File(configDir, "config.toml");
-    var spec = vibeModelSpec(model);
-    var lines = [
+    var gateway = isConvertigoGatewayProfile(options);
+    var spec = gateway ? vibeGatewayModelSpec(options) : vibeModelSpec(model);
+    var lines = gateway ? [
+      '# Generated by lib_ConvertigoAgentBridge (Convertigo gateway profile).',
+      'active_model = "' + tomlString(spec.activeModel) + '"',
+      'api_timeout = 720.0',
+      'auto_compact_threshold = 200000',
+      '',
+      '[[providers]]',
+      'name = "convertigo"',
+      'api_base = "' + tomlString(convertigoGatewayUrl(options)) + '"',
+      'api_key_env_var = "' + CONVERTIGO_LLM_API_KEY_ENV + '"',
+      'api_style = "openai"',
+      'backend = "generic"',
+      'reasoning_field_name = "reasoning_content"',
+      '',
+      '[providers.extra_headers]',
+      ''
+    ] : [
       '# Generated by lib_ConvertigoAgentBridge.',
       'active_model = "' + tomlString(spec.activeModel) + '"',
       'api_timeout = 720.0',
@@ -5959,7 +6171,7 @@
       lines.push(
         '[[models]]',
         'name = "' + tomlString(spec.name) + '"',
-        'provider = "mistral"',
+        'provider = "' + (gateway ? "convertigo" : "mistral") + '"',
         'alias = "' + tomlString(spec.alias) + '"',
         'temperature = ' + spec.temperature,
         'input_price = ' + spec.inputPrice,
@@ -6998,6 +7210,7 @@
 
   function vibeSettings(options) {
     options = optionsWithRequestFallbacks(options);
+    var gatewayProfile = isConvertigoGatewayProfile(options);
     var presenceOnly = boolValue(options.runtimePresenceOnly, false);
     var capabilityProfile = publicAgentCapabilityProfile(options);
     var profileSupported = capabilityProfile.supportedProviders.indexOf("vibe") >= 0;
@@ -7016,16 +7229,16 @@
     }
     var selectedFile = setup.vibeHome.length ? new File(setup.vibeHome, "config.toml") : null;
     var selected = selectedFile !== null ? parseVibeModelsFromConfig(selectedFile) : { path: "", exists: false, activeModel: "", models: [] };
-    var user = parseVibeModelsFromConfig(new File(new File(String(System.getProperty("user.home")), ".vibe"), "config.toml"));
+    var user = gatewayProfile ? { path: "", exists: false, activeModel: "", models: [] } : parseVibeModelsFromConfig(new File(new File(String(System.getProperty("user.home")), ".vibe"), "config.toml"));
     var config = selected.exists ? selected : user;
     var models = config.models;
-    if (!models.length && setup.model) {
-      var spec = vibeModelSpec(setup.model);
+    if (!models.length && (gatewayProfile || setup.model)) {
+      var spec = gatewayProfile ? vibeGatewayModelSpec(options) : vibeModelSpec(setup.model);
       models = [{
         id: spec.activeModel,
         label: spec.activeModel,
         configuredName: spec.name,
-        provider: "mistral",
+        provider: gatewayProfile ? "convertigo" : "mistral",
         defaultReasoning: spec.thinking,
         reasoningLevels: spec.thinking.length ? [{
           id: spec.thinking,
@@ -7038,12 +7251,18 @@
     }
     var defaultModel = config.activeModel || setup.model || (models.length ? models[0].id : "");
     var provider = {
-      id: "vibe",
-      label: "Vibe",
+      id: gatewayProfile ? "convertigo" : "vibe",
+      label: gatewayProfile ? "Convertigo" : "Vibe",
+      // The Convertigo mode is a logical provider; `harness` names the CLI actually
+      // driving it so the Assistant never hard-codes Vibe for it.
+      harness: "vibe",
+      profile: vibeProfile(options),
+      gateway: gatewayProfile ? { url: convertigoGatewayUrl(options), model: convertigoGatewayModel(options), apiKeyEnv: CONVERTIGO_LLM_API_KEY_ENV } : null,
+      identity: gatewayProfile ? { email: studioOwnerEmail() } : null,
       status: profileSupported ? (managedVibeReady ? "ready" : "missing") : "unsupported_profile",
       ready: profileSupported && managedVibeReady,
       runtime: runtime,
-      authentication: inspectVibeAuthentication(setup.vibeHome),
+      authentication: inspectVibeAuthentication(setup.vibeHome, vibeProfile(options)),
       setup: compactVibeSetup(setup),
       skills: skills,
       source: {
@@ -7067,6 +7286,9 @@
       agentProfile: capabilityProfile
     };
     provider.settingsCacheKey = providerSettingsCacheKey("vibe", setup.vibeHome);
+    if (gatewayProfile) {
+      provider.settingsCacheKey = "convertigo:" + provider.settingsCacheKey;
+    }
     provider = hydrateProviderSettingsFromCache(setup.workspaceRoot, provider, true);
     if (!presenceOnly && managedVibeReady && commandPathStartsWith({ path: setup.vibeHome }, setup.installDir)) {
       var presetUpdate = migrateManagedVibeConfig(setup.vibeHome);
@@ -7516,11 +7738,15 @@
     var rawProvider = trim(options.provider || options.agent || "").toLowerCase();
     var provider = (!rawProvider.length || rawProvider === "all" || rawProvider === "*" || rawProvider === "any") ? "" : normalizeProvider(rawProvider);
     var providers = [];
+    // The Convertigo mode comes first: it is the zero-configuration default.
+    if (!provider.length || provider === "convertigo") {
+      providers.push(vibeSettings(withVibeProfile(options, "convertigo")));
+    }
     if (!provider.length || provider === "codex") {
       providers.push(codexSettings(options));
     }
     if (!provider.length || provider === "vibe") {
-      providers.push(vibeSettings(options));
+      providers.push(vibeSettings(withVibeProfile(options, "mistral")));
     }
     if ((!provider.length || provider === "claude") && typeof claudeSettings === "function") {
       providers.push(claudeSettings(options));
@@ -7537,15 +7763,16 @@
     var settingsCacheMaxAgeMs = intValue(options.settingsCacheMaxAgeMs || options.updateCheckCacheMs, DEFAULT_RUNTIME_UPDATE_CACHE_MS, 60000, 604800000);
     for (var cachedProviderIndex = 0; cachedProviderIndex < providers.length; cachedProviderIndex++) {
       var currentProvider = providers[cachedProviderIndex];
-      currentProvider = hydrateProviderSettingsFromCache(settingsWorkspaceRoot, currentProvider, normalizeProvider(currentProvider.id) === "vibe");
+      var vibeFamily = normalizeProvider(currentProvider.id) === "vibe" || normalizeProvider(currentProvider.id) === "convertigo";
+      currentProvider = hydrateProviderSettingsFromCache(settingsWorkspaceRoot, currentProvider, vibeFamily);
       if (presenceOnly) {
         currentProvider = requireCachedProviderConfiguration(currentProvider);
       }
       currentProvider = requireProviderAuthentication(currentProvider);
-      if (!presenceOnly && normalizeProvider(currentProvider.id) === "vibe" && currentProvider.ready === true && typeof C8O.agentBridge.discoverVibeSettings === "function") {
+      if (!presenceOnly && vibeFamily && currentProvider.ready === true && typeof C8O.agentBridge.discoverVibeSettings === "function") {
         var refreshProviderSettings = boolValue(options.refreshProviderSettings || options.refreshModelCatalog || options.refreshUpdateCheck, false);
         if (refreshProviderSettings || !providerSettingsCacheFresh(currentProvider, settingsCacheMaxAgeMs)) {
-          currentProvider = C8O.agentBridge.discoverVibeSettings(options, currentProvider);
+          currentProvider = C8O.agentBridge.discoverVibeSettings(withVibeProfile(options, currentProvider.profile || (normalizeProvider(currentProvider.id) === "convertigo" ? "convertigo" : "mistral")), currentProvider);
         }
       }
       providers[cachedProviderIndex] = requireProviderAuthentication(currentProvider);

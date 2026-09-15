@@ -5,6 +5,11 @@ responseTimeout: 900
     'include("js/vibe_agent_bridge.js");
     result = C8O.agentBridge.vibeSetup({
       install: typeof install === "undefined" ? false : install,
+      vibeProfile: typeof vibeProfile === "undefined" ? "" : vibeProfile,
+      llmGatewayUrl: typeof llmGatewayUrl === "undefined" ? "" : llmGatewayUrl,
+      llmGatewayModel: typeof llmGatewayModel === "undefined" ? "" : llmGatewayModel,
+      llmGatewayThinking: typeof llmGatewayThinking === "undefined" ? "" : llmGatewayThinking,
+      gatewayApiKey: typeof gatewayApiKey === "undefined" ? "" : gatewayApiKey,
       login: typeof login === "undefined" ? "" : login,
       loginStatus: typeof loginStatus === "undefined" ? "" : loginStatus,
       vibeLogin: typeof vibeLogin === "undefined" ? "" : vibeLogin,
@@ -169,3 +174,18 @@ responseTimeout: 900
   comment: When true, starts a new browser sign-in even when an API key already exists.
   description: When true, starts a new browser sign-in even when an API key already exists.
   schemaType: xsd:boolean
+↓vibeProfile [variables.RequestableVariable-1789560000001]: 
+  comment: 'Vibe profile: mistral (personal Mistral account, default) or convertigo (Convertigo LiteLLM gateway with a per-user virtual key).'
+  description: 'Vibe profile: mistral (personal Mistral account, default) or convertigo (Convertigo LiteLLM gateway with a per-user virtual key).'
+↓llmGatewayUrl [variables.RequestableVariable-1789560000003]: 
+  comment: 'Convertigo profile only: LiteLLM gateway base URL. Defaults to https://llm.convertigo.com/v1.'
+  description: 'Convertigo profile only: LiteLLM gateway base URL. Defaults to https://llm.convertigo.com/v1.'
+↓llmGatewayModel [variables.RequestableVariable-1789560000005]: 
+  comment: 'Convertigo profile only: gateway model name. Defaults to mistral/zai-glm-5-2.'
+  description: 'Convertigo profile only: gateway model name. Defaults to mistral/zai-glm-5-2.'
+↓llmGatewayThinking [variables.RequestableVariable-1789560000007]: 
+  comment: 'Convertigo profile only: thinking level (off, low, medium, high). Defaults to off until the gateway accepts reasoning_effort.'
+  description: 'Convertigo profile only: thinking level (off, low, medium, high). Defaults to off until the gateway accepts reasoning_effort.'
+↓gatewayApiKey [variables.RequestableVariable-1789560000009]: 
+  comment: 'Convertigo profile only: stores the user''s LiteLLM virtual key in the user scoped VIBE_HOME .env (never returned).'
+  description: 'Convertigo profile only: stores the user''s LiteLLM virtual key in the user scoped VIBE_HOME .env (never returned).'
