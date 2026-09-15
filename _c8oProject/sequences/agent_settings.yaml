@@ -21,6 +21,7 @@ responseTimeout: 120
       codexPath: typeof codexPath === "undefined" ? "" : codexPath,
       vibeHome: typeof vibeHome === "undefined" ? "" : vibeHome,
       vibeHomeScope: typeof vibeHomeScope === "undefined" ? "" : vibeHomeScope,
+      vibeProfile: typeof vibeProfile === "undefined" ? "" : vibeProfile,
       settingsTimeoutMs: typeof settingsTimeoutMs === "undefined" ? "" : settingsTimeoutMs,
       checkUpdates: typeof checkUpdates === "undefined" ? "" : checkUpdates,
       refreshUpdateCheck: typeof refreshUpdateCheck === "undefined" ? "" : refreshUpdateCheck,
@@ -110,3 +111,6 @@ responseTimeout: 120
 ↓skillProfile [variables.RequestableVariable-1787826899472]: 
   comment: Optional skillProfile preference.
   description: Optional skillProfile preference.
+↓vibeProfile [variables.RequestableVariable-1789560000019]: 
+  comment: 'Vibe profile filter for the vibe provider: mistral (default) or convertigo. The convertigo pseudo-provider is always listed with provider=all.'
+  description: 'Vibe profile filter for the vibe provider: mistral (default) or convertigo. The convertigo pseudo-provider is always listed with provider=all.'

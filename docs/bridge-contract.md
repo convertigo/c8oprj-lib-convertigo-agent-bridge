@@ -167,6 +167,21 @@ Le mode historique reste disponible en fallback avec `codexRuntimeMode=exec`.
 Dans ce cas, chaque prompt repasse par `codex exec --json` ou
 `codex exec resume --json`.
 
+## Claude Code resident
+
+`agent_claude_start` lance :
+
+```text
+claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-mode bypassPermissions --mcp-config <home>/convertigo-mcp.json --strict-mcp-config [--model <alias>] [--effort <level>] [--resume <sessionId>]
+```
+
+`agent_claude_prompt` ecrit un message `{"type":"user","message":{...}}` sur le
+stdin du process vivant. `agent_claude_start` est idempotent pour un handle
+vivant (`already_running`) et redemarre le process avec `--resume` quand le
+modele, l'effort, le mode reveal ou le jeton MCP change. L'id de session Claude
+est expose dans `state.sessionId` et repris par l'Assistant comme
+`externalSessionId`.
+
 ## Semantique des evenements
 
 Chaque evenement contient :

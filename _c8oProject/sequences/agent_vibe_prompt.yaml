@@ -5,6 +5,7 @@ comment: Send a prompt to a running Vibe ACP session. By default the call return
     result = C8O.agentBridge.vibePrompt({
       handle: typeof handle === "undefined" ? "" : handle,
       prompt: typeof prompt === "undefined" ? "" : prompt,
+      images: typeof images === "undefined" ? "" : images,
       messageId: typeof messageId === "undefined" ? "" : messageId,
       waitForCompletion: typeof waitForCompletion === "undefined" ? false : waitForCompletion,
       requestTimeoutMs: typeof requestTimeoutMs === "undefined" ? "" : requestTimeoutMs,
@@ -42,3 +43,6 @@ comment: Send a prompt to a running Vibe ACP session. By default the call return
   comment: Set true to tell the agent to pass reveal=true on supported Convertigo mutation/viewer tools for this turn.
   description: Set true to tell the agent to pass reveal=true on supported Convertigo mutation/viewer tools for this turn.
   value: false
+↓images [variables.RequestableVariable-1789388871104]: 
+  comment: Optional JSON array of local image paths attached to the prompt. Sent to Vibe as ACP image blocks when the active model supports images.
+  description: Optional JSON array of local image paths attached to the prompt. Sent to Vibe as ACP image blocks when the active model supports images.

@@ -557,7 +557,9 @@ const vibeConfigWithPreset = [
 ].join("\n");
 const unchangedVibeConfig = migrateManagedVibeModelPresets(vibeConfigWithPreset);
 assert.deepEqual(unchangedVibeConfig.removed, []);
-assert.equal(unchangedVibeConfig.text, vibeConfigWithPreset);
+assert.equal(unchangedVibeConfig.added, true);
+assert.match(unchangedVibeConfig.text, /alias = "glm-5-2"/);
+assert.equal(migrateManagedVibeModelPresets(unchangedVibeConfig.text).text, unchangedVibeConfig.text);
 
 const migratedVibeConfig = migrateManagedVibeModelPresets([
   'active_model = "zai-glm-5-2"',
@@ -579,7 +581,10 @@ assert.match(migratedVibeConfig.text, /active_model = "glm-5-2"/);
 assert.doesNotMatch(migratedVibeConfig.text, /alias = "zai-glm-5-2"/);
 assert.match(migratedVibeConfig.text, /\[\[mcp_servers\]\]/);
 assert.equal(vibeModelSpec("zai-glm-5-2").activeModel, "glm-5-2");
-assert.equal(vibeModelSpec("glm-5-2").builtIn, true);
+assert.equal(vibeModelSpec("glm-5-2").builtIn, false);
+assert.match(migratedVibeConfig.text, /name = "zai-glm-5-2"/);
+const customGlm = '[[models]]\nname = "zai-glm-5-2"\nprovider = "custom"\nalias = "my-glm"\n';
+assert.equal(migrateManagedVibeModelPresets(customGlm).text, customGlm);
 
 const uncachedProvider = requireCachedProviderConfiguration({
   id: "codex",

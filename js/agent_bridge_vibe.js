@@ -1,7 +1,21 @@
 // Vibe ACP provider implementation.
 // Loaded by vibe_agent_bridge.js after agent_bridge_common.js.
   C8O.agentBridge.vibeSetup = function (options) {
-    options = options || {};
+    options = optionsWithRequestFallbacks(options || {});
+    if (boolValue(options.loginStatus || options.vibeLoginStatus, false)) {
+      return C8O.agentBridge.vibeLoginStatus(options);
+    }
+    if (boolValue(options.login || options.vibeLogin, false)) {
+      return C8O.agentBridge.vibeLoginStart(options);
+    }
+    if (trim(options.gatewayApiKey).length) {
+      var stored = C8O.agentBridge.vibeGatewayKeyStore(options);
+      if (stored.ok !== true) {
+        return stored;
+      }
+      options.gatewayApiKey = "";
+    }
+    var profile = vibeProfile(options);
     var install = boolValue(options.install, false);
     var forceVibeInstall = boolValue(options.forceVibeInstall || options.forceInstall || options.force, false);
     var configure = boolValue(options.configure, false);
@@ -42,9 +56,26 @@
       }
       if (configure) {
         var expectedBearerEnv = usesProtectedConvertigoMcp(setup.mcpEndpoint, options) ? mcpBearerTokenEnv(options) : "";
+        var expectedViewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
+        if (vibePlaywrightEnabled(options) && !new File(childPath(childPath(codexNodeModulesPath(setup.installDir), "@playwright/mcp"), "package.json")).isFile()) {
+          var vibePlaywright = ensureVibePlaywrightRuntime(options, setup.installDir);
+          if (vibePlaywright.error) {
+            messages.push("Playwright MCP is not available in the managed Vibe runtime: " + vibePlaywright.error);
+          } else if (vibePlaywright.installed === true) {
+            messages.push("Playwright MCP installed in the managed Vibe runtime.");
+          }
+        }
+        var expectedGatewayUrl = profile === "convertigo" ? convertigoGatewayUrl(options) : "";
+        var expectedPlaywright = vibePlaywrightServer(options);
+        var expectedPlaywrightEndpoint = expectedPlaywright === null ? "" : resolvePlaywrightMcpCdpEndpoint(options);
+        var expectedPlaywrightCommand = expectedPlaywright === null ? "" : trim(expectedPlaywright.command);
         if (setup.config.selected.valid
             && trim(setup.config.selected.endpoint) === vibeMcpTransportEndpoint(setup.mcpEndpoint)
-            && trim(setup.config.selected.bearerTokenEnv) === expectedBearerEnv) {
+            && trim(setup.config.selected.bearerTokenEnv) === expectedBearerEnv
+            && Number(setup.config.selected.viewerDebugPort || 0) === (expectedBearerEnv.length ? expectedViewerDebugPort : 0)
+            && trim(setup.config.selected.playwrightEndpoint) === expectedPlaywrightEndpoint
+            && trim(setup.config.selected.playwrightCommand) === expectedPlaywrightCommand
+            && trim(setup.config.selected.gatewayUrl) === expectedGatewayUrl) {
           messages.push("Local VIBE_HOME config reused: " + setup.config.selected.path);
         } else {
           var written = writeLocalVibeConfig(setup.vibeHome, setup.mcpEndpoint, options.model || options.agentModel, options);
@@ -55,7 +86,7 @@
           messages.push("Legacy managed Vibe model preset migrated: " + presetMigration.removed.join(", "));
         }
       }
-      bootstrap = bootstrapVibeHome(setup.vibeHome);
+      bootstrap = bootstrapVibeHome(setup.vibeHome, options);
       if (bootstrap.message) {
         messages.push(bootstrap.message);
       }
@@ -126,12 +157,12 @@
         if (fallbackSkills.error) {
           messages.push(fallbackSkills.error);
         }
-        var fallbackAuthentication = inspectVibeAuthentication(setup.vibeHome);
+        var fallbackAuthentication = inspectVibeAuthentication(setup.vibeHome, profile);
         var fallbackReady = fallbackAuthentication.configured === true && fallbackSkills.ok !== false;
         if (!fallbackReady) {
           messages.push(fallbackAuthentication.configured === true
             ? "Vibe skill configuration is required before start."
-            : "Vibe authentication is required. Configure MISTRAL_API_KEY in the Vibe profile.");
+            : vibeAuthenticationRequiredMessage(profile));
         }
         return {
           ok: fallbackReady,
@@ -165,12 +196,12 @@
     var runtimeReady = setup.vibe.found && setup.vibeAcp.found && (!workspaceFirst || (
       commandPathStartsWith(setup.vibe, setup.venvDir) && commandPathStartsWith(setup.vibeAcp, setup.venvDir)
     ));
-    var authentication = inspectVibeAuthentication(setup.vibeHome);
+    var authentication = inspectVibeAuthentication(setup.vibeHome, profile);
     var skills = installAgentSkills(options, "vibe", setup.vibeHome);
     var skillsReady = skills.ok !== false;
     var ready = runtimeReady && authentication.configured === true && skillsReady;
     if (runtimeReady && authentication.configured !== true) {
-      messages.push("Vibe authentication is required. Configure MISTRAL_API_KEY in the Vibe profile.");
+      messages.push(vibeAuthenticationRequiredMessage(profile));
     }
     if (!skillsReady) {
       messages.push(skills.error || "Vibe skill configuration is required before start.");
@@ -243,19 +274,41 @@
   };
 
   C8O.agentBridge.vibeStart = function (options) {
-    options = options || {};
+    options = optionsWithRequestFallbacks(options || {});
     var requestedModel = trim(options.model || options.agentModel);
     var handle = trim(options.handle) || makeHandle("vibe");
+    try {
+      ensureManagedViewerDebugPort(options);
+    } catch (viewerDebugPortError) {
+      return { ok: false, status: "error", phase: "viewer_debug_port", error: String(viewerDebugPortError), timestamp: now() };
+    }
+    if (intValue(options.viewerDebugPort, 0, 0, 65535) >= 1024 && !trim(options.vibeHome).length) {
+      options.vibeHomeScope = "conversation";
+      options.homeScope = "conversation";
+    }
     var registry = getRegistry();
     var existing = registry.get(handle);
     var timeoutMs = intValue(options.requestTimeoutMs, 60000, 1000, 600000);
     if (existing !== null && typeof existing !== "undefined" && processAlive(existing.process)) {
       var requestedMcpTokenFingerprint = mcpBearerTokenFingerprint(options);
+      var requestedPlaywrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
+      var activePlaywrightCdpEndpoint = trim(existing.playwrightCdpEndpoint || existing.viewerCdpEndpoint);
+      var viewerChanged = requestedPlaywrightCdpEndpoint.length && activePlaywrightCdpEndpoint !== requestedPlaywrightCdpEndpoint;
       if (requestedMcpTokenFingerprint.length
           && trim(existing.mcpBearerTokenFingerprint) !== requestedMcpTokenFingerprint) {
         pushEvent(existing, "warning", {
           phase: "mcp/auth",
           message: "Vibe must restart to renew its managed Convertigo MCP authorization."
+        });
+        stopEntry(existing, true);
+        existing = null;
+      } else if (viewerChanged) {
+        pushEvent(existing, "warning", {
+          phase: "viewer",
+          reason: "playwright_endpoint_changed",
+          message: "Vibe must restart to refresh the managed Playwright MCP viewer endpoint.",
+          previousEndpoint: activePlaywrightCdpEndpoint,
+          requestedEndpoint: requestedPlaywrightCdpEndpoint
         });
         stopEntry(existing, true);
         existing = null;
@@ -282,6 +335,10 @@
     }
     var autoConfigure = boolValue(options.autoConfigure, !trim(options.vibeHome).length);
     var setup = C8O.agentBridge.vibeSetup({
+      vibeProfile: vibeProfile(options),
+      llmGatewayUrl: options.llmGatewayUrl,
+      llmGatewayModel: options.llmGatewayModel,
+      llmGatewayThinking: options.llmGatewayThinking,
       workspaceRoot: options.workspaceRoot,
       installDir: options.installDir,
       vibeHome: options.vibeHome,
@@ -311,6 +368,13 @@
       agentProfile: options.agentProfile,
       skillProfile: options.skillProfile,
       assistantContext: options.assistantContext,
+      viewerDebugPort: options.viewerDebugPort,
+      browserDebugUrl: options.browserDebugUrl,
+      browserDevToolsJsonUrl: options.browserDevToolsJsonUrl,
+      browserDevToolsWebSocketUrl: options.browserDevToolsWebSocketUrl,
+      playwrightCdpEndpoint: options.playwrightCdpEndpoint || options.viewerCdpEndpoint,
+      playwrightMcpEndpoint: options.playwrightMcpEndpoint,
+      skipPlaywrightInstall: options.skipPlaywrightInstall || options.skipVibePlaywrightInstall,
       configure: autoConfigure,
       startupPresenceOnly: true
     });
@@ -335,15 +399,25 @@
     if (vibeHome.length) {
       env.VIBE_HOME = vibeHome;
     }
+    var vibeNodePath = nodeRuntimeSearchPath(options);
+    if (vibeNodePath.length && !trim(env.PATH).length) {
+      env.PATH = vibeNodePath + String(File.pathSeparator) + String(System.getenv("PATH") || "");
+    }
     applyManagedMcpEnvironment(env, options);
     var cwd = normalizeDirectory(options.cwd, setup.setup.workspaceRoot, setup.setup.workspaceRoot);
     var mcpEndpoint = trim(options.mcpEndpoint) || setup.setup.mcpEndpoint || resolveMcpEndpoint(options);
     var command = parseCommand(options.command, [setup.setup.vibeAcp.path || "vibe-acp"]);
     var ttlMillis = intValue(options.ttlSeconds, DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
     var entry = createEntry(handle, "vibe", "acp", command, cwd, env, ttlMillis, setup.setup.home, credentials, requestedModel || setup.setup.model);
+    entry.vibeProfile = vibeProfile(options);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
+    entry.viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
+    entry.browserDebugUrl = trim(options.browserDebugUrl);
+    entry.playwrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
+    entry.viewerCdpEndpoint = trim(options.viewerCdpEndpoint || entry.playwrightCdpEndpoint);
+    entry.playwrightMcpEnabled = trim(setup.setup.config && setup.setup.config.selected && setup.setup.config.selected.playwrightEndpoint).length > 0;
     registry.put(handle, entry);
 
     try {
@@ -361,7 +435,10 @@
           injectedKeys: credentials.injectedKeys,
           sources: credentials.sources
         },
-        mcpEndpoint: mcpEndpoint
+        mcpEndpoint: mcpEndpoint,
+        viewerDebugPort: entry.viewerDebugPort,
+        playwrightCdpEndpoint: entry.playwrightCdpEndpoint,
+        playwrightMcpEnabled: entry.playwrightMcpEnabled === true
       });
 
       entry.phase = "initialize";
@@ -393,6 +470,7 @@
       }, timeoutMs);
       entry.sessionId = String(entry.session.sessionId || entry.session.session_id || "");
       var sessionProvider = vibeSettings({
+        vibeProfile: vibeProfile(options),
         workspaceRoot: setup.setup.workspaceRoot,
         vibeHome: setup.setup.vibeHome,
         vibeHomeScope: "explicit",
@@ -460,11 +538,23 @@
         mcpEndpoint: options.mcpEndpoint,
         model: "",
         reasoningEffort: "",
+        mcpBearerToken: options.mcpBearerToken,
+        mcpBearerTokenHandle: options.mcpBearerTokenHandle,
+        nocodeMcpToken: options.nocodeMcpToken || options.noCodeMcpToken,
+        nocodeMcpTokenHandle: options.nocodeMcpTokenHandle || options.noCodeMcpTokenHandle,
         install: false,
         autoConfigure: true,
+        disableViewerDebugPortReservation: true,
+        disablePlaywrightMcp: true,
         requestTimeoutMs: options.settingsTimeoutMs || options.requestTimeoutMs || 60000
       });
-      return started && started.ok !== false && started.providerSettings ? started.providerSettings : provider;
+      if (started && started.ok !== false && started.providerSettings) {
+        return started.providerSettings;
+      }
+      provider.source = provider.source || {};
+      provider.source.discoveryError = started && started.error ? String(started.error) : "Vibe model discovery returned no catalog";
+      provider.source.settingsCachedAt = 0;
+      return provider;
     } catch (e) {
       provider.source = provider.source || {};
       provider.source.discoveryError = String(e);
@@ -497,12 +587,30 @@
     }
     promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
     var messageId = trim(options.messageId);
+    var promptBlocks = [{
+      type: "text",
+      text: promptText
+    }];
+    var images = vibeImageBlocks(firstDefinedOption(options, ["images", "imagePaths", "attachments"]) || optionOrRequest(options, "images"), entry.model);
+    for (var imageIndex = 0; imageIndex < images.blocks.length; imageIndex++) {
+      promptBlocks.push(images.blocks[imageIndex]);
+    }
+    if (images.skipped.length) {
+      pushEvent(entry, "warning", {
+        phase: "prompt/images",
+        message: "Some attached images were not sent to Vibe: " + JSON.stringify(images.skipped),
+        skipped: images.skipped,
+        provider: "vibe"
+      });
+      var noVision = images.skipped.filter(function (item) { return item.reason === "model_without_vision"; });
+      if (noVision.length) {
+        promptBlocks[0].text += "\n\nNote from the Agent Bridge: " + noVision.length + " attached image(s) could not be sent to the active model `"
+          + trim(noVision[0].model) + "` because it has no image input on this account. Tell the user that this model cannot see images and that Mistral Medium, Codex, or Claude can, then continue with the text of the request.";
+      }
+    }
     var params = {
       sessionId: entry.sessionId,
-      prompt: [{
-        type: "text",
-        text: promptText
-      }]
+      prompt: promptBlocks
     };
     if (messageId.length) {
       params.messageId = messageId;
@@ -513,7 +621,8 @@
       pushEvent(entry, "turn/start", {
         requestId: pending.id,
         messageId: messageId,
-        textLength: promptText.length
+        textLength: promptText.length,
+        imageCount: images.blocks.length
       });
       var wait = boolValue(options.waitForCompletion, false);
       if (wait) {
@@ -585,4 +694,336 @@
       state: stateBeforeRemove,
       timestamp: now()
     };
+  };
+
+  // Browser login (Mistral AI Studio sign-in) ------------------------------
+  //
+  // Vibe only exposes its browser sign-in through the interactive onboarding TUI
+  // (`vibe --setup`) or through ACP `authenticate`. The bridge drives the same
+  // Python service headlessly with the managed venv interpreter: the helper prints
+  // the sign-in URL, waits for the browser confirmation, then stores the API key in
+  // the user scoped VIBE_HOME `.env` (never in the bridge output).
+
+  var VIBE_LOGIN_SCRIPT_NAME = "c8o_vibe_browser_login.py";
+  var VIBE_LOGIN_SCRIPT_VERSION = "3";
+
+  function vibeLoginScriptSource() {
+    return [
+      "# Generated by lib_ConvertigoAgentBridge (v" + VIBE_LOGIN_SCRIPT_VERSION + "). Do not edit.",
+      "# Headless Mistral AI Studio browser sign-in for a managed VIBE_HOME.",
+      "import asyncio",
+      "import os",
+      "import pathlib",
+      "import sys",
+      "",
+      "",
+      "def emit(tag, value=''):",
+      "    sys.stdout.write(tag + (' ' + str(value) if value != '' else '') + '\\n')",
+      "    sys.stdout.flush()",
+      "",
+      "",
+      "def write_env(path, key, value):",
+      "    path.parent.mkdir(parents=True, exist_ok=True)",
+      "    lines = path.read_text(encoding='utf-8').splitlines() if path.exists() else []",
+      "    out = []",
+      "    replaced = False",
+      "    for line in lines:",
+      "        body = line.strip()",
+      "        if body.startswith('export '):",
+      "            body = body[7:].strip()",
+      "        if body.startswith(key + '='):",
+      "            if not replaced:",
+      "                out.append(key + '=' + value)",
+      "                replaced = True",
+      "            continue",
+      "        out.append(line)",
+      "    if not replaced:",
+      "        out.append(key + '=' + value)",
+      "    tmp = path.with_name(path.name + '.tmp')",
+      "    tmp.write_text('\\n'.join(out) + '\\n', encoding='utf-8')",
+      "    try:",
+      "        os.chmod(tmp, 0o600)",
+      "    except OSError:",
+      "        pass",
+      "    os.replace(tmp, path)",
+      "",
+      "",
+      "def main():",
+      "    home = os.environ.get('VIBE_HOME', '').strip()",
+      "    if not home:",
+      "        emit('C8O_LOGIN_ERROR', 'VIBE_HOME is not set')",
+      "        return 2",
+      "    try:",
+      "        from vibe.core.config import DEFAULT_PROVIDERS",
+      "        from vibe.setup.auth import BrowserSignInError, BrowserSignInErrorCode, BrowserSignInService, HttpBrowserSignInGateway",
+      "    except Exception as exc:",
+      "        emit('C8O_LOGIN_ERROR', 'Vibe browser sign-in is not available in this runtime: ' + str(exc))",
+      "        return 3",
+      "    provider = next((item for item in DEFAULT_PROVIDERS if item.name == 'mistral'), None)",
+      "    if provider is None or not provider.supports_browser_sign_in:",
+      "        emit('C8O_LOGIN_ERROR', 'The Mistral provider does not support browser sign-in')",
+      "        return 3",
+      "    env_key = provider.api_key_env_var or 'MISTRAL_API_KEY'",
+      "",
+      "    async def wait_for_completion(gateway, attempt):",
+      "        # Mistral rate-limits the poll endpoint (HTTP 429 after ~1 minute at 3 s);",
+      "        # Vibe's own service gives up after 3 consecutive failures, so poll more",
+      "        # slowly and back off on failures until the attempt expires.",
+      "        from datetime import UTC, datetime",
+      "        delay = 5.0",
+      "        while datetime.now(UTC) < attempt.expires_at:",
+      "            try:",
+      "                result = await gateway.poll(attempt.poll_url)",
+      "            except BrowserSignInError as exc:",
+      "                if exc.code is not BrowserSignInErrorCode.POLL_FAILED:",
+      "                    raise",
+      "                delay = min(delay * 2, 30.0)",
+      "                await asyncio.sleep(delay)",
+      "                continue",
+      "            delay = 5.0",
+      "            if result.status == 'pending':",
+      "                await asyncio.sleep(delay)",
+      "                continue",
+      "            if result.status == 'completed' and result.exchange_token:",
+      "                return result.exchange_token",
+      "            raise BrowserSignInError('Browser sign-in ' + str(result.status) + ((': ' + result.message) if result.message else '') + '.', code=BrowserSignInErrorCode.UNKNOWN_STATE)",
+      "        raise BrowserSignInError('Browser sign-in timed out.', code=BrowserSignInErrorCode.TIMED_OUT)",
+      "",
+      "    async def run():",
+      "        gateway = HttpBrowserSignInGateway(",
+      "            browser_base_url=provider.browser_auth_base_url,",
+      "            api_base_url=provider.browser_auth_api_base_url,",
+      "        )",
+      "        service = BrowserSignInService(gateway)",
+      "        try:",
+      "            attempt = await service.start_attempt()",
+      "            emit('C8O_SIGN_IN_URL', attempt.sign_in_url)",
+      "            emit('C8O_SIGN_IN_EXPIRES_AT', attempt.expires_at.isoformat())",
+      "            if os.environ.get('C8O_VIBE_OPEN_BROWSER') == '1':",
+      "                try:",
+      "                    import webbrowser",
+      "                    emit('C8O_BROWSER_OPENED', str(webbrowser.open(attempt.sign_in_url)))",
+      "                except Exception as exc:",
+      "                    emit('C8O_BROWSER_OPEN_FAILED', str(exc))",
+      "            exchange_token = await wait_for_completion(gateway, attempt)",
+      "            return await gateway.exchange(attempt.process_id, exchange_token, attempt.code_verifier)",
+      "        finally:",
+      "            await service.aclose()",
+      "",
+      "    try:",
+      "        api_key = asyncio.run(run())",
+      "    except BrowserSignInError as exc:",
+      "        cause = exc.__cause__",
+      "        emit('C8O_LOGIN_ERROR', str(exc) + (' (' + type(cause).__name__ + ': ' + str(cause) + ')' if cause is not None else ''))",
+      "        return 4",
+      "    except Exception as exc:",
+      "        emit('C8O_LOGIN_ERROR', type(exc).__name__ + ': ' + str(exc))",
+      "        return 4",
+      "    if not api_key:",
+      "        emit('C8O_LOGIN_ERROR', 'Sign-in completed without an API key')",
+      "        return 4",
+      "    try:",
+      "        write_env(pathlib.Path(home) / '.env', env_key, api_key)",
+      "    except OSError as exc:",
+      "        emit('C8O_LOGIN_ERROR', 'Unable to store the API key: ' + str(exc))",
+      "        return 5",
+      "    emit('C8O_LOGIN_COMPLETED', env_key)",
+      "    return 0",
+      "",
+      "",
+      "if __name__ == '__main__':",
+      "    sys.exit(main())",
+      ""
+    ].join("\n");
+  }
+
+  function ensureVibeLoginScript(installDir) {
+    var script = new File(installDir, VIBE_LOGIN_SCRIPT_NAME);
+    var source = vibeLoginScriptSource();
+    var current = "";
+    try { current = script.isFile() ? readTextFile(script) : ""; } catch (_ignoreVibeLoginScriptRead) {}
+    if (current !== source) {
+      ensureDirectory(script.getParentFile());
+      writeTextFile(script, source);
+    }
+    return filePath(script);
+  }
+
+  function vibeLoginOptions(options) {
+    options = optionsWithRequestFallbacks(options || {});
+    var copy = {};
+    for (var key in options) {
+      if (Object.prototype.hasOwnProperty.call(options, key)) {
+        copy[key] = options[key];
+      }
+    }
+    copy.vibeHome = "";
+    copy.agentHome = "";
+    copy.vibeHomeScope = "user";
+    copy.homeScope = "user";
+    copy.userId = trim(options.userId) || contextUserId() || "studio";
+    return copy;
+  }
+
+  function vibeLoginKey(homePath) {
+    return "vibe-login:" + filePath(new File(homePath));
+  }
+
+  function vibeAuthenticationRequiredMessage(profile) {
+    return profile === "convertigo"
+      ? "Convertigo agent key is required. Provide the LiteLLM virtual key (" + CONVERTIGO_LLM_API_KEY_ENV + ") for this Studio user."
+      : "Vibe authentication is required. Configure MISTRAL_API_KEY in the Vibe profile.";
+  }
+
+  // Convertigo gateway profile: store the per-user virtual key in the user scoped home.
+  C8O.agentBridge.vibeGatewayKeyStore = function (options) {
+    options = optionsWithRequestFallbacks(options || {});
+    var key = trim(options.gatewayApiKey);
+    if (!key.length) {
+      return { ok: false, status: "error", error: "gatewayApiKey is required", timestamp: now() };
+    }
+    var keyOptions = vibeLoginOptions(withVibeProfile(options, "convertigo"));
+    var setup = detectRuntimePresence(keyOptions);
+    if (!trim(setup.vibeHome).length) {
+      return { ok: false, status: "error", error: setup.home && setup.home.error ? setup.home.error : "Managed VIBE_HOME is not available.", timestamp: now() };
+    }
+    writeEnvFileValue(new File(setup.vibeHome, ".env"), CONVERTIGO_LLM_API_KEY_ENV, key);
+    return {
+      ok: true,
+      status: "stored",
+      home: setup.vibeHome,
+      authentication: inspectVibeAuthentication(setup.vibeHome, "convertigo"),
+      timestamp: now()
+    };
+  };
+
+  function vibeLoginRuntime(loginOptions) {
+    if (isConvertigoGatewayProfile(loginOptions)) {
+      return { ok: false, setup: null, error: "The Convertigo agent mode uses a managed gateway key; browser sign-in does not apply." };
+    }
+    var setup = detectRuntimePresence(loginOptions);
+    var python = setup.python || {};
+    if (!python.found || !commandPathStartsWith(python, setup.venvDir)) {
+      return { ok: false, setup: setup, error: "Managed Vibe runtime is not available." };
+    }
+    if (!trim(setup.vibeHome).length) {
+      return { ok: false, setup: setup, error: setup.home && setup.home.error ? setup.home.error : "Managed VIBE_HOME is not available." };
+    }
+    return { ok: true, setup: setup, python: python };
+  }
+
+  function publicVibeLogin(entry) {
+    var timedOut = expireLoginProcess(entry, AGENT_LOGIN_TIMEOUT_MS);
+    var output = loginProcessOutput(entry);
+    var alive = processAlive(entry.process);
+    var exitCode = loginProcessExitCode(entry, alive);
+    var completed = output.indexOf("C8O_LOGIN_COMPLETED") !== -1;
+    var urlMatch = output.match(/C8O_SIGN_IN_URL\s+(\S+)/);
+    var errorMatch = output.match(/C8O_LOGIN_ERROR\s+([^\n]*)/);
+    var authentication = alive ? null : inspectVibeAuthentication(entry.home);
+    var authenticated = !alive && completed && authentication !== null && authentication.configured === true;
+    var error = "";
+    if (!alive && !authenticated) {
+      error = timedOut ? "Vibe browser sign-in timed out." : (errorMatch ? trim(errorMatch[1]) : (completed ? "Vibe stored the API key but the managed VIBE_HOME still reports no credentials." : trim(output) || ("Vibe browser sign-in exited with code " + exitCode)));
+    }
+    return {
+      ok: alive || authenticated,
+      status: alive ? "waiting_for_login" : (authenticated ? "authenticated" : "error"),
+      running: alive,
+      authenticated: authenticated,
+      home: entry.home,
+      verificationUrl: urlMatch ? trim(urlMatch[1]) : "",
+      message: alive ? "Waiting for Mistral browser authentication." : (authenticated ? "Vibe authentication completed." : "Vibe authentication did not complete."),
+      error: error,
+      exitCode: exitCode,
+      startedAt: Number(entry.startedAt || 0),
+      timestamp: now()
+    };
+  }
+
+  C8O.agentBridge.vibeLoginStatus = function (options) {
+    var loginOptions = vibeLoginOptions(options);
+    var runtime = vibeLoginRuntime(loginOptions);
+    if (!runtime.ok) {
+      return { ok: false, status: "missing", error: runtime.error, timestamp: now() };
+    }
+    var home = runtime.setup.vibeHome;
+    var entry = providerLoginRegistry().get(vibeLoginKey(home));
+    if (entry === null || typeof entry === "undefined") {
+      var authentication = inspectVibeAuthentication(home);
+      return {
+        ok: authentication.configured === true,
+        status: authentication.configured === true ? "authenticated" : "login_required",
+        running: false,
+        authenticated: authentication.configured === true,
+        authentication: authentication,
+        timestamp: now()
+      };
+    }
+    var status = publicVibeLogin(entry);
+    if (status.authenticated === true) {
+      status.authentication = inspectVibeAuthentication(home);
+    }
+    return status;
+  };
+
+  C8O.agentBridge.vibeLoginStart = function (options) {
+    var loginOptions = vibeLoginOptions(options);
+    var runtime = vibeLoginRuntime(loginOptions);
+    if (!runtime.ok) {
+      return { ok: false, status: "missing", error: runtime.error, timestamp: now() };
+    }
+    var setup = runtime.setup;
+    var home = setup.vibeHome;
+    ensureDirectory(new File(home));
+    var key = vibeLoginKey(home);
+    var registry = providerLoginRegistry();
+    var existing = registry.get(key);
+    if (existing !== null && typeof existing !== "undefined" && processAlive(existing.process)) {
+      return publicVibeLogin(existing);
+    }
+    var authentication = inspectVibeAuthentication(home);
+    if (authentication.configured === true && !boolValue(options && options.forceLogin, false)) {
+      return {
+        ok: true,
+        status: "authenticated",
+        running: false,
+        authenticated: true,
+        authentication: authentication,
+        timestamp: now()
+      };
+    }
+    var script = ensureVibeLoginScript(setup.installDir);
+    var stdoutFile = File.createTempFile("c8o-vibe-login-out-", ".log");
+    var stderrFile = File.createTempFile("c8o-vibe-login-err-", ".log");
+    var env = {
+      VIBE_HOME: home,
+      PYTHONUNBUFFERED: "1",
+      PYTHONIOENCODING: "utf-8"
+    };
+    if (isWindows()) {
+      // Like Claude Code on Windows, let the helper open the default browser itself;
+      // the Assistant still receives the URL and may open it too.
+      env.C8O_VIBE_OPEN_BROWSER = "1";
+    }
+    var nodePath = nodeRuntimeSearchPath(loginOptions);
+    if (nodePath.length) {
+      env.PATH = nodePath + String(File.pathSeparator) + String(System.getenv("PATH") || "");
+    }
+    var pb = new ProcessBuilder(toJavaList([runtime.python.path, script]));
+    applyEngineProxyEnvironment(pb.environment(), "https://console.mistral.ai");
+    envObjectToMap(pb.environment(), env);
+    pb.directory(new File(setup.workspaceRoot));
+    pb.redirectOutput(stdoutFile);
+    pb.redirectError(stderrFile);
+    var entry = {
+      provider: "vibe",
+      process: pb.start(),
+      home: home,
+      stdoutFile: stdoutFile,
+      stderrFile: stderrFile,
+      startedAt: now()
+    };
+    registry.put(key, entry);
+    return publicVibeLogin(entry);
   };

@@ -1,14 +1,15 @@
 # Convertigo Agent Bridge
 
 `lib_ConvertigoAgentBridge` is Tigo's local runtime bridge for Convertigo
-Studio. It manages workspace-local OpenAI Codex and Mistral Vibe runtimes,
+Studio. It manages workspace-local OpenAI Codex, Mistral Vibe, and Anthropic
+Claude Code runtimes,
 persistent agent processes, isolated homes, conversations, events, and local
 viewer integration.
 
 ## Highlights
 
-- Installs and updates managed Codex, Vibe, Python, and Node.js runtimes while
-  honoring Convertigo proxy settings.
+- Installs and updates managed Codex, Vibe, Claude Code, Python, and Node.js
+  runtimes while honoring Convertigo proxy settings.
 - Keeps long-running Codex and Vibe processes behind a stable HTTP/polling
   contract used by the Tigo Assistant.
 - Isolates homes and conversations inside the Convertigo workspace.
@@ -63,6 +64,11 @@ Il expose les sequences publiques suivantes :
   quand le runtime l'expose.
 - `agent_vibe_close` : ferme la session et arrete le process.
 - `agent_sweep_expired` : nettoie les process abandonnes.
+- `agent_claude_setup` : verifie ou installe le runtime Claude Code local.
+- `agent_claude_start` : lance ou reutilise un process resident `claude -p`
+  en stream-json et reprend une session Claude Code si un id est fourni.
+- `agent_claude_prompt` : envoie un prompt au process Claude Code resident.
+- `agent_claude_close` : ferme le handle Claude Code et arrete son process.
 
 Les process sont gardes en memoire serveur via `context.server.set/get`. Le
 handle courant est memorise dans la session HTTP pour permettre au chatbot de
@@ -195,6 +201,23 @@ Le bootstrap Vibe fait :
 Vibe charge aussi sa config `config.toml`; le champ ACP `mcpServers` seul ne
 suffit pas. Le setup local configure donc explicitement le MCP dans le
 `VIBE_HOME` utilise par le process.
+
+## Playwright MCP pour Claude et Vibe
+
+Le meme raccord viewer que Codex est applique aux providers Claude et Vibe :
+
+- `agent_claude_start` et `agent_vibe_start` reservent un port de debug JxBrowser
+  stable par conversation (bail sous `<workspace>/agents/codex/viewer-debug-ports`,
+  partage entre providers) et basculent le home gere en scope `conversation`.
+- Le header `X-Convertigo-Viewer-Debug-Port` est envoye au MCP Convertigo pour
+  que `mobile-builder-open` ouvre le viewer du Studio sur ce port.
+- `@playwright/mcp` est installe dans le prefixe npm du provider
+  (`<workspace>/agents/claude/npm`, `<workspace>/agents/vibe/npm`) avec
+  `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`, puis declare comme serveur MCP stdio
+  `playwright` avec `--cdp-endpoint http://127.0.0.1:<port> --shared-browser-context` :
+  dans `convertigo-mcp.json` pour Claude, dans `config.toml` (`[[mcp_servers]]`,
+  `transport = "stdio"`) pour Vibe.
+- Un changement d'endpoint viewer ou de jeton redemarre le process resident.
 
 ## Runtime Python workspace-local
 
@@ -347,6 +370,48 @@ utilise donc `vibe-home` par defaut et accepte aussi `credentialsPolicy` :
 Les valeurs des variables ne sont jamais retournees dans les evenements ou les
 status, seuls les noms de variables injectees le sont.
 
+### Connexion navigateur Mistral (Vibe)
+
+Vibe n'expose son sign-in navigateur que dans l'onboarding interactif
+(`vibe --setup`) ou via ACP `authenticate`. Le bridge pilote le meme service
+Python sans terminal : `agent_vibe_setup` avec `login=true` (alias `vibeLogin`,
+`forceLogin`) execute `agents/vibe/c8o_vibe_browser_login.py` avec le Python du
+venv gere et `VIBE_HOME` = home scope `user`. Le script cree la tentative de
+connexion Mistral AI Studio, ecrit `C8O_SIGN_IN_URL <url>` (repris dans
+`verificationUrl`), attend la confirmation navigateur puis enregistre
+`MISTRAL_API_KEY` dans `<VIBE_HOME>/.env` (mode 600). La cle n'apparait jamais
+dans la sortie du bridge. Le suivi de la tentative tolere la limitation de debit
+de Mistral (HTTP 429 apres une minute) avec un recul progressif jusqu'a
+l'expiration ; sous Windows le script ouvre lui-meme le navigateur par defaut. `loginStatus=true` suit le processus
+(`waiting_for_login`, `authenticated`, `error`), abandonne apres 15 minutes.
+Les homes scope `conversation` recuperent ensuite ce `.env` par le bootstrap
+(source la plus recente entre le home scope `user` et `~/.vibe`). Sans
+identifiants, `authentication.action` vaut `vibe_login` ; une cle stockee par
+`vibe --setup` dans le trousseau macOS (`ai.mistral.vibe`) est aussi reconnue.
+
+### Mode Convertigo (passerelle LiteLLM)
+
+Le mode « Convertigo » est un fournisseur logique : aucun compte personnel, la clé
+virtuelle LiteLLM de l'utilisateur (email du PSC) est consommee par un harnais,
+aujourd'hui Vibe (`harness = "vibe"` dans `agent_settings`). Options des sequences
+Vibe : `vibeProfile=convertigo` (home dedie `agents/vibe/homes-convertigo/...`,
+jamais synchronise avec `~/.vibe`), `llmGatewayUrl` (defaut
+`https://llm.convertigo.com/v1`), `llmGatewayModel` (defaut
+`mistral/zai-glm-5-2`, alias `glm-5-2`), `llmGatewayThinking` (defaut `off` tant
+que la passerelle refuse `reasoning_effort`). Le `config.toml` genere declare un
+`[[providers]] name = "convertigo"` (`backend = "generic"`, `api_style = "openai"`,
+`api_key_env_var = "CONVERTIGO_LLM_API_KEY"`).
+
+La cle est lue, dans l'ordre, depuis l'environnement `CONVERTIGO_LLM_API_KEY`,
+le `.env` du home gere, puis le fichier `<workspace>/agents/convertigo/llm-api-key`
+(premiere ligne = cle, emplacement destine a l'onboarding automatique). Elle peut
+aussi etre deposee par `agent_vibe_setup` avec `gatewayApiKey` (stockee dans le
+`.env` du home scope `user`, jamais renvoyee). `agent_settings` expose pour ce
+fournisseur `identity.email` (lu dans le PSC via `ConvertigoPlugin.decodePsc()`)
+et `gateway.{url,model,apiKeyEnv}` ; le sign-in navigateur ne s'applique pas.
+Le mode Convertigo est liste en premier et devient le fournisseur par defaut des
+qu'il est pret.
+
 ## Validation locale
 
 Validation faite le 2026-08-24 sur le port hotfix local de developpement :
@@ -375,3 +440,57 @@ Validation faite le 2026-08-24 sur le port hotfix local de developpement :
    vraie authentification Vibe.
 4. Declencher `agent_sweep_expired` depuis un scheduler Convertigo.
 5. Brancher l'UI assistant locale par polling HTTP.
+
+## Runtime Claude Code workspace-local
+
+`agent_claude_setup` detecte d'abord une CLI Claude Code existante (`claudePath`,
+puis `<workspace>/agents/claude/npm/node_modules/.bin/claude`, puis les chemins
+usuels du poste). Si aucune CLI n'est trouvee et que `install=true`, il installe
+le package npm `@anthropic-ai/claude-code@latest` dans
+`<workspace>/agents/claude/npm` avec le Node/npm du moteur Convertigo et la
+configuration proxy du serveur.
+
+Le home gere est un `CLAUDE_CONFIG_DIR` visible :
+`<workspace>/agents/claude/homes/users/<stable-user-id>/claude-home`. Le bridge
+y ecrit `.claude.json` (onboarding deja effectue), `CLAUDE.md` (instructions de
+la session Tigo), `convertigo-mcp.json` et les skills geres
+`skills/convertigo-studio` et `skills/convertigo-generalist`, synchronises depuis
+`lib_ConvertigoMCP._setupClaude` (`configureMcp=false`). Le profil No Code ecrit
+`skills/convertigo-nocode`.
+
+Le serveur MCP Convertigo est passe au process avec `--mcp-config
+<home>/convertigo-mcp.json --strict-mcp-config`. Le fichier reference
+`Authorization = "Bearer ${CONVERTIGO_MCP_TOKEN}"` : la variable est resolue par
+Claude Code au demarrage depuis l'environnement injecte par le bridge, le jeton
+n'est jamais ecrit sur disque. Un renouvellement de jeton, un changement de
+modele, d'effort ou de bundle de skills redemarre le process avec `--resume`.
+
+Le process resident est `claude -p --input-format stream-json --output-format
+stream-json --verbose --include-partial-messages --permission-mode
+bypassPermissions`. Les evenements stream-json sont normalises : texte en cours
+en `answer/chunk` phase `commentary`, `tool_use` / `tool_result` en `tool/start`
+et `tool/update`, reponse finale (`result`) en `answer/chunk` phase
+`final_answer` puis `turn/end`. Une reponse `Not logged in` devient un
+`turn/error` marque `authentication`.
+
+Authentification : comme pour Codex, le bridge copie le fichier
+`.credentials.json` du home utilisateur (`~/.claude`) ou du home scope `user`
+vers le home gere, ou l'extrait du trousseau macOS (`Claude Code-credentials`).
+`ANTHROPIC_API_KEY` et `CLAUDE_CODE_OAUTH_TOKEN` sont acceptes depuis
+l'environnement. Sans identifiants, `agent_claude_setup` retourne
+`authentication_required` avec `authentication.action = "claude_login"`.
+
+Connexion navigateur : `agent_claude_setup` avec `login=true` (alias
+`claudeLogin`, `forceLogin` pour forcer une nouvelle session) lance
+`claude auth login` dans le home scope `user`, avec `BROWSER` pointe sur un petit
+script (`agents/claude/claude-login-browser.sh`) qui enregistre l'URL OAuth au
+lieu d'ouvrir un navigateur ; la reponse expose `verificationUrl` (callback
+`localhost` gere par le CLI) que l'Assistant ouvre dans le navigateur de
+l'utilisateur, exactement comme `codex login`. Sur Windows le CLI ouvre lui-meme
+le navigateur par defaut. `loginStatus=true` suit le processus
+(`waiting_for_login`, `authenticated`, `error`) ; a la fin, `claude auth status`
+fait foi puis les identifiants sont resynchronises dans le home gere. Le
+processus est abandonne apres 15 minutes.
+
+L'automatisation du viewer Studio passe par le serveur Playwright MCP decrit dans
+la section dediee. Le pack Flow reste reserve a Codex.

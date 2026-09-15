@@ -18,6 +18,135 @@
   var NOCODE_MCP_TOKEN_ENV = "C8O_NOCODE_MCP_TOKEN";
   var MCP_TOKEN_ENV = "CONVERTIGO_MCP_TOKEN";
   var MCP_GUIDANCE_VERSION = "2026-09-04.vibe-serial-transport-v1";
+  // GLM 5.2 routed through the Mistral account has no vision: Mistral answers
+  // "Image input is not enabled for this model" (400, code 3051) when an image
+  // block is sent. Verified on 2026-09-14; flip only after a new live check.
+  var VIBE_GLM_SUPPORTS_IMAGES = false;
+  // "Convertigo" agent mode: Vibe talks to the Convertigo LiteLLM gateway with a
+  // per-user virtual key instead of a personal Mistral account.
+  var CONVERTIGO_LLM_GATEWAY_URL = "https://llm.convertigo.com/v1";
+  var CONVERTIGO_LLM_GATEWAY_MODEL = "mistral/zai-glm-5-2";
+  var CONVERTIGO_LLM_GATEWAY_ALIAS = "glm-5-2";
+  var CONVERTIGO_LLM_API_KEY_ENV = "CONVERTIGO_LLM_API_KEY";
+  // The gateway rejects reasoning_effort for the Mistral provider until it allows it;
+  // keep thinking off by default and let llmGatewayThinking override it.
+  var CONVERTIGO_LLM_GATEWAY_THINKING = "off";
+
+  function vibeProfile(options) {
+    options = options || {};
+    var raw = trim(options.vibeProfile || options.gatewayProfile || options.agentMode).toLowerCase();
+    if (!raw.length) {
+      var provider = trim(options.provider || options.agent || options.agentProvider).toLowerCase();
+      raw = provider === "convertigo" ? "convertigo" : "";
+    }
+    return raw === "convertigo" || raw === "gateway" || raw === "convertigo-gateway" ? "convertigo" : "mistral";
+  }
+
+  function isConvertigoGatewayProfile(options) {
+    return vibeProfile(options) === "convertigo";
+  }
+
+  function withVibeProfile(options, profile) {
+    var copy = {};
+    for (var key in (options || {})) {
+      if (Object.prototype.hasOwnProperty.call(options, key)) {
+        copy[key] = options[key];
+      }
+    }
+    copy.vibeProfile = profile;
+    if (profile === "convertigo" && normalizeProvider(copy.provider || "vibe") === "convertigo") {
+      copy.provider = "vibe";
+    }
+    return copy;
+  }
+
+  function convertigoGatewayUrl(options) {
+    var url = trim(options && (options.llmGatewayUrl || options.gatewayUrl)) || CONVERTIGO_LLM_GATEWAY_URL;
+    return url.replace(/\/+$/, "");
+  }
+
+  function convertigoGatewayModel(options) {
+    return trim(options && (options.llmGatewayModel || options.gatewayModel)) || CONVERTIGO_LLM_GATEWAY_MODEL;
+  }
+
+  function convertigoGatewayThinking(options) {
+    var value = trim(options && (options.llmGatewayThinking || options.gatewayThinking)).toLowerCase();
+    if (value === "off" || value === "none" || value === "false") {
+      return "";
+    }
+    if (value === "low" || value === "medium" || value === "high") {
+      return value;
+    }
+    return CONVERTIGO_LLM_GATEWAY_THINKING === "off" ? "" : CONVERTIGO_LLM_GATEWAY_THINKING;
+  }
+
+  function vibeGatewayModelSpec(options) {
+    var thinking = convertigoGatewayThinking(options);
+    return {
+      activeModel: CONVERTIGO_LLM_GATEWAY_ALIAS,
+      name: convertigoGatewayModel(options),
+      alias: CONVERTIGO_LLM_GATEWAY_ALIAS,
+      provider: "convertigo",
+      thinking: thinking,
+      temperature: "1.0",
+      inputPrice: "1.4",
+      outputPrice: "4.4",
+      builtIn: false,
+      supportsImages: VIBE_GLM_SUPPORTS_IMAGES
+    };
+  }
+
+  function convertigoGatewayKeyFile(options) {
+    // Stable drop location for the per-user gateway key (filled by the future automatic
+    // onboarding, or by hand meanwhile). The first line is the key.
+    try {
+      var workspaceRoot = resolveWorkspaceRoot(options || {});
+      return new File(childPath(childPath(workspaceRoot, "agents"), "convertigo"), "llm-api-key");
+    } catch (_ignoreGatewayKeyFile) {
+      return null;
+    }
+  }
+
+  function readConvertigoGatewayKeyFile(options) {
+    try {
+      var file = convertigoGatewayKeyFile(options);
+      if (file !== null && file.isFile()) {
+        var first = trim(readTextFile(file).split(/\r?\n/)[0]);
+        return first.length && first.indexOf("#") !== 0 ? first : "";
+      }
+    } catch (_ignoreGatewayKeyRead) {}
+    return "";
+  }
+
+  function studioOwnerEmail() {
+    // The Studio PSC carries the registered owner email; the class is only present in Studio.
+    try {
+      var plugin = Packages.com.twinsoft.convertigo.eclipse.ConvertigoPlugin;
+      var properties = plugin.decodePsc();
+      var email = properties === null ? "" : trim(properties.getProperty("owner.email"));
+      return email.length ? email : "";
+    } catch (_ignoreStudioOwnerEmail) {
+      return "";
+    }
+  }
+
+  function parseVibeGatewayUrl(text) {
+    var pattern = /\[\[providers\]\]([\s\S]*?)(?=\n\[\[|\n\[|$)/g;
+    var match;
+    while ((match = pattern.exec(String(text || ""))) !== null) {
+      var block = match[1];
+      if (!/\nname\s*=\s*["']convertigo["']/.test("\n" + block)) {
+        continue;
+      }
+      var base = block.match(/\napi_base\s*=\s*["']([^"']+)["']/);
+      return base ? trim(base[1]).replace(/\/+$/, "") : "";
+    }
+    return "";
+  }
+
+  var VIBE_IMAGE_MIME_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+  var VIBE_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+  var VIBE_MAX_IMAGES_PER_MESSAGE = 8;
   var STUDIO_ROUTER_SKILL_SLUG = "convertigo-studio";
   var MANAGED_SKILL_BUNDLE_STATE_FILE = "managed-skill-bundle.json";
   var FLOW_MINIMUM_CONVERTIGO_VERSION = "8.5.0";
@@ -30,7 +159,7 @@
       authoringPolicy: "legacy-only",
       aliases: ["generalist", "legacy"],
       capabilityIds: ["convertigo-legacy"],
-      supportedProviders: ["codex", "vibe"],
+      supportedProviders: ["codex", "vibe", "claude"],
       mcpPath: FALLBACK_MCP_PATH,
       mcpServerName: "convertigo",
       setupProject: "lib_ConvertigoMCP",
@@ -45,7 +174,7 @@
       authoringPolicy: "nocode",
       aliases: ["nocode", "no-code", "c8oforms", "forms"],
       capabilityIds: ["convertigo-nocode"],
-      supportedProviders: ["codex", "vibe"],
+      supportedProviders: ["codex", "vibe", "claude"],
       mcpPath: FALLBACK_MCP_PATH,
       mcpServerName: "convertigo",
       setupProject: "lib_ConvertigoMCP",
@@ -164,7 +293,9 @@
       "currentUrl", "currentRoute", "currentPath", "currentFormId", "currentFormUrl",
       "nocodeCurrentUrl", "nocodeCurrentRoute", "nocodeCurrentFormId", "nocodeCurrentFormUrl",
       "formId", "pageId", "applicationId", "currentPage", "currentApplicationId",
-      "codexHomeScope", "vibeHomeScope", "homeScope", "codexHome", "vibeHome", "agentHome",
+      "codexHomeScope", "vibeHomeScope", "claudeHomeScope", "homeScope", "codexHome", "vibeHome", "claudeHome", "agentHome",
+      "vibeProfile", "gatewayProfile", "agentMode", "llmGatewayUrl", "llmGatewayModel", "llmGatewayThinking", "gatewayApiKey",
+      "claudePath",
       "mcpEndpoint", "workspaceRoot", "settingsTimeoutMs", "modelsTimeoutMs",
       "model", "reasoningEffort", "reasoningLevel", "serviceTier", "savePreferences",
       "checkUpdates", "refreshUpdateCheck", "updateCheckTimeoutMs", "updateCheckCacheMs", "runtimePresenceOnly",
@@ -532,6 +663,9 @@
     if (normalized === "vibe") {
       return trim(env.MISTRAL_BASE_URL || env.MISTRAL_API_URL) || "https://api.mistral.ai";
     }
+    if (normalized === "claude") {
+      return trim(env.ANTHROPIC_BASE_URL) || "https://api.anthropic.com";
+    }
     return "";
   }
 
@@ -779,7 +913,7 @@
     writeTextFile(file, JSON.stringify(value || {}, null, 2));
   }
 
-  function managedSkillBundleSlugs(options) {
+  function managedSkillBundleSlugs(options, provider) {
     if (normalizeSkillProfile(options || {}) === "nocode") {
       return ["convertigo-nocode"];
     }
@@ -787,7 +921,7 @@
       STUDIO_ROUTER_SKILL_SLUG,
       "convertigo-generalist"
     ];
-    if (flowCapabilityAvailable()) {
+    if (normalizeProvider(provider || (options && options.provider)) !== "claude" && flowCapabilityAvailable()) {
       slugs.push("convertigo-flow-mcp");
       slugs.push("convertigo-flow-backend");
       slugs.push("convertigo-flow-frontend-svelte");
@@ -804,9 +938,9 @@
     return values.length ? hashShort(values.join("\n")) : "";
   }
 
-  function managedSkillBundleState(options, homePath) {
+  function managedSkillBundleState(options, homePath, provider) {
     var home = trim(homePath);
-    var slugs = managedSkillBundleSlugs(options);
+    var slugs = managedSkillBundleSlugs(options, provider);
     var skillHashes = {};
     var missing = [];
     if (home.length) {
@@ -2020,6 +2154,25 @@
     return npx.found ? npx.path : "npx";
   }
 
+  function playwrightMcpDirectLaunch(options, installDir) {
+    // Prefer `node <prefix>/node_modules/@playwright/mcp/cli.js`: Vibe (Python asyncio)
+    // and Claude Code spawn stdio MCP servers without a shell, so the npx `.cmd`
+    // shim fails on Windows ([WinError 2]) and the launcher shebang is not honoured.
+    options = options || {};
+    var cli = new File(childPath(childPath(codexNodeModulesPath(installDir), "@playwright/mcp"), "cli.js"));
+    if (!cli.isFile()) {
+      return null;
+    }
+    var node = detectNodeRuntime(options);
+    if (!node.found) {
+      return null;
+    }
+    return {
+      command: node.path,
+      args: [filePath(cli), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"]
+    };
+  }
+
   function codexPlaywrightMcpInlineCdpEndpointEnabled(options) {
     options = options || {};
     if (!resolvePlaywrightMcpCdpEndpoint(options).length) {
@@ -2560,8 +2713,8 @@
     ].join("\n");
   }
 
-  function buildConvertigoStudioRouterSkill() {
-    if (!flowCapabilityAvailable()) {
+  function buildConvertigoStudioRouterSkill(legacyOnly) {
+    if (legacyOnly === true || !flowCapabilityAvailable()) {
       return [
         "---",
         "name: convertigo-studio",
@@ -2570,7 +2723,7 @@
         "",
         "# Convertigo Studio router",
         "",
-        "This is a Low Code Studio session. The `convertigo` MCP server is installed in this Codex home.",
+        "This is a Low Code Studio session. The `convertigo` MCP server is installed in this agent home.",
         "The No Code capability is unavailable to the Studio user and must never be used from this session.",
         "",
         "## Mandatory workflow",
@@ -2610,10 +2763,10 @@
     ].join("\n");
   }
 
-  function installStudioRouterSkill(homePath, dryRun) {
+  function installStudioRouterSkill(homePath, dryRun, legacyOnly) {
     var codexHome = new File(effectiveCodexHomePath(homePath));
     var skillFile = new File(new File(new File(codexHome, "skills"), STUDIO_ROUTER_SKILL_SLUG), "SKILL.md");
-    var write = writeManagedTextFile(skillFile, buildConvertigoStudioRouterSkill(), dryRun === true);
+    var write = writeManagedTextFile(skillFile, buildConvertigoStudioRouterSkill(legacyOnly === true), dryRun === true);
     return {
       status: write.status,
       path: filePath(skillFile)
@@ -3018,6 +3171,9 @@
 
   function installAgentSkills(options, provider, homePath) {
     options = options || {};
+    if (normalizeProvider(provider) === "claude" && typeof installClaudeSkills === "function") {
+      return installClaudeSkills(options, homePath);
+    }
     if (normalizeProvider(provider) === "codex") {
       var codexReport;
       if (normalizeSkillProfile(options) !== "nocode") {
@@ -3289,7 +3445,29 @@
     return report;
   }
 
-  function bootstrapVibeHome(homePath) {
+  function vibeCredentialSourceDirs(options, homeDir) {
+    options = options || {};
+    var sources = [];
+    var gateway = isConvertigoGatewayProfile(options);
+    try {
+      var workspaceRoot = resolveWorkspaceRoot(options);
+      var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
+      var userHome = resolveVibeHome({
+        vibeHomeScope: "user",
+        vibeProfile: vibeProfile(options),
+        userId: trim(options.userId) || contextUserId()
+      }, installDir);
+      if (trim(userHome.path).length && filePath(new File(userHome.path)) !== filePath(homeDir)) {
+        sources.push(new File(userHome.path));
+      }
+    } catch (_ignoreVibeUserHome) {}
+    if (!gateway) {
+      sources.push(new File(String(System.getProperty("user.home")), ".vibe"));
+    }
+    return sources;
+  }
+
+  function bootstrapVibeHome(homePath, options) {
     var report = {
       attempted: false,
       ok: true,
@@ -3308,8 +3486,14 @@
     try {
       var homeDir = new File(report.home);
       ensureDirectory(homeDir);
-      var userVibe = new File(String(System.getProperty("user.home")), ".vibe");
-      syncAgentUserFile(userVibe, homeDir, ".env", report);
+      syncNewestAgentUserFile(vibeCredentialSourceDirs(options, homeDir), homeDir, ".env", report);
+      if (isConvertigoGatewayProfile(options) && !vibeEnvHasKey(new File(homeDir, ".env"), CONVERTIGO_LLM_API_KEY_ENV)) {
+        var gatewayKey = readConvertigoGatewayKeyFile(options);
+        if (gatewayKey.length) {
+          writeEnvFileValue(new File(homeDir, ".env"), CONVERTIGO_LLM_API_KEY_ENV, gatewayKey);
+          report.copied.push(".env");
+        }
+      }
       report.message = "Scoped VIBE_HOME credentials synchronized";
     } catch (e) {
       report.ok = false;
@@ -3628,16 +3812,71 @@
     return authentication;
   }
 
-  function vibeEnvHasApiKey(file) {
+  function vibeEnvHasKey(file, name) {
     try {
       var parsed = readEnvFile(file);
-      return trim(parsed.values.MISTRAL_API_KEY).length > 0;
+      return trim(parsed.values[name]).length > 0;
     } catch (_ignoreVibeEnv) {
       return false;
     }
   }
 
-  function inspectVibeAuthentication(vibeHome) {
+  function vibeEnvHasApiKey(file) {
+    return vibeEnvHasKey(file, "MISTRAL_API_KEY");
+  }
+
+  function writeEnvFileValue(file, name, value) {
+    var lines = [];
+    try {
+      if (file.isFile()) {
+        lines = readTextFile(file).split(/\r?\n/);
+      }
+    } catch (_ignoreEnvRead) {}
+    var out = [];
+    var replaced = false;
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var body = trim(line);
+      if (body.indexOf("export ") === 0) {
+        body = trim(body.substring(7));
+      }
+      if (body.indexOf(name + "=") === 0) {
+        if (!replaced) {
+          out.push(name + "=" + value);
+          replaced = true;
+        }
+        continue;
+      }
+      if (line.length || i < lines.length - 1) {
+        out.push(line);
+      }
+    }
+    if (!replaced) {
+      out.push(name + "=" + value);
+    }
+    ensureDirectory(file.getParentFile());
+    writeTextFile(file, out.join("\n").replace(/\n*$/, "") + "\n");
+    try {
+      file.setReadable(false, false);
+      file.setReadable(true, true);
+      file.setWritable(false, false);
+      file.setWritable(true, true);
+    } catch (_ignoreEnvPermissions) {}
+  }
+
+  function inspectVibeAuthentication(vibeHome, profile) {
+    if (profile === "convertigo") {
+      if (environmentHasValue(CONVERTIGO_LLM_API_KEY_ENV)) {
+        return authenticationInfo(true, "environment", "");
+      }
+      if (trim(vibeHome).length && vibeEnvHasKey(new File(trim(vibeHome), ".env"), CONVERTIGO_LLM_API_KEY_ENV)) {
+        return authenticationInfo(true, "scoped_home", "");
+      }
+      if (readConvertigoGatewayKeyFile(null).length) {
+        return authenticationInfo(true, "key_file", "");
+      }
+      return authenticationInfo(false, "", "convertigo_key");
+    }
     if (environmentHasValue("MISTRAL_API_KEY")) {
       return authenticationInfo(true, "environment", "");
     }
@@ -3648,7 +3887,25 @@
     if (vibeEnvHasApiKey(userEnv)) {
       return authenticationInfo(true, "user_home", "");
     }
-    return authenticationInfo(false, "", "mistral_api_key");
+    if (vibeKeychainHasApiKey()) {
+      return authenticationInfo(true, "keychain", "");
+    }
+    return authenticationInfo(false, "", "vibe_login");
+  }
+
+  var VIBE_KEYCHAIN_SERVICE = "ai.mistral.vibe";
+
+  function vibeKeychainHasApiKey() {
+    // Vibe itself stores the key in the macOS Keychain when `vibe --setup` is used on the workstation.
+    if (!isMacOsHost()) {
+      return false;
+    }
+    try {
+      var probe = runCommand(["/usr/bin/security", "find-generic-password", "-s", VIBE_KEYCHAIN_SERVICE, "-a", "MISTRAL_API_KEY"], { timeoutMs: 8000 });
+      return probe.ok === true;
+    } catch (_ignoreVibeKeychain) {
+      return false;
+    }
   }
 
   function projectWorkspaceRoot(projectName) {
@@ -3776,6 +4033,9 @@
     if (provider === "mistral-vibe" || provider === "vibe-acp") {
       return "vibe";
     }
+    if (provider === "claude-code" || provider === "anthropic-claude" || provider === "anthropic" || provider === "claude-cli") {
+      return "claude";
+    }
     return provider.length ? provider.replace(/[^a-z0-9_.-]/g, "_") : "vibe";
   }
 
@@ -3786,6 +4046,9 @@
     }
     if (provider === "vibe") {
       return "Vibe";
+    }
+    if (provider === "claude") {
+      return "Claude";
     }
     return provider;
   }
@@ -3929,7 +4192,7 @@
     if (scope === "shared") {
       return {
         scope: "shared",
-        path: childPath(installDir, ".vibe-home"),
+        path: childPath(installDir, isConvertigoGatewayProfile(options) ? ".vibe-home-convertigo" : ".vibe-home"),
         explicit: false,
         userId: "",
         conversationId: "",
@@ -3938,7 +4201,7 @@
       };
     }
 
-    var root = childPath(installDir, "homes");
+    var root = childPath(installDir, isConvertigoGatewayProfile(options) ? "homes-convertigo" : "homes");
     var user = trim(options.userId) || contextUserId();
     if (scope === "user") {
       if (!user.length) {
@@ -4304,6 +4567,9 @@
       providers = providers || [];
       for (var i = 0; i < providers.length; i++) {
         var provider = providers[i] || {};
+        if (provider.source && (provider.source.discoveryError || provider.source.modelCatalogRefreshRequired)) {
+          continue;
+        }
         var cacheKey = providerCacheKey(provider);
         if (cacheKey.length && provider.models && provider.models.length) {
           persistent.value.providers[cacheKey] = compactProviderSettingsCache(provider);
@@ -4369,7 +4635,7 @@
     provider.supports = cached.supports || provider.supports || {};
     provider.source = provider.source || {};
     provider.source.settingsCached = true;
-    provider.source.settingsCachedAt = Number(cached.cachedAt || 0);
+    provider.source.settingsCachedAt = provider.source.modelCatalogRefreshRequired ? 0 : Number(cached.cachedAt || 0);
     return provider;
   }
 
@@ -4409,6 +4675,9 @@
   }
 
   function providerSettingsCacheFresh(provider, maxAgeMs) {
+    if (provider && provider.source && provider.source.modelCatalogRefreshRequired) {
+      return false;
+    }
     var cachedAt = Number(provider && provider.source && provider.source.settingsCachedAt || 0);
     return cachedAt > 0 && now() - cachedAt < maxAgeMs;
   }
@@ -5718,6 +5987,7 @@
       hasHttpTransport: false,
       bearerTokenEnv: "",
       endpoint: "",
+      gatewayUrl: "",
       valid: false
     };
     if (!info.exists) {
@@ -5739,6 +6009,26 @@
       info.endpoint = match ? match[1] : "";
       var bearerMatch = block.match(/api_key_env\s*=\s*["']([^"']+)["']/);
       info.bearerTokenEnv = bearerMatch ? bearerMatch[1] : "";
+      var viewerPortMatch = block.match(/["']X-Convertigo-Viewer-Debug-Port["']\s*=\s*["'](\d+)["']/);
+      info.viewerDebugPort = viewerPortMatch ? Number(viewerPortMatch[1]) : 0;
+      break;
+    }
+    info.gatewayUrl = parseVibeGatewayUrl(text);
+    info.playwrightEndpoint = "";
+    info.playwrightCommand = "";
+    var playwrightPattern = /\[\[mcp_servers\]\]([\s\S]*?)(?=\n\[\[mcp_servers\]\]|$)/g;
+    var playwrightMatch;
+    while ((playwrightMatch = playwrightPattern.exec(text)) !== null) {
+      var playwrightBlock = playwrightMatch[1];
+      if (!/name\s*=\s*["']playwright["']/.test(playwrightBlock)) {
+        continue;
+      }
+      var cdpMatch = playwrightBlock.match(/"--cdp-endpoint",\s*"([^"]+)"/);
+      info.playwrightEndpoint = cdpMatch ? cdpMatch[1] : "";
+      // Only the list form is considered valid; a legacy string command is reported
+      // empty so the config gets rewritten.
+      var commandMatch = playwrightBlock.match(/\ncommand\s*=\s*\[\s*"((?:[^"\\]|\\.)*)"/);
+      info.playwrightCommand = commandMatch ? commandMatch[1].replace(/\\(.)/g, "$1") : "";
       break;
     }
     info.valid = info.hasMcpServers && info.hasConvertigoServer && info.hasHttpTransport && info.endpoint.length > 0;
@@ -5764,7 +6054,8 @@
         thinking: "high",
         temperature: "1.0",
         inputPrice: "1.5",
-        outputPrice: "7.5"
+        outputPrice: "7.5",
+        supportsImages: true
       };
     }
     if (lower === "mistral-medium-3.5") {
@@ -5775,7 +6066,8 @@
         thinking: "high",
         temperature: "1.0",
         inputPrice: "1.5",
-        outputPrice: "7.5"
+        outputPrice: "7.5",
+        supportsImages: true
       };
     }
     if (lower === "zai-glm-5-2" || lower === "glm-5-2") {
@@ -5787,7 +6079,8 @@
         temperature: "1.0",
         inputPrice: "1.4",
         outputPrice: "4.4",
-        builtIn: true
+        builtIn: false,
+        supportsImages: VIBE_GLM_SUPPORTS_IMAGES
       };
     }
     return {
@@ -5803,7 +6096,15 @@
 
   function migrateManagedVibeModelPresets(text) {
     var removed = [];
+    var hasGlm = false;
+    if (parseVibeGatewayUrl(text).length) {
+      // Convertigo gateway profile: the model catalog is the gateway's, not Mistral's.
+      return { text: String(text || ""), removed: [], added: false, migratedActiveModel: false };
+    }
     var result = String(text || "").replace(/(^|\n)\[\[models\]\]([\s\S]*?)(?=\n\[\[|\n\[|$)/g, function (match, prefix, block) {
+      var name = parseTomlValue(block, "name");
+      var alias = parseTomlValue(block, "alias");
+      hasGlm = hasGlm || name === "zai-glm-5-2" || alias === "glm-5-2" || alias === "zai-glm-5-2";
       var managed = parseTomlValue(block, "name") === "zai-glm-5-2"
         && parseTomlValue(block, "alias") === "zai-glm-5-2"
         && parseTomlValue(block, "provider") === "mistral"
@@ -5814,16 +6115,25 @@
         return match;
       }
       removed.push("zai-glm-5-2");
-      return prefix;
+      return match.replace(/(alias\s*=\s*["'])zai-glm-5-2(["'])/, "$1glm-5-2$2");
+    });
+    var glmImagesLine = "supports_images = " + (VIBE_GLM_SUPPORTS_IMAGES ? "true" : "false");
+    result = result.replace(/((?:^|\n)\[\[models\]\]\s*\nname\s*=\s*["']zai-glm-5-2["'][\s\S]*?)(supports_images\s*=\s*(?:true|false))/g, function (match, head, current) {
+      return current === glmImagesLine ? match : head + glmImagesLine;
     });
     var migratedActiveModel = false;
     if (removed.length && /^\s*active_model\s*=\s*["']zai-glm-5-2["']/m.test(result)) {
       result = result.replace(/^(\s*active_model\s*=\s*["'])zai-glm-5-2(["'])/m, "$1glm-5-2$2");
       migratedActiveModel = true;
     }
+    if (!hasGlm) {
+      // GLM can be account-routed, but is not a guaranteed CLI default.
+      result = result.replace(/\s*$/, "") + '\n\n[[models]]\nname = "zai-glm-5-2"\nprovider = "mistral"\nalias = "glm-5-2"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\nsupports_images = ' + (VIBE_GLM_SUPPORTS_IMAGES ? 'true' : 'false') + '\n';
+    }
     return {
       text: result.replace(/\n{3,}/g, "\n\n"),
       removed: removed,
+      added: !hasGlm,
       migratedActiveModel: migratedActiveModel
     };
   }
@@ -5833,13 +6143,15 @@
     if (!configFile.isFile()) {
       return { path: filePath(configFile), removed: [], migratedActiveModel: false };
     }
-    var patched = migrateManagedVibeModelPresets(readTextFile(configFile));
-    if (patched.removed.length) {
+    var original = readTextFile(configFile);
+    var patched = migrateManagedVibeModelPresets(original);
+    if (patched.text !== original) {
       writeTextFile(configFile, patched.text);
     }
     return {
       path: filePath(configFile),
       removed: patched.removed,
+      added: patched.added,
       migratedActiveModel: patched.migratedActiveModel
     };
   }
@@ -5848,8 +6160,25 @@
     var configDir = new File(vibeHome);
     ensureDirectory(configDir);
     var configFile = new File(configDir, "config.toml");
-    var spec = vibeModelSpec(model);
-    var lines = [
+    var gateway = isConvertigoGatewayProfile(options);
+    var spec = gateway ? vibeGatewayModelSpec(options) : vibeModelSpec(model);
+    var lines = gateway ? [
+      '# Generated by lib_ConvertigoAgentBridge (Convertigo gateway profile).',
+      'active_model = "' + tomlString(spec.activeModel) + '"',
+      'api_timeout = 720.0',
+      'auto_compact_threshold = 200000',
+      '',
+      '[[providers]]',
+      'name = "convertigo"',
+      'api_base = "' + tomlString(convertigoGatewayUrl(options)) + '"',
+      'api_key_env_var = "' + CONVERTIGO_LLM_API_KEY_ENV + '"',
+      'api_style = "openai"',
+      'backend = "generic"',
+      'reasoning_field_name = "reasoning_content"',
+      '',
+      '[providers.extra_headers]',
+      ''
+    ] : [
       '# Generated by lib_ConvertigoAgentBridge.',
       'active_model = "' + tomlString(spec.activeModel) + '"',
       'api_timeout = 720.0',
@@ -5874,12 +6203,13 @@
       lines.push(
         '[[models]]',
         'name = "' + tomlString(spec.name) + '"',
-        'provider = "mistral"',
+        'provider = "' + (gateway ? "convertigo" : "mistral") + '"',
         'alias = "' + tomlString(spec.alias) + '"',
         'temperature = ' + spec.temperature,
         'input_price = ' + spec.inputPrice,
         'output_price = ' + spec.outputPrice,
         spec.thinking.length ? 'thinking = "' + tomlString(spec.thinking) + '"' : '',
+        'supports_images = ' + (spec.supportsImages === true ? 'true' : 'false'),
         'auto_compact_threshold = 200000',
         ''
       );
@@ -5892,6 +6222,7 @@
       'startup_timeout_sec = 60.0',
       ''
     );
+    var viewerDebugPort = intValue(options && options.viewerDebugPort, 0, 0, 65535);
     if (usesProtectedConvertigoMcp(mcpEndpoint, options)) {
       lines.push(
         '[mcp_servers.auth]',
@@ -5902,13 +6233,93 @@
         normalizeSkillProfile(options) === "nocode" ? 'headers = { "X-Convertigo-Agent-Profile" = "nocode" }' : '',
         ''
       );
+      if (viewerDebugPort >= 1024) {
+        lines.push(
+          '[mcp_servers.auth.headers]',
+          '"X-Convertigo-Viewer-Debug-Port" = "' + String(viewerDebugPort) + '"',
+          ''
+        );
+      }
     }
-    var text = lines.join("\n");
+    var playwright = vibePlaywrightServer(options);
+    if (playwright !== null) {
+      lines.push(
+        '# The Studio JxBrowser CDP endpoint is written here because this Vibe home is viewer-scoped.',
+        '[[mcp_servers]]',
+        'name = "playwright"',
+        'transport = "stdio"',
+        '# `command` is a list on purpose: Vibe shlex-splits a string command, which',
+        '# breaks Windows paths (backslashes, spaces).',
+        'command = ' + tomlArray([playwright.command]),
+        'args = ' + tomlArray(playwright.args),
+        'startup_timeout_sec = 30.0',
+        '',
+        '[mcp_servers.env]',
+        'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"',
+        ''
+      );
+    }
+    var text = migrateManagedVibeModelPresets(lines.join("\n")).text;
     return {
       path: filePath(configFile),
       model: spec.activeModel,
       bytes: writeTextFile(configFile, text)
     };
+  }
+
+  function vibePlaywrightEnabled(options) {
+    options = options || {};
+    if (boolValue(options.disablePlaywrightMcp || options.skipPlaywrightMcpConfig, false)) {
+      return false;
+    }
+    if (normalizeSkillProfile(options) === "nocode") {
+      return false;
+    }
+    if (!resolvePlaywrightMcpCdpEndpoint(options).length) {
+      return false;
+    }
+    if (trim(options.vibeHome).length) {
+      return true;
+    }
+    var scopeOption = trim(options.vibeHomeScope || options.homeScope || options.scope);
+    return !scopeOption.length || normalizeScope(scopeOption) === "conversation";
+  }
+
+  function vibePlaywrightServer(options) {
+    options = options || {};
+    if (!vibePlaywrightEnabled(options)) {
+      return null;
+    }
+    var workspaceRoot = resolveWorkspaceRoot(options);
+    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
+    if (!new File(childPath(childPath(codexNodeModulesPath(installDir), "@playwright/mcp"), "package.json")).isFile()) {
+      return null;
+    }
+    // Vibe spawns stdio MCP servers from its Python process, whose PATH does not
+    // include the Studio Node runtime: run the npx launcher through the explicit
+    // node binary instead of relying on its shebang.
+    var direct = playwrightMcpDirectLaunch(options, installDir);
+    if (direct !== null) {
+      return direct;
+    }
+    var npx = codexPlaywrightMcpCommand(options, installDir);
+    var args = ["--prefix", codexNpmPrefix(installDir), codexPlaywrightMcpBinaryName(options), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"];
+    var node = detectNodeRuntime(options);
+    if (node.found && /\.js$/i.test(npx)) {
+      return { command: node.path, args: [npx].concat(args) };
+    }
+    return { command: npx, args: args };
+  }
+
+  function ensureVibePlaywrightRuntime(options, installDir) {
+    if (boolValue(options.skipPlaywrightInstall || options.skipVibePlaywrightInstall, false)) {
+      return { attempted: false, installed: false, reused: false, skipped: true, method: "skipped", steps: [], timestamp: now() };
+    }
+    try {
+      return ensureCodexPlaywrightRuntime(options, installDir);
+    } catch (playwrightError) {
+      return { attempted: true, installed: false, reused: false, skipped: false, method: "npm", error: String(playwrightError), steps: [], timestamp: now() };
+    }
   }
 
   function detectRuntime(options) {
@@ -6741,6 +7152,8 @@
     provider.source.error = "";
     provider.source.settingsCached = false;
     provider.source.settingsCachedAt = 0;
+    provider.source.modelCatalogRefreshRequired = false;
+    delete provider.source.discoveryError;
     return provider;
   }
 
@@ -6830,10 +7243,12 @@
 
   function vibeSettings(options) {
     options = optionsWithRequestFallbacks(options);
+    var gatewayProfile = isConvertigoGatewayProfile(options);
     var presenceOnly = boolValue(options.runtimePresenceOnly, false);
     var capabilityProfile = publicAgentCapabilityProfile(options);
     var profileSupported = capabilityProfile.supportedProviders.indexOf("vibe") >= 0;
-    var setup = presenceOnly ? detectRuntimePresence(options) : detectRuntime(options);
+    // Settings read installed metadata; execution is checked by ACP discovery/start.
+    var setup = detectRuntimePresence(options);
     var managedVibeReady = commandPathStartsWith(setup.vibe, setup.venvDir) && commandPathStartsWith(setup.vibeAcp, setup.venvDir);
     var runtimeCommand = managedVibeReady ? setup.vibe : { found: false, path: "", version: "" };
     var runtime = runtimeUpdateStatus("vibe", runtimeCommand, vibeLatestVersion(options, setup), "pypi");
@@ -6842,21 +7257,21 @@
       var vibeConfigFile = new File(setup.vibeHome, "config.toml");
       if (vibeConfigFile.isFile() && vibeConfigRequiresAuthMigration(readTextFile(vibeConfigFile))) {
         skills = installAgentSkills(options, "vibe", setup.vibeHome);
-        setup = detectRuntime(options);
+        setup = detectRuntimePresence(options);
       }
     }
     var selectedFile = setup.vibeHome.length ? new File(setup.vibeHome, "config.toml") : null;
     var selected = selectedFile !== null ? parseVibeModelsFromConfig(selectedFile) : { path: "", exists: false, activeModel: "", models: [] };
-    var user = parseVibeModelsFromConfig(new File(new File(String(System.getProperty("user.home")), ".vibe"), "config.toml"));
+    var user = gatewayProfile ? { path: "", exists: false, activeModel: "", models: [] } : parseVibeModelsFromConfig(new File(new File(String(System.getProperty("user.home")), ".vibe"), "config.toml"));
     var config = selected.exists ? selected : user;
     var models = config.models;
-    if (!models.length && setup.model) {
-      var spec = vibeModelSpec(setup.model);
+    if (!models.length && (gatewayProfile || setup.model)) {
+      var spec = gatewayProfile ? vibeGatewayModelSpec(options) : vibeModelSpec(setup.model);
       models = [{
         id: spec.activeModel,
         label: spec.activeModel,
         configuredName: spec.name,
-        provider: "mistral",
+        provider: gatewayProfile ? "convertigo" : "mistral",
         defaultReasoning: spec.thinking,
         reasoningLevels: spec.thinking.length ? [{
           id: spec.thinking,
@@ -6869,12 +7284,18 @@
     }
     var defaultModel = config.activeModel || setup.model || (models.length ? models[0].id : "");
     var provider = {
-      id: "vibe",
-      label: "Vibe",
+      id: gatewayProfile ? "convertigo" : "vibe",
+      label: gatewayProfile ? "Convertigo" : "Vibe",
+      // The Convertigo mode is a logical provider; `harness` names the CLI actually
+      // driving it so the Assistant never hard-codes Vibe for it.
+      harness: "vibe",
+      profile: vibeProfile(options),
+      gateway: gatewayProfile ? { url: convertigoGatewayUrl(options), model: convertigoGatewayModel(options), apiKeyEnv: CONVERTIGO_LLM_API_KEY_ENV } : null,
+      identity: gatewayProfile ? { email: studioOwnerEmail() } : null,
       status: profileSupported ? (managedVibeReady ? "ready" : "missing") : "unsupported_profile",
       ready: profileSupported && managedVibeReady,
       runtime: runtime,
-      authentication: inspectVibeAuthentication(setup.vibeHome),
+      authentication: inspectVibeAuthentication(setup.vibeHome, vibeProfile(options)),
       setup: compactVibeSetup(setup),
       skills: skills,
       source: {
@@ -6898,14 +7319,25 @@
       agentProfile: capabilityProfile
     };
     provider.settingsCacheKey = providerSettingsCacheKey("vibe", setup.vibeHome);
+    if (gatewayProfile) {
+      provider.settingsCacheKey = "convertigo:" + provider.settingsCacheKey;
+    }
     provider = hydrateProviderSettingsFromCache(setup.workspaceRoot, provider, true);
     if (!presenceOnly && managedVibeReady && commandPathStartsWith({ path: setup.vibeHome }, setup.installDir)) {
       var presetUpdate = migrateManagedVibeConfig(setup.vibeHome);
-      if (presetUpdate.removed.length) {
+      if (presetUpdate.removed.length || presetUpdate.added) {
         provider.source = provider.source || {};
+        provider.source.modelCatalogRefreshRequired = true;
         provider.source.settingsCachedAt = 0;
         provider.source.modelPresetsRemoved = presetUpdate.removed;
         provider.source.activeModelMigrated = presetUpdate.migratedActiveModel;
+      }
+      var configuredModels = parseVibeModelsFromConfig(new File(setup.vibeHome, "config.toml")).models;
+      if (configuredModels.some(function (model) {
+        return !provider.models.some(function (cached) { return cached.id === model.id; });
+      })) {
+        provider.source.modelCatalogRefreshRequired = true;
+        provider.source.settingsCachedAt = 0;
       }
     }
     return provider;
@@ -7018,7 +7450,7 @@
       sessionIds: {},
       tombstones: []
     };
-    var providers = ["codex", "vibe"];
+    var providers = ["codex", "vibe", "claude"];
     for (var providerIndex = 0; providerIndex < providers.length; providerIndex++) {
       var provider = providers[providerIndex];
       var usersRoot = new File(new File(new File(workspaceRoot, "agents"), provider), "users");
@@ -7060,12 +7492,12 @@
           if (externalSessionId.length) {
             references.sessionIds[externalSessionId] = true;
           }
-          if (provider === "codex" && conversationId.length) {
+          if ((provider === "codex" || provider === "claude") && conversationId.length) {
             var expected = new File(
               new File(
                 new File(
                   new File(
-                    new File(workspaceRoot, "agents/codex"),
+                    new File(workspaceRoot, "agents/" + provider),
                     "homes/users"
                   ),
                   userDir.getName()
@@ -7076,7 +7508,7 @@
             );
             addProtectedHome(references.homePaths, expected);
           }
-          addProtectedHome(references.homePaths, record.codexHome || record.agentHome || "");
+          addProtectedHome(references.homePaths, record.codexHome || record.claudeHome || record.agentHome || "");
         }
       }
     }
@@ -7094,20 +7526,25 @@
       }
     }
 
-    var pidDir = codexPidRegistryDir(workspaceRoot);
-    if (pidDir !== null && pidDir.isDirectory()) {
+    var pidProviders = ["codex", "claude"];
+    for (var pidProviderIndex = 0; pidProviderIndex < pidProviders.length; pidProviderIndex++) {
+      var pidDir = providerPidRegistryDir(workspaceRoot, pidProviders[pidProviderIndex]);
+      if (pidDir === null || !pidDir.isDirectory()) {
+        continue;
+      }
       var pidFiles = pidDir.listFiles();
-      if (pidFiles !== null) {
-        for (var pidIndex = 0; pidIndex < pidFiles.length; pidIndex++) {
-          var pidFile = pidFiles[pidIndex];
-          var pidRecord = readJsonFile(pidFile);
-          var pid = pidRecord === null ? 0 : Number(pidRecord.pid || 0);
-          if (pid > 0 && processHandleAlive(pid)) {
-            references.conversationIds[trim(pidRecord.handle)] = true;
-            addProtectedHome(references.homePaths, pidRecord.codexHome || "");
-          } else {
-            try { pidFile["delete"](); } catch (_ignoreDeadCleanupPidFile) {}
-          }
+      if (pidFiles === null) {
+        continue;
+      }
+      for (var pidIndex = 0; pidIndex < pidFiles.length; pidIndex++) {
+        var pidFile = pidFiles[pidIndex];
+        var pidRecord = readJsonFile(pidFile);
+        var pid = pidRecord === null ? 0 : Number(pidRecord.pid || 0);
+        if (pid > 0 && processHandleAlive(pid)) {
+          references.conversationIds[trim(pidRecord.handle)] = true;
+          addProtectedHome(references.homePaths, pidRecord.codexHome || "");
+        } else {
+          try { pidFile["delete"](); } catch (_ignoreDeadCleanupPidFile) {}
         }
       }
     }
@@ -7334,11 +7771,18 @@
     var rawProvider = trim(options.provider || options.agent || "").toLowerCase();
     var provider = (!rawProvider.length || rawProvider === "all" || rawProvider === "*" || rawProvider === "any") ? "" : normalizeProvider(rawProvider);
     var providers = [];
+    // The Convertigo mode comes first: it is the zero-configuration default.
+    if (!provider.length || provider === "convertigo") {
+      providers.push(vibeSettings(withVibeProfile(options, "convertigo")));
+    }
     if (!provider.length || provider === "codex") {
       providers.push(codexSettings(options));
     }
     if (!provider.length || provider === "vibe") {
-      providers.push(vibeSettings(options));
+      providers.push(vibeSettings(withVibeProfile(options, "mistral")));
+    }
+    if ((!provider.length || provider === "claude") && typeof claudeSettings === "function") {
+      providers.push(claudeSettings(options));
     }
     var settingsWorkspaceRoot = trim(options.workspaceRoot);
     if (!settingsWorkspaceRoot.length) {
@@ -7352,15 +7796,16 @@
     var settingsCacheMaxAgeMs = intValue(options.settingsCacheMaxAgeMs || options.updateCheckCacheMs, DEFAULT_RUNTIME_UPDATE_CACHE_MS, 60000, 604800000);
     for (var cachedProviderIndex = 0; cachedProviderIndex < providers.length; cachedProviderIndex++) {
       var currentProvider = providers[cachedProviderIndex];
-      currentProvider = hydrateProviderSettingsFromCache(settingsWorkspaceRoot, currentProvider, normalizeProvider(currentProvider.id) === "vibe");
+      var vibeFamily = normalizeProvider(currentProvider.id) === "vibe" || normalizeProvider(currentProvider.id) === "convertigo";
+      currentProvider = hydrateProviderSettingsFromCache(settingsWorkspaceRoot, currentProvider, vibeFamily);
       if (presenceOnly) {
         currentProvider = requireCachedProviderConfiguration(currentProvider);
       }
       currentProvider = requireProviderAuthentication(currentProvider);
-      if (!presenceOnly && normalizeProvider(currentProvider.id) === "vibe" && currentProvider.ready === true && typeof C8O.agentBridge.discoverVibeSettings === "function") {
+      if (!presenceOnly && vibeFamily && currentProvider.ready === true && typeof C8O.agentBridge.discoverVibeSettings === "function") {
         var refreshProviderSettings = boolValue(options.refreshProviderSettings || options.refreshModelCatalog || options.refreshUpdateCheck, false);
         if (refreshProviderSettings || !providerSettingsCacheFresh(currentProvider, settingsCacheMaxAgeMs)) {
-          currentProvider = C8O.agentBridge.discoverVibeSettings(options, currentProvider);
+          currentProvider = C8O.agentBridge.discoverVibeSettings(withVibeProfile(options, currentProvider.profile || (normalizeProvider(currentProvider.id) === "convertigo" ? "convertigo" : "mistral")), currentProvider);
         }
       }
       providers[cachedProviderIndex] = requireProviderAuthentication(currentProvider);
@@ -7582,6 +8027,69 @@
     return event;
   }
 
+  // Browser login helpers shared by the resident providers ------------------
+
+  var AGENT_LOGIN_REGISTRY_KEY = "lib_ConvertigoAgentBridge.agentLoginRegistry.v1";
+  var AGENT_LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
+
+  function providerLoginRegistry() {
+    var store = getServerStore();
+    if (store !== null) {
+      var registry = store.get(AGENT_LOGIN_REGISTRY_KEY);
+      if (registry === null || typeof registry === "undefined") {
+        registry = new ConcurrentHashMap();
+        store.set(AGENT_LOGIN_REGISTRY_KEY, registry);
+      }
+      return registry;
+    }
+    if (!C8O.agentBridge._fallbackAgentLoginRegistry) {
+      C8O.agentBridge._fallbackAgentLoginRegistry = new ConcurrentHashMap();
+    }
+    return C8O.agentBridge._fallbackAgentLoginRegistry;
+  }
+
+  function loginProcessOutput(entry) {
+    var output = "";
+    try { output += readTextFile(entry.stdoutFile); } catch (_ignoreLoginOut) {}
+    try { output += "\n" + readTextFile(entry.stderrFile); } catch (_ignoreLoginErr) {}
+    output = output.replace(/(access_token|refresh_token|id_token|api_key|apikey)\s*[:=]\s*[^\s]+/gi, "$1=<redacted>");
+    if (output.length > 8000) {
+      output = "... " + output.substring(output.length - 8000);
+    }
+    return output;
+  }
+
+  function loginProcessUrl(output) {
+    var match = String(output || "").match(/https:\/\/[^\s<>'\"\u001b]+/i);
+    return match ? match[0].replace(/[),.;]+$/, "") : "";
+  }
+
+  function loginProcessExitCode(entry, alive) {
+    if (alive) {
+      return -1;
+    }
+    try { return Number(entry.process.exitValue()); } catch (_ignoreLoginExit) {}
+    return -1;
+  }
+
+  function expireLoginProcess(entry, timeoutMs) {
+    var limit = intValue(timeoutMs, AGENT_LOGIN_TIMEOUT_MS, 60000, 3600000);
+    if (processAlive(entry.process) && (now() - Number(entry.startedAt || 0)) > limit) {
+      try { entry.process.destroy(); } catch (_ignoreLoginTimeoutDestroy) {}
+      entry.timedOut = true;
+      return true;
+    }
+    return entry.timedOut === true;
+  }
+
+  function isMacOsHost() {
+    try {
+      return String(System.getProperty("os.name") || "").toLowerCase().indexOf("mac") !== -1;
+    } catch (_ignoreOsName) {
+      return false;
+    }
+  }
+
   function processAlive(process) {
     if (process === null || typeof process === "undefined") {
       return false;
@@ -7683,6 +8191,10 @@
   }
 
   function codexPidRegistryDir(workspaceRoot) {
+    return providerPidRegistryDir(workspaceRoot, "codex");
+  }
+
+  function providerPidRegistryDir(workspaceRoot, provider) {
     var root = trim(workspaceRoot);
     if (!root.length) {
       root = engineWorkspaceRoot();
@@ -7690,15 +8202,24 @@
     if (!root.length) {
       return null;
     }
-    return new File(new File(new File(root, "agents"), "codex"), "app-server-pids");
+    var providerDir = normalizeProvider(provider || "codex");
+    return new File(new File(new File(root, "agents"), providerDir), "app-server-pids");
   }
 
   function codexPidFile(workspaceRoot, handle) {
-    var dir = codexPidRegistryDir(workspaceRoot);
+    return providerPidFile(workspaceRoot, "codex", handle);
+  }
+
+  function providerPidFile(workspaceRoot, provider, handle) {
+    var dir = providerPidRegistryDir(workspaceRoot, provider);
     if (dir === null) {
       return null;
     }
     return new File(dir, safePathPart(handle) + ".json");
+  }
+
+  function entryUsesPidTree(entry) {
+    return entry && (entry.protocol === "codex-app-server" || entry.protocol === "claude-stream-json");
   }
 
   function registryContainsPid(pid) {
@@ -7715,7 +8236,7 @@
   }
 
   function writeEntryPidFile(entry) {
-    if (!entry || entry.protocol !== "codex-app-server") {
+    if (!entryUsesPidTree(entry)) {
       return;
     }
     var pid = processPid(entry.process);
@@ -7724,7 +8245,7 @@
     }
     entry.pid = pid;
     if (!trim(entry.pidFile).length) {
-      var file = codexPidFile(entry.workspaceRoot || "", entry.handle);
+      var file = providerPidFile(entry.workspaceRoot || "", entry.provider, entry.handle);
       entry.pidFile = file === null ? "" : filePath(file);
     }
     if (!trim(entry.pidFile).length) {
@@ -7754,7 +8275,11 @@
   }
 
   function sweepCodexAppServerPidFiles(workspaceRoot, maxIdleMs) {
-    var dir = codexPidRegistryDir(workspaceRoot);
+    return sweepProviderPidFiles(workspaceRoot, "codex", maxIdleMs);
+  }
+
+  function sweepProviderPidFiles(workspaceRoot, provider, maxIdleMs) {
+    var dir = providerPidRegistryDir(workspaceRoot, provider);
     var result = { stopped: [], kept: [] };
     if (dir === null || !dir.isDirectory()) {
       return result;
@@ -7793,7 +8318,7 @@
   }
 
   function writeJson(entry, message) {
-    if (entry && entry.protocol === "codex-app-server" && message && message.jsonrpc) {
+    if (entry && (entry.protocol === "codex-app-server" || entry.protocol === "claude-stream-json") && message && message.jsonrpc) {
       delete message.jsonrpc;
     }
     var text = JSON.stringify(message);
@@ -8046,6 +8571,10 @@
       handleCodexAppServerLine(entry, line, streamName);
       return;
     }
+    if (entry.protocol === "claude-stream-json") {
+      handleClaudeStreamLine(entry, line, streamName);
+      return;
+    }
     if (entry.protocol === "codex-jsonl") {
       handleCodexLine(entry, line, streamName);
       return;
@@ -8141,6 +8670,68 @@
     return waitForPending(entry, pending, timeoutMs, true);
   }
 
+  function vibeImageBlocks(value, model) {
+    var report = { blocks: [], skipped: [] };
+    var paths = [];
+    // Sequence variables reach Rhino as java.lang.String objects, not JS
+    // strings: coerce everything that is not a JS array before parsing.
+    if (value !== null && typeof value !== "undefined" && Object.prototype.toString.call(value) !== "[object Array]") {
+      value = String(value);
+    }
+    var text = typeof value === "string" ? trim(value) : "";
+    if (value && typeof value !== "string" && typeof value.length !== "undefined") {
+      for (var v = 0; v < value.length; v++) {
+        paths.push(String(value[v]));
+      }
+    } else if (text.indexOf("[") === 0) {
+      paths = parseObject(text, []);
+    } else if (text.length) {
+      paths = text.split(/\s*[\n,;]\s*/);
+    }
+    var spec = vibeModelSpec(model);
+    for (var i = 0; i < paths.length; i++) {
+      var candidate = trim(paths[i] && paths[i].path ? paths[i].path : paths[i]);
+      if (!candidate.length) {
+        continue;
+      }
+      var file = new File(candidate);
+      var lower = candidate.toLowerCase();
+      var extension = lower.lastIndexOf(".") >= 0 ? lower.substring(lower.lastIndexOf(".") + 1) : "";
+      var mimeType = VIBE_IMAGE_MIME_TYPES[extension] || "";
+      if (!mimeType.length) {
+        continue;
+      }
+      if (!file.isFile()) {
+        report.skipped.push({ path: candidate, reason: "not_found" });
+        continue;
+      }
+      if (spec.supportsImages !== true) {
+        report.skipped.push({ path: candidate, reason: "model_without_vision", model: spec.activeModel });
+        continue;
+      }
+      if (Number(file.length()) > VIBE_MAX_IMAGE_BYTES) {
+        report.skipped.push({ path: candidate, reason: "too_large" });
+        continue;
+      }
+      if (report.blocks.length >= VIBE_MAX_IMAGES_PER_MESSAGE) {
+        report.skipped.push({ path: candidate, reason: "too_many" });
+        continue;
+      }
+      try {
+        var bytes = Files.readAllBytes(file.toPath());
+        report.blocks.push({
+          type: "image",
+          mimeType: mimeType,
+          data: String(Base64.getEncoder().encodeToString(bytes)),
+          uri: file.toURI().toString()
+        });
+      } catch (readError) {
+        report.skipped.push({ path: candidate, reason: String(readError) });
+      }
+    }
+    return report;
+  }
+
   function buildMcpServers(mcpEndpoint, options) {
     options = options || {};
     var headers = [];
@@ -8149,6 +8740,15 @@
       headers.push({
         name: "Authorization",
         value: "Bearer " + bearerToken
+      });
+    }
+    var viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
+    if (viewerDebugPort >= 1024 && normalizeSkillProfile(options) !== "nocode") {
+      // The session-level server can take precedence over config.toml, so the
+      // leased Studio viewer debug port must travel with it as well.
+      headers.push({
+        name: "X-Convertigo-Viewer-Debug-Port",
+        value: String(viewerDebugPort)
       });
     }
     return [{
@@ -8304,7 +8904,7 @@
       }
     } catch (_ignoreWriterClose) {}
     var stoppedTree = false;
-    if (entry && entry.protocol === "codex-app-server" && Number(entry.pid || 0) > 0) {
+    if (entryUsesPidTree(entry) && Number(entry.pid || 0) > 0) {
       try {
         stoppedTree = destroyPidTree(Number(entry.pid));
       } catch (_ignoreDestroyTree) {}

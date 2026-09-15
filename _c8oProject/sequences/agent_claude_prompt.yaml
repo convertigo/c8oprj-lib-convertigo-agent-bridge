@@ -1,0 +1,74 @@
+comment: Send a prompt to the resident Claude Code process without blocking.
+responseTimeout: 300
+↓Run [steps.SimpleStep-1789369797938]: 
+  expression: |
+    'include("js/vibe_agent_bridge.js");
+    result = C8O.agentBridge.claudePrompt({
+      handle: typeof handle === "undefined" ? "" : handle,
+      prompt: typeof prompt === "undefined" ? "" : prompt,
+      conversationId: typeof conversationId === "undefined" ? "" : conversationId,
+      workspaceRoot: typeof workspaceRoot === "undefined" ? "" : workspaceRoot,
+      userId: typeof userId === "undefined" ? "" : userId,
+      projectId: typeof projectId === "undefined" ? "" : projectId,
+      sessionId: typeof sessionId === "undefined" ? "" : sessionId,
+      claudeSessionId: typeof claudeSessionId === "undefined" ? "" : claudeSessionId,
+      externalSessionId: typeof externalSessionId === "undefined" ? "" : externalSessionId,
+      model: typeof model === "undefined" ? "" : model,
+      reasoningEffort: typeof reasoningEffort === "undefined" ? "" : reasoningEffort,
+      agentRevealMode: typeof agentRevealMode === "undefined" ? "" : agentRevealMode,
+      agentProfile: typeof agentProfile === "undefined" ? "" : agentProfile,
+      skillProfile: typeof skillProfile === "undefined" ? "" : skillProfile,
+      mcpEndpoint: typeof mcpEndpoint === "undefined" ? "" : mcpEndpoint,
+      mcpBearerTokenHandle: typeof mcpBearerTokenHandle === "undefined" ? "" : mcpBearerTokenHandle,
+      nocodeMcpTokenHandle: typeof nocodeMcpTokenHandle === "undefined" ? "" : nocodeMcpTokenHandle,
+      noCodeMcpTokenHandle: typeof noCodeMcpTokenHandle === "undefined" ? "" : noCodeMcpTokenHandle
+    });'
+↓result [steps.JsonToXmlStep-1789369797940]: 
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: result
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓handle [variables.RequestableVariable-1789369797942]: 
+  comment: Process handle returned by agent_claude_start.
+↓prompt [variables.RequestableVariable-1789369797944]: 
+  comment: User prompt sent to Claude Code.
+↓conversationId [variables.RequestableVariable-1789369797946]: 
+  comment: Conversation identifier.
+↓workspaceRoot [variables.RequestableVariable-1789369797948]: 
+  comment: Optional Convertigo user workspace root.
+↓userId [variables.RequestableVariable-1789369797950]: 
+  comment: User identifier.
+↓projectId [variables.RequestableVariable-1789369797952]: 
+  comment: Optional project identifier.
+↓sessionId [variables.RequestableVariable-1789369797954]: 
+  comment: Optional Claude Code session id.
+↓claudeSessionId [variables.RequestableVariable-1789369797956]: 
+  comment: Alias of sessionId.
+↓externalSessionId [variables.RequestableVariable-1789369797958]: 
+  comment: Alias of sessionId.
+↓model [variables.RequestableVariable-1789369797960]: 
+  comment: Optional Claude model alias; a change restarts the resident process with resume.
+↓reasoningEffort [variables.RequestableVariable-1789369797962]: 
+  comment: Optional Claude effort level; a change restarts the resident process with resume.
+↓agentRevealMode [variables.RequestableVariable-1789369797964]: 
+  comment: When true, Convertigo reveal mode instructions are prepended to the prompt.
+↓agentProfile [variables.RequestableVariable-1789369797966]: 
+  comment: Agent profile.
+↓skillProfile [variables.RequestableVariable-1789369797968]: 
+  comment: Skill profile.
+↓mcpEndpoint [variables.RequestableVariable-1789369797970]: 
+  comment: Optional MCP endpoint.
+↓mcpBearerTokenHandle [variables.RequestableVariable-1789369797972]: 
+  comment: Opaque server-side handle of the managed MCP bearer token.
+↓nocodeMcpTokenHandle [variables.RequestableVariable-1789369797974]: 
+  comment: Opaque server-side handle of the NoCode MCP token.
+↓noCodeMcpTokenHandle [variables.RequestableVariable-1789369797976]: 
+  comment: Alias of nocodeMcpTokenHandle.

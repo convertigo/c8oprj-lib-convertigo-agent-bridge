@@ -1,0 +1,22 @@
+comment: Close a Claude Code bridge entry and stop its running process if needed.
+↓Run [steps.SimpleStep-1789369797979]: 
+  expression: |
+    'include("js/vibe_agent_bridge.js");
+    result = C8O.agentBridge.claudeClose({
+      handle: typeof handle === "undefined" ? "" : handle
+    });'
+↓result [steps.JsonToXmlStep-1789369797981]: 
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: result
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓handle [variables.RequestableVariable-1789369797983]: 
+  comment: Process handle returned by agent_claude_start.
