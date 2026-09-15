@@ -527,8 +527,13 @@
     var handle = makeHandle("vibe-settings");
     var started = null;
     try {
+      var discoveryProfile = trim(provider.profile) || (typeof vibeProfile === "function" ? vibeProfile(options) : "mistral");
       started = C8O.agentBridge.vibeStart({
         handle: handle,
+        vibeProfile: discoveryProfile,
+        llmGatewayUrl: options.llmGatewayUrl || (provider.gateway && provider.gateway.url),
+        llmGatewayModel: options.llmGatewayModel || (provider.gateway && provider.gateway.model),
+        llmGatewayThinking: options.llmGatewayThinking,
         workspaceRoot: trim(options.workspaceRoot || setup.workspaceRoot),
         vibeHome: trim(options.vibeHome || setup.vibeHome),
         vibeHomeScope: trim(options.vibeHome || setup.vibeHome).length ? "explicit" : (options.vibeHomeScope || options.homeScope),
@@ -549,7 +554,14 @@
         requestTimeoutMs: options.settingsTimeoutMs || options.requestTimeoutMs || 60000
       });
       if (started && started.ok !== false && started.providerSettings) {
-        return started.providerSettings;
+        var discovered = started.providerSettings;
+        // The ACP catalog only knows models: keep the logical identity and diagnostics.
+        ["id", "label", "harness", "profile", "gateway", "identity", "authentication", "runtime", "setup", "skills", "agentProfile", "profileSupported"].forEach(function (key) {
+          if (typeof provider[key] !== "undefined" && provider[key] !== null && (key === "id" || key === "label" || key === "harness" || key === "profile" || key === "gateway" || key === "identity" || typeof discovered[key] === "undefined")) {
+            discovered[key] = provider[key];
+          }
+        });
+        return discovered;
       }
       provider.source = provider.source || {};
       provider.source.discoveryError = started && started.error ? String(started.error) : "Vibe model discovery returned no catalog";

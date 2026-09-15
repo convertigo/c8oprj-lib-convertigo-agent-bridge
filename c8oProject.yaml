@@ -7,7 +7,7 @@
   contextTimeout: 59
   corsOrigin: =Origin
   httpSessionTimeout: 600
-  version: 0.4.9
+  version: 0.4.10
   ↓void [connectors.SqlConnector]: 🗏 connectors/void.yaml
   ↓agent_claude_close [sequences.GenericSequence]: 🗏 sequences/agent_claude_close.yaml
   ↓agent_claude_prompt [sequences.GenericSequence]: 🗏 sequences/agent_claude_prompt.yaml

@@ -7139,8 +7139,9 @@
         speedTiers: []
       });
     }
-    provider.id = "vibe";
-    provider.label = provider.label || "Vibe";
+    // Keep the logical Convertigo mode identity when the ACP catalog refreshes it.
+    provider.id = normalizeProvider(provider.id) === "convertigo" ? "convertigo" : "vibe";
+    provider.label = provider.label || (provider.id === "convertigo" ? "Convertigo" : "Vibe");
     provider.defaultModel = trim(modelOption.currentValue || modelOption.current_value) || models[0].id;
     provider.models = models;
     provider.reasoningMode = reasoningLevels.length ? "runtime_selectable" : "model_bound";
@@ -7176,7 +7177,7 @@
         serviceTier: false
       }
     };
-    base.settingsCacheKey = providerSettingsCacheKey("vibe", entry.home && entry.home.path);
+    base.settingsCacheKey = (normalizeProvider(base.id) === "convertigo" ? "convertigo:" : "") + providerSettingsCacheKey("vibe", entry.home && entry.home.path);
     var settings = normalizeVibeAcpProviderSettings(configOptions, base);
     if (!settings.models || !settings.models.length) {
       return settings;

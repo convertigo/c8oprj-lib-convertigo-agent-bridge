@@ -304,3 +304,10 @@ console.log("Vibe image attachment contract OK");
   assert.match(commonSource, /function readConvertigoGatewayKeyFile/);
   assert.match(commonSource, /"agents"\), "convertigo"\), "llm-api-key"\)/);
 }
+
+// ACP model discovery must not rename the Convertigo mode back to "vibe".
+{
+  assert.match(commonSource, /provider\.id = normalizeProvider\(provider\.id\) === "convertigo" \? "convertigo" : "vibe";/);
+  assert.match(vibeSource, /vibeProfile: discoveryProfile,/);
+  assert.match(vibeSource, /\["id", "label", "harness", "profile", "gateway", "identity"/);
+}
