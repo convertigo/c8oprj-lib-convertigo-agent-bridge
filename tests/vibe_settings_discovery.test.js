@@ -15,7 +15,7 @@ vm.runInNewContext(discovery, {
   C8O: { agentBridge: bridge },
   makeHandle: () => 'settings-test',
   trim: value => String(value || '').trim(),
-  vibeProfile: () => 'mistral'
+  resolveVibeProfile: () => 'mistral'
 });
 const options = { mcpBearerTokenHandle: 'opaque-handle', nocodeMcpTokenHandle: 'nocode-handle' };
 result = { ok: true, providerSettings: { models: [{ id: 'glm-5-2' }] } };

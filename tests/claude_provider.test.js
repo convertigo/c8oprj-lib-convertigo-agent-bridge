@@ -274,10 +274,10 @@ console.log("Vibe image attachment contract OK");
 
 // Convertigo gateway profile (LiteLLM per-user key) on the Vibe provider.
 {
-  assert.equal(vibeProfile({}), "mistral");
-  assert.equal(vibeProfile({ vibeProfile: "convertigo" }), "convertigo");
-  assert.equal(vibeProfile({ provider: "convertigo" }), "convertigo");
-  assert.equal(vibeProfile({ agentMode: "gateway" }), "convertigo");
+  assert.equal(resolveVibeProfile({}), "mistral");
+  assert.equal(resolveVibeProfile({ vibeProfile: "convertigo" }), "convertigo");
+  assert.equal(resolveVibeProfile({ provider: "convertigo" }), "convertigo");
+  assert.equal(resolveVibeProfile({ agentMode: "gateway" }), "convertigo");
   assert.equal(withVibeProfile({ provider: "convertigo" }, "convertigo").provider, "vibe");
   const spec = vibeGatewayModelSpec({});
   assert.equal(spec.name, "mistral/zai-glm-5-2");

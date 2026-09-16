@@ -15,7 +15,7 @@
       }
       options.gatewayApiKey = "";
     }
-    var profile = vibeProfile(options);
+    var profile = resolveVibeProfile(options);
     var install = boolValue(options.install, false);
     var forceVibeInstall = boolValue(options.forceVibeInstall || options.forceInstall || options.force, false);
     var configure = boolValue(options.configure, false);
@@ -335,7 +335,7 @@
     }
     var autoConfigure = boolValue(options.autoConfigure, !trim(options.vibeHome).length);
     var setup = C8O.agentBridge.vibeSetup({
-      vibeProfile: vibeProfile(options),
+      vibeProfile: resolveVibeProfile(options),
       llmGatewayUrl: options.llmGatewayUrl,
       llmGatewayModel: options.llmGatewayModel,
       llmGatewayThinking: options.llmGatewayThinking,
@@ -409,7 +409,7 @@
     var command = parseCommand(options.command, [setup.setup.vibeAcp.path || "vibe-acp"]);
     var ttlMillis = intValue(options.ttlSeconds, DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
     var entry = createEntry(handle, "vibe", "acp", command, cwd, env, ttlMillis, setup.setup.home, credentials, requestedModel || setup.setup.model);
-    entry.vibeProfile = vibeProfile(options);
+    entry.vibeProfile = resolveVibeProfile(options);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
@@ -470,7 +470,7 @@
       }, timeoutMs);
       entry.sessionId = String(entry.session.sessionId || entry.session.session_id || "");
       var sessionProvider = vibeSettings({
-        vibeProfile: vibeProfile(options),
+        vibeProfile: resolveVibeProfile(options),
         workspaceRoot: setup.setup.workspaceRoot,
         vibeHome: setup.setup.vibeHome,
         vibeHomeScope: "explicit",
@@ -527,7 +527,7 @@
     var handle = makeHandle("vibe-settings");
     var started = null;
     try {
-      var discoveryProfile = trim(provider.profile) || (typeof vibeProfile === "function" ? vibeProfile(options) : "mistral");
+      var discoveryProfile = trim(provider.profile) || (typeof resolveVibeProfile === "function" ? resolveVibeProfile(options) : "mistral");
       started = C8O.agentBridge.vibeStart({
         handle: handle,
         vibeProfile: discoveryProfile,

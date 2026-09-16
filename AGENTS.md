@@ -243,6 +243,12 @@ same context.
 
 ## Vibe Integration
 
+- Keep `resolveVibeProfile` distinct from the public `vibeProfile` sequence
+  input. Convertigo `include()` evaluates helpers in the request scope, even
+  inside the loader IIFE; a helper named like the input overwrites it and
+  silently selects Mistral instead of Convertigo. The sequence-level tests in
+  `tests/vibe_sequence_profile.test.js` exercise this loader behavior for setup,
+  start and settings without starting a runtime or touching credentials.
 - Main files:
   - `js/agent_bridge_common.js`
   - `js/agent_bridge_vibe.js`

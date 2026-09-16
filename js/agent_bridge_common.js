@@ -32,7 +32,8 @@
   // keep thinking off by default and let llmGatewayThinking override it.
   var CONVERTIGO_LLM_GATEWAY_THINKING = "off";
 
-  function vibeProfile(options) {
+  // include() shares the sequence scope: never shadow the public vibeProfile input.
+  function resolveVibeProfile(options) {
     options = options || {};
     var raw = trim(options.vibeProfile || options.gatewayProfile || options.agentMode).toLowerCase();
     if (!raw.length) {
@@ -43,7 +44,7 @@
   }
 
   function isConvertigoGatewayProfile(options) {
-    return vibeProfile(options) === "convertigo";
+    return resolveVibeProfile(options) === "convertigo";
   }
 
   function withVibeProfile(options, profile) {
@@ -3454,7 +3455,7 @@
       var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
       var userHome = resolveVibeHome({
         vibeHomeScope: "user",
-        vibeProfile: vibeProfile(options),
+        vibeProfile: resolveVibeProfile(options),
         userId: trim(options.userId) || contextUserId()
       }, installDir);
       if (trim(userHome.path).length && filePath(new File(userHome.path)) !== filePath(homeDir)) {
@@ -7290,13 +7291,13 @@
       // The Convertigo mode is a logical provider; `harness` names the CLI actually
       // driving it so the Assistant never hard-codes Vibe for it.
       harness: "vibe",
-      profile: vibeProfile(options),
+      profile: resolveVibeProfile(options),
       gateway: gatewayProfile ? { url: convertigoGatewayUrl(options), model: convertigoGatewayModel(options), apiKeyEnv: CONVERTIGO_LLM_API_KEY_ENV } : null,
       identity: gatewayProfile ? { email: studioOwnerEmail() } : null,
       status: profileSupported ? (managedVibeReady ? "ready" : "missing") : "unsupported_profile",
       ready: profileSupported && managedVibeReady,
       runtime: runtime,
-      authentication: inspectVibeAuthentication(setup.vibeHome, vibeProfile(options)),
+      authentication: inspectVibeAuthentication(setup.vibeHome, resolveVibeProfile(options)),
       setup: compactVibeSetup(setup),
       skills: skills,
       source: {
