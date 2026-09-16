@@ -28,9 +28,9 @@
   var CONVERTIGO_LLM_GATEWAY_MODEL = "mistral/zai-glm-5-2";
   var CONVERTIGO_LLM_GATEWAY_ALIAS = "glm-5-2";
   var CONVERTIGO_LLM_API_KEY_ENV = "CONVERTIGO_LLM_API_KEY";
-  // The gateway rejects reasoning_effort for the Mistral provider until it allows it;
-  // keep thinking off by default and let llmGatewayThinking override it.
-  var CONVERTIGO_LLM_GATEWAY_THINKING = "off";
+  // The gateway lets reasoning_effort through for GLM 5.2 (allowed_openai_params on the
+  // model); think by default, llmGatewayThinking or the ACP reasoning effort override it.
+  var CONVERTIGO_LLM_GATEWAY_THINKING = "medium";
 
   // include() shares the sequence scope: never shadow the public vibeProfile input.
   function resolveVibeProfile(options) {
@@ -357,6 +357,26 @@
       }
     }
     return "";
+  }
+
+  // MCP request logging: the Convertigo engine mutes context logs for requests carrying
+  // X-Convertigo-No-Log. Controlled by the mcpNoLog option, then by the global symbol
+  // agentbridge.mcp.nolog (default true): agent tool traffic is verbose and rarely useful.
+  var MCP_NOLOG_SYMBOL = "agentbridge.mcp.nolog";
+
+  function mcpNoLogEnabled(options) {
+    options = options || {};
+    var explicit = firstDefinedOption(options, ["mcpNoLog", "mcpNolog", "noLog"]);
+    if (trim(explicit).length) {
+      return boolValue(explicit, true);
+    }
+    try {
+      var symbol = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue(MCP_NOLOG_SYMBOL);
+      if (symbol !== null && typeof symbol !== "undefined" && trim(symbol).length) {
+        return boolValue(String(symbol), true);
+      }
+    } catch (_ignoreNoLogSymbol) {}
+    return true;
   }
 
   function withRevealModePrompt(promptText, enabled) {
@@ -2293,6 +2313,7 @@
     var revealModeHeaderEntry = revealModeEnabled(options, null)
       ? '"X-Convertigo-Reveal-Mode" = "true"'
       : "";
+    var noLogHeaderEntry = mcpNoLogEnabled(options) ? '"X-Convertigo-No-Log" = "true"' : "";
     var viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
     var viewerDebugPortHeaderEntry = viewerDebugPort >= 1024
       ? '"X-Convertigo-Viewer-Debug-Port" = "' + tomlEscape(String(viewerDebugPort)) + '"'
@@ -2343,6 +2364,12 @@
         body = body.replace(guidancePattern, guidanceHeaderEntry);
       } else {
         body = body.length ? body + ", " + guidanceHeaderEntry : guidanceHeaderEntry;
+      }
+      var noLogPattern = /(["']X-Convertigo-No-Log["']\s*=\s*)["'][^"']*["']/;
+      if (noLogPattern.test(body)) {
+        body = noLogHeaderEntry.length ? body.replace(noLogPattern, noLogHeaderEntry) : body.replace(/,?\s*["']X-Convertigo-No-Log["']\s*=\s*["'][^"']*["']/, "").replace(/^\s*,\s*/, "");
+      } else if (noLogHeaderEntry.length) {
+        body = body.length ? body + ", " + noLogHeaderEntry : noLogHeaderEntry;
       }
       if (viewerDebugPortHeaderEntry.length) {
         if (viewerDebugPortPattern.test(body)) {
@@ -5989,6 +6016,8 @@
       bearerTokenEnv: "",
       endpoint: "",
       gatewayUrl: "",
+      revealMode: false,
+      noLog: false,
       valid: false
     };
     if (!info.exists) {
@@ -6012,6 +6041,8 @@
       info.bearerTokenEnv = bearerMatch ? bearerMatch[1] : "";
       var viewerPortMatch = block.match(/["']X-Convertigo-Viewer-Debug-Port["']\s*=\s*["'](\d+)["']/);
       info.viewerDebugPort = viewerPortMatch ? Number(viewerPortMatch[1]) : 0;
+      info.revealMode = /["']X-Convertigo-Reveal-Mode["']\s*=\s*["']true["']/.test(block);
+      info.noLog = /["']X-Convertigo-No-Log["']\s*=\s*["']true["']/.test(block);
       break;
     }
     info.gatewayUrl = parseVibeGatewayUrl(text);
@@ -6231,15 +6262,25 @@
         'api_key_env = "' + tomlString(mcpBearerTokenEnv(options)) + '"',
         'api_key_header = "Authorization"',
         'api_key_format = "Bearer {token}"',
-        normalizeSkillProfile(options) === "nocode" ? 'headers = { "X-Convertigo-Agent-Profile" = "nocode" }' : '',
         ''
       );
+      var authHeaderLines = [];
+      if (normalizeSkillProfile(options) === "nocode") {
+        authHeaderLines.push('"X-Convertigo-Agent-Profile" = "nocode"');
+      }
       if (viewerDebugPort >= 1024) {
-        lines.push(
-          '[mcp_servers.auth.headers]',
-          '"X-Convertigo-Viewer-Debug-Port" = "' + String(viewerDebugPort) + '"',
-          ''
-        );
+        authHeaderLines.push('"X-Convertigo-Viewer-Debug-Port" = "' + String(viewerDebugPort) + '"');
+      }
+      if (revealModeEnabled(options, null)) {
+        authHeaderLines.push('"X-Convertigo-Reveal-Mode" = "true"');
+      }
+      if (mcpNoLogEnabled(options)) {
+        authHeaderLines.push('"X-Convertigo-No-Log" = "true"');
+      }
+      if (authHeaderLines.length) {
+        lines.push('[mcp_servers.auth.headers]');
+        lines = lines.concat(authHeaderLines);
+        lines.push('');
       }
     }
     var playwright = vibePlaywrightServer(options);

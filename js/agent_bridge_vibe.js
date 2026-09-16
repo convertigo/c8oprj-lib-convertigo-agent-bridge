@@ -66,6 +66,8 @@
           }
         }
         var expectedGatewayUrl = profile === "convertigo" ? convertigoGatewayUrl(options) : "";
+        var expectedRevealMode = expectedBearerEnv.length && revealModeEnabled(options, null);
+        var expectedNoLog = expectedBearerEnv.length && mcpNoLogEnabled(options);
         var expectedPlaywright = vibePlaywrightServer(options);
         var expectedPlaywrightEndpoint = expectedPlaywright === null ? "" : resolvePlaywrightMcpCdpEndpoint(options);
         var expectedPlaywrightCommand = expectedPlaywright === null ? "" : trim(expectedPlaywright.command);
@@ -75,7 +77,9 @@
             && Number(setup.config.selected.viewerDebugPort || 0) === (expectedBearerEnv.length ? expectedViewerDebugPort : 0)
             && trim(setup.config.selected.playwrightEndpoint) === expectedPlaywrightEndpoint
             && trim(setup.config.selected.playwrightCommand) === expectedPlaywrightCommand
-            && trim(setup.config.selected.gatewayUrl) === expectedGatewayUrl) {
+            && trim(setup.config.selected.gatewayUrl) === expectedGatewayUrl
+            && (setup.config.selected.revealMode === true) === expectedRevealMode
+            && (setup.config.selected.noLog === true) === expectedNoLog) {
           messages.push("Local VIBE_HOME config reused: " + setup.config.selected.path);
         } else {
           var written = writeLocalVibeConfig(setup.vibeHome, setup.mcpEndpoint, options.model || options.agentModel, options);
@@ -294,6 +298,7 @@
       var requestedPlaywrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
       var activePlaywrightCdpEndpoint = trim(existing.playwrightCdpEndpoint || existing.viewerCdpEndpoint);
       var viewerChanged = requestedPlaywrightCdpEndpoint.length && activePlaywrightCdpEndpoint !== requestedPlaywrightCdpEndpoint;
+      var revealChanged = (existing.convertigoRevealMode === true) !== revealModeEnabled(options, null);
       if (requestedMcpTokenFingerprint.length
           && trim(existing.mcpBearerTokenFingerprint) !== requestedMcpTokenFingerprint) {
         pushEvent(existing, "warning", {
@@ -309,6 +314,15 @@
           message: "Vibe must restart to refresh the managed Playwright MCP viewer endpoint.",
           previousEndpoint: activePlaywrightCdpEndpoint,
           requestedEndpoint: requestedPlaywrightCdpEndpoint
+        });
+        stopEntry(existing, true);
+        existing = null;
+      } else if (revealChanged) {
+        // The reveal request travels as an MCP header in config.toml: restart to apply it.
+        pushEvent(existing, "warning", {
+          phase: "reveal",
+          reason: "reveal_mode_changed",
+          message: "Vibe must restart to update Convertigo reveal mode."
         });
         stopEntry(existing, true);
         existing = null;

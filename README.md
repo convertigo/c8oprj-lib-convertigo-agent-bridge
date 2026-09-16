@@ -1145,7 +1145,7 @@ Check or install the local Vibe CLI runtime used by the agent bridge.
 <td>llmGatewayModel</td><td>Convertigo profile only: gateway model name. Defaults to mistral/zai-glm-5-2.</td>
 </tr>
 <tr>
-<td>llmGatewayThinking</td><td>Convertigo profile only: thinking level (off, low, medium, high). Defaults to off until the gateway accepts reasoning_effort.</td>
+<td>llmGatewayThinking</td><td>Convertigo profile only: thinking level (off, low, medium, high). Defaults to medium; the gateway passes reasoning_effort to GLM 5.2.</td>
 </tr>
 <tr>
 <td>llmGatewayUrl</td><td>Convertigo profile only: LiteLLM gateway base URL. Defaults to https://llm.convertigo.com/v1.</td>

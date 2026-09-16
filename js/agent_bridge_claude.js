@@ -134,6 +134,9 @@
     if (revealModeEnabled(options, null)) {
       headers["X-Convertigo-Reveal-Mode"] = "true";
     }
+    if (mcpNoLogEnabled(options)) {
+      headers["X-Convertigo-No-Log"] = "true";
+    }
     var viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
     if (viewerDebugPort >= 1024) {
       headers["X-Convertigo-Viewer-Debug-Port"] = String(viewerDebugPort);

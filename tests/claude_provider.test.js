@@ -283,7 +283,8 @@ console.log("Vibe image attachment contract OK");
   assert.equal(spec.name, "mistral/zai-glm-5-2");
   assert.equal(spec.alias, "glm-5-2");
   assert.equal(spec.provider, "convertigo");
-  assert.equal(spec.thinking, "", "thinking stays off until the gateway allows reasoning_effort");
+  assert.equal(spec.thinking, "medium", "thinking is on by default now that the gateway allows reasoning_effort");
+  assert.equal(vibeGatewayModelSpec({ llmGatewayThinking: "off" }).thinking, "");
   assert.equal(vibeGatewayModelSpec({ llmGatewayThinking: "high" }).thinking, "high");
   assert.equal(convertigoGatewayUrl({ llmGatewayUrl: "https://gw.example/v1/" }), "https://gw.example/v1");
   const toml = 'active_model = "glm-5-2"\n\n[[providers]]\nname = "convertigo"\napi_base = "https://llm.convertigo.com/v1"\napi_key_env_var = "CONVERTIGO_LLM_API_KEY"\n\n[[models]]\nname = "mistral/zai-glm-5-2"\nprovider = "convertigo"\nalias = "glm-5-2"\n';
@@ -310,4 +311,15 @@ console.log("Vibe image attachment contract OK");
   assert.match(commonSource, /provider\.id = normalizeProvider\(provider\.id\) === "convertigo" \? "convertigo" : "vibe";/);
   assert.match(vibeSource, /vibeProfile: discoveryProfile,/);
   assert.match(vibeSource, /\["id", "label", "harness", "profile", "gateway", "identity"/);
+}
+
+// MCP headers: reveal restart for Vibe, no-log header controlled by option/symbol.
+{
+  assert.equal(mcpNoLogEnabled({ mcpNoLog: "false" }), false);
+  assert.equal(mcpNoLogEnabled({ mcpNoLog: "true" }), true);
+  assert.equal(mcpNoLogEnabled({}), true, "symbol unreachable in tests: default is true");
+  assert.match(commonSource, /'"X-Convertigo-No-Log" = "true"'/);
+  assert.match(commonSource, /info\.revealMode = \/\["'\]X-Convertigo-Reveal-Mode/);
+  assert.match(vibeSource, /reason: "reveal_mode_changed"/);
+  assert.match(claudeSource, /headers\["X-Convertigo-No-Log"\] = "true";/);
 }
