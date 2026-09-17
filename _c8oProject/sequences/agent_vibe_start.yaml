@@ -173,8 +173,8 @@ comment: Start a long-running vibe-acp process and create an ACP session.
   comment: 'Convertigo profile only: LiteLLM gateway base URL.'
   description: 'Convertigo profile only: LiteLLM gateway base URL.'
 ↓llmGatewayModel [variables.RequestableVariable-1789560000015]: 
-  comment: 'Convertigo profile only: gateway model name.'
-  description: 'Convertigo profile only: gateway model name.'
+  comment: 'Convertigo profile only: pins the offer to this single gateway model (default: every model the gateway lists for the user key).'
+  description: 'Convertigo profile only: pins the offer to this single gateway model (default: every model the gateway lists for the user key).'
 ↓llmGatewayThinking [variables.RequestableVariable-1789560000017]: 
   comment: 'Convertigo profile only: thinking level (off, low, medium, high).'
   description: 'Convertigo profile only: thinking level (off, low, medium, high).'

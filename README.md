@@ -1142,10 +1142,10 @@ Check or install the local Vibe CLI runtime used by the agent bridge.
 <td>installDir</td><td>Optional installation directory. Defaults to <workspaceRoot>/agents/vibe.</td>
 </tr>
 <tr>
-<td>llmGatewayModel</td><td>Convertigo profile only: gateway model name. Defaults to mistral/zai-glm-5-2.</td>
+<td>llmGatewayModel</td><td>Convertigo profile only: pins the offer to this single gateway model. By default the offer is every model the gateway lists for the user key (GET /models), newest first.</td>
 </tr>
 <tr>
-<td>llmGatewayThinking</td><td>Convertigo profile only: thinking level (off, low, medium, high). Defaults to medium; the gateway passes reasoning_effort to GLM 5.2.</td>
+<td>llmGatewayThinking</td><td>Convertigo profile only: thinking level (off, low, medium, high). Defaults to medium; the gateway passes reasoning_effort to the GLM models.</td>
 </tr>
 <tr>
 <td>llmGatewayUrl</td><td>Convertigo profile only: LiteLLM gateway base URL. Defaults to https://llm.convertigo.com/v1.</td>
@@ -1283,7 +1283,7 @@ Start a long-running vibe-acp process and create an ACP session.
 <td>installDir</td><td>Optional installation directory. Defaults to <workspaceRoot>/agents/vibe.</td>
 </tr>
 <tr>
-<td>llmGatewayModel</td><td>Convertigo profile only: gateway model name.</td>
+<td>llmGatewayModel</td><td>Convertigo profile only: pins the offer to this single gateway model (default: every model the gateway lists for the user key).</td>
 </tr>
 <tr>
 <td>llmGatewayThinking</td><td>Convertigo profile only: thinking level (off, low, medium, high).</td>

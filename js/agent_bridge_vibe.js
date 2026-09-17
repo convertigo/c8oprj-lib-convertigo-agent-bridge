@@ -66,6 +66,9 @@
           }
         }
         var expectedGatewayUrl = profile === "convertigo" ? convertigoGatewayUrl(options) : "";
+        // Rewrite the config, hence restart Vibe on it, when the gateway offer changed since
+        // this home was written. It also covers a resumed conversation.
+        var expectedGatewayModels = profile === "convertigo" ? vibeGatewayModelsFingerprint(vibeGatewayModelSpecs(options, setup.vibeHome)) : "";
         var expectedRevealMode = expectedBearerEnv.length && revealModeEnabled(options, null);
         var expectedNoLog = expectedBearerEnv.length && mcpNoLogEnabled(options);
         var expectedPlaywright = vibePlaywrightServer(options);
@@ -78,6 +81,7 @@
             && trim(setup.config.selected.playwrightEndpoint) === expectedPlaywrightEndpoint
             && trim(setup.config.selected.playwrightCommand) === expectedPlaywrightCommand
             && trim(setup.config.selected.gatewayUrl) === expectedGatewayUrl
+            && trim(setup.config.selected.gatewayModels) === expectedGatewayModels
             && (setup.config.selected.revealMode === true) === expectedRevealMode
             && (setup.config.selected.noLog === true) === expectedNoLog) {
           messages.push("Local VIBE_HOME config reused: " + setup.config.selected.path);
@@ -552,7 +556,8 @@
         handle: handle,
         vibeProfile: discoveryProfile,
         llmGatewayUrl: options.llmGatewayUrl || (provider.gateway && provider.gateway.url),
-        llmGatewayModel: options.llmGatewayModel || (provider.gateway && provider.gateway.model),
+        // Only an explicit model pins the offer; the default one must not hide the others.
+        llmGatewayModel: options.llmGatewayModel,
         llmGatewayThinking: options.llmGatewayThinking,
         workspaceRoot: trim(options.workspaceRoot || setup.workspaceRoot),
         vibeHome: trim(options.vibeHome || setup.vibeHome),
@@ -581,6 +586,14 @@
             discovered[key] = provider[key];
           }
         });
+        var offeredAliases = discovered.gateway && discovered.gateway.models ? discovered.gateway.models : [];
+        if (offeredAliases.length && discovered.models && discovered.models.length) {
+          var offeredModels = discovered.models.filter(function (model) { return offeredAliases.indexOf(model.id) >= 0; });
+          if (offeredModels.length) {
+            discovered.models = offeredModels;
+            if (offeredAliases.indexOf(discovered.defaultModel) < 0) { discovered.defaultModel = offeredModels[0].id; }
+          }
+        }
         return discovered;
       }
       provider.source = provider.source || {};

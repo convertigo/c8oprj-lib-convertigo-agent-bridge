@@ -323,3 +323,60 @@ console.log("Vibe image attachment contract OK");
   assert.match(vibeSource, /reason: "reveal_mode_changed"/);
   assert.match(claudeSource, /headers\["X-Convertigo-No-Log"\] = "true";/);
 }
+
+// Convertigo mode: the model offer comes from the gateway, not from a constant.
+{
+  assert.equal(gatewayModelAlias("mistral/zai-glm-5-3"), "glm-5-3");
+  assert.equal(gatewayModelAlias("mistral/zai-glm-5-2"), "glm-5-2");
+  assert.equal(gatewayModelAlias("claude-sonnet-5"), "claude-sonnet-5");
+  assert.deepEqual(normalizeGatewayModelIds("mistral/zai-glm-5-2, mistral/zai-glm-5-10 mistral/zai-glm-5-3,mistral/zai-glm-5-3, bad!name"),
+    ["mistral/zai-glm-5-10", "mistral/zai-glm-5-3", "mistral/zai-glm-5-2"], "newest first, deduplicated, unsafe names dropped");
+
+  const offer = { gatewayModelIds: ["mistral/zai-glm-5-2", "mistral/zai-glm-5-3"] };
+  const specs = vibeGatewayModelSpecs(offer, "");
+  assert.deepEqual(specs.map(s => s.alias), ["glm-5-3", "glm-5-2"]);
+  assert.ok(specs.every(s => s.activeModel === "glm-5-3" && s.provider === "convertigo"), "the newest model is active by default");
+  assert.equal(vibeGatewayModelSpec(offer, "").name, "mistral/zai-glm-5-3");
+  assert.equal(vibeGatewayModelSpecs(Object.assign({ model: "glm-5-2" }, offer), "")[0].activeModel, "glm-5-2", "a conversation keeps its model while it is offered");
+  assert.equal(vibeGatewayModelSpecs(Object.assign({ model: "devstral-small" }, offer), "")[0].activeModel, "glm-5-3", "an unknown model falls back to the default");
+  assert.deepEqual(vibeGatewayModelSpecs({ llmGatewayModel: "mistral/zai-glm-5-2", gatewayModelIds: offer.gatewayModelIds }, "").map(s => s.name),
+    ["mistral/zai-glm-5-2"], "an explicit llmGatewayModel pins the offer");
+  assert.equal(vibeGatewayModelsFingerprint(specs), "mistral/zai-glm-5-2,mistral/zai-glm-5-3");
+
+  const toml = 'active_model = "glm-5-3"\n\n[[providers]]\nname = "convertigo"\napi_base = "https://llm.convertigo.com/v1"\n\n[[models]]\nname = "mistral/zai-glm-5-3"\nprovider = "convertigo"\nalias = "glm-5-3"\n\n[[models]]\nname = "mistral/zai-glm-5-2"\nprovider = "convertigo"\nalias = "glm-5-2"\n\n[[models]]\nname = "devstral-small-latest"\nprovider = "mistral"\nalias = "devstral-small"\n';
+  assert.equal(parseVibeGatewayModels(toml), "mistral/zai-glm-5-2,mistral/zai-glm-5-3", "only gateway models count in the reuse fingerprint");
+  assert.match(vibeSource, /selected\.gatewayModels\) === expectedGatewayModels/);
+
+  // Vibe advertises its built-in Mistral models over ACP; the Convertigo mode hides them.
+  const acp = [{ id: "model", currentValue: "devstral-small", options: [
+    { value: "glm-5-3", name: "glm-5-3" }, { value: "glm-5-2", name: "glm-5-2" },
+    { value: "devstral-small", name: "devstral-small" }, { value: "mistral-medium-3.5", name: "mistral-medium-3.5" }] }];
+  const filtered = normalizeVibeAcpProviderSettings(acp, { id: "convertigo", gateway: { models: ["glm-5-3", "glm-5-2"] } });
+  assert.deepEqual(filtered.models.map(m => m.id), ["glm-5-3", "glm-5-2"]);
+  assert.ok(filtered.models.every(m => m.provider === "convertigo"));
+  assert.equal(filtered.defaultModel, "glm-5-3", "a built-in default is replaced by an offered model");
+  const plainVibe = normalizeVibeAcpProviderSettings(acp, { id: "vibe" });
+  assert.equal(plainVibe.models.length, 4, "the regular Vibe provider still lists everything");
+}
+
+// The generated config.toml declares every offered model and activates the requested one.
+{
+  const originalWrite = writeTextFile, originalEnsure = ensureDirectory;
+  let written = "";
+  writeTextFile = (_file, text) => { written = String(text); };
+  ensureDirectory = () => {};
+  try {
+    const result = writeLocalVibeConfig("/managed/vibe-home", "http://localhost:18080/convertigo/api/mcp", "glm-5-2",
+      { vibeProfile: "convertigo", gatewayModelIds: ["mistral/zai-glm-5-2", "mistral/zai-glm-5-3"] });
+    assert.match(written, /^active_model = "glm-5-2"$/m, "the conversation model stays active");
+    assert.equal((written.match(/^\[\[models\]\]$/gm) || []).length, 2);
+    assert.match(written, /name = "mistral\/zai-glm-5-3"\nprovider = "convertigo"\nalias = "glm-5-3"/);
+    assert.match(written, /name = "mistral\/zai-glm-5-2"\nprovider = "convertigo"\nalias = "glm-5-2"/);
+    assert.doesNotMatch(written, /provider = "mistral"/);
+    assert.equal(parseVibeGatewayModels(written), "mistral/zai-glm-5-2,mistral/zai-glm-5-3");
+    assert.equal(result.model, "glm-5-2");
+  } finally {
+    writeTextFile = originalWrite;
+    ensureDirectory = originalEnsure;
+  }
+}

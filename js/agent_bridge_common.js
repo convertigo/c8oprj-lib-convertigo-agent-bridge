@@ -82,20 +82,188 @@
     return CONVERTIGO_LLM_GATEWAY_THINKING === "off" ? "" : CONVERTIGO_LLM_GATEWAY_THINKING;
   }
 
-  function vibeGatewayModelSpec(options) {
+  // The Convertigo mode offers whatever the gateway exposes to the user's key (GET /models),
+  // so declaring or retiring a model in LiteLLM needs no Bridge release. Aliases drop the
+  // upstream provider path and the vendor prefix: mistral/zai-glm-5-3 -> glm-5-3.
+  var CONVERTIGO_LLM_GATEWAY_MODELS_CACHE_MS = 5 * 60 * 1000;
+  var CONVERTIGO_LLM_GATEWAY_DEFAULT_MODEL_SYMBOL = "agentbridge.gateway.default_model";
+
+  function gatewayModelAlias(name) {
+    var text = trim(name);
+    var slash = text.lastIndexOf("/");
+    if (slash >= 0) {
+      text = text.substring(slash + 1);
+    }
+    text = text.replace(/^zai-/i, "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+    return text.length ? text : CONVERTIGO_LLM_GATEWAY_ALIAS;
+  }
+
+  function compareGatewayModelNames(left, right) {
+    // Newest first: numeric chunks compare as numbers, so glm-5-10 sorts before glm-5-3.
+    var a = gatewayModelAlias(left).split(/(\d+)/), b = gatewayModelAlias(right).split(/(\d+)/);
+    for (var i = 0; i < Math.max(a.length, b.length); i++) {
+      var x = a[i] === undefined ? "" : a[i], y = b[i] === undefined ? "" : b[i];
+      if (x === y) { continue; }
+      if (/^\d+$/.test(x) && /^\d+$/.test(y)) { return Number(y) - Number(x); }
+      return x < y ? -1 : 1;
+    }
+    return 0;
+  }
+
+  function normalizeGatewayModelIds(value) {
+    var list = value;
+    if (list && typeof list === "object" && !Array.isArray(list)) { list = String(list); }
+    if (typeof list === "string") { list = list.split(/[\s,;]+/); }
+    if (!Array.isArray(list)) { return []; }
+    var seen = {}, names = [];
+    for (var i = 0; i < list.length; i++) {
+      var name = trim(list[i]);
+      if (name.length && !seen[name] && /^[A-Za-z0-9._\/:-]+$/.test(name)) {
+        seen[name] = true;
+        names.push(name);
+      }
+    }
+    return names.sort(compareGatewayModelNames);
+  }
+
+  function convertigoGatewayApiKey(options, vibeHome) {
+    var explicit = trim(options && (options.gatewayApiKey || options.llmGatewayApiKey));
+    if (explicit.length) { return explicit; }
+    try {
+      if (trim(vibeHome).length) {
+        var parsed = readEnvFile(new File(trim(vibeHome), ".env"));
+        var fromEnv = trim(parsed.values[CONVERTIGO_LLM_API_KEY_ENV]);
+        if (fromEnv.length) { return fromEnv; }
+      }
+    } catch (_ignoreGatewayEnvKey) {}
+    return readConvertigoGatewayKeyFile(options);
+  }
+
+  function convertigoGatewayModelsCacheFile(options) {
+    try {
+      var keyFile = convertigoGatewayKeyFile(options);
+      return keyFile === null ? null : new File(keyFile.getParentFile(), "gateway-models.json");
+    } catch (_ignoreGatewayCacheFile) {
+      return null;
+    }
+  }
+
+  function readConvertigoGatewayModelsCache(options) {
+    try {
+      var file = convertigoGatewayModelsCacheFile(options);
+      if (file === null || !file.isFile()) { return null; }
+      var cached = JSON.parse(readTextFile(file));
+      if (trim(cached.url) !== convertigoGatewayUrl(options)) { return null; }
+      var names = normalizeGatewayModelIds(cached.models);
+      return names.length ? { models: names, at: Number(cached.at) || 0 } : null;
+    } catch (_ignoreGatewayCacheRead) {
+      return null;
+    }
+  }
+
+  function fetchConvertigoGatewayModelIds(options, apiKey) {
+    var connection = null, stream = null;
+    try {
+      connection = new URL(convertigoGatewayUrl(options) + "/models").openConnection();
+      connection.setConnectTimeout(4000);
+      connection.setReadTimeout(6000);
+      connection.setRequestMethod("GET");
+      connection.setRequestProperty("Accept", "application/json");
+      connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+      if (connection.getResponseCode() !== 200) { return []; }
+      stream = connection.getInputStream();
+      var body = String(new java.lang.String(stream.readAllBytes(), "UTF-8"));
+      var data = JSON.parse(body).data || [];
+      var ids = [];
+      for (var i = 0; i < data.length; i++) { ids.push(data[i] && data[i].id); }
+      return normalizeGatewayModelIds(ids);
+    } catch (_ignoreGatewayModels) {
+      try { log.warn("Unable to list the Convertigo gateway models: " + String(_ignoreGatewayModels)); } catch (_ignoreGatewayModelsLog) {}
+      return [];
+    } finally {
+      try { if (stream !== null) stream.close(); } catch (_ignoreGatewayStreamClose) {}
+      try { if (connection !== null) connection.disconnect(); } catch (_ignoreGatewayDisconnect) {}
+    }
+  }
+
+  function convertigoGatewayModelNames(options, vibeHome) {
+    options = options || {};
+    // An explicit model, or an explicit list, pins the offer and skips the gateway.
+    var pinned = trim(options.llmGatewayModel || options.gatewayModel);
+    if (pinned.length) { return [pinned]; }
+    var listed = normalizeGatewayModelIds(options.gatewayModelIds || options.llmGatewayModels);
+    if (listed.length) { return listed; }
+    var cached = readConvertigoGatewayModelsCache(options);
+    if (cached !== null && now() - cached.at < CONVERTIGO_LLM_GATEWAY_MODELS_CACHE_MS) { return cached.models; }
+    var apiKey = boolValue(options.dryRun, false) ? "" : convertigoGatewayApiKey(options, vibeHome);
+    if (apiKey.length) {
+      var fetched = fetchConvertigoGatewayModelIds(options, apiKey);
+      if (fetched.length) {
+        try {
+          var cacheFile = convertigoGatewayModelsCacheFile(options);
+          if (cacheFile !== null) {
+            ensureDirectory(cacheFile.getParentFile());
+            writeTextFile(cacheFile, JSON.stringify({ url: convertigoGatewayUrl(options), at: now(), models: fetched }));
+          }
+        } catch (_ignoreGatewayCacheWrite) {}
+        return fetched;
+      }
+    }
+    // Gateway unreachable or no key yet: last known offer, then the built-in model.
+    return cached !== null ? cached.models : [CONVERTIGO_LLM_GATEWAY_MODEL];
+  }
+
+  function convertigoGatewayDefaultAlias(options, names) {
+    var wanted = trim(options && (options.llmGatewayDefaultModel || options.model || options.agentModel));
+    if (!wanted.length) {
+      try {
+        var symbol = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue(CONVERTIGO_LLM_GATEWAY_DEFAULT_MODEL_SYMBOL);
+        wanted = symbol === null || typeof symbol === "undefined" ? "" : trim(String(symbol));
+      } catch (_ignoreGatewayDefaultSymbol) {}
+    }
+    for (var i = 0; i < names.length; i++) {
+      if (wanted.length && (names[i] === wanted || gatewayModelAlias(names[i]) === wanted)) { return gatewayModelAlias(names[i]); }
+    }
+    return gatewayModelAlias(names[0]);
+  }
+
+  function vibeGatewayModelSpecs(options, vibeHome) {
+    var names = convertigoGatewayModelNames(options, vibeHome);
+    var active = convertigoGatewayDefaultAlias(options, names);
     var thinking = convertigoGatewayThinking(options);
-    return {
-      activeModel: CONVERTIGO_LLM_GATEWAY_ALIAS,
-      name: convertigoGatewayModel(options),
-      alias: CONVERTIGO_LLM_GATEWAY_ALIAS,
-      provider: "convertigo",
-      thinking: thinking,
-      temperature: "1.0",
-      inputPrice: "1.4",
-      outputPrice: "4.4",
-      builtIn: false,
-      supportsImages: VIBE_GLM_SUPPORTS_IMAGES
-    };
+    var specs = [], seenAlias = {};
+    for (var i = 0; i < names.length; i++) {
+      var alias = gatewayModelAlias(names[i]);
+      if (seenAlias[alias]) { continue; }
+      seenAlias[alias] = true;
+      specs.push({
+        activeModel: active,
+        name: names[i],
+        alias: alias,
+        provider: "convertigo",
+        thinking: thinking,
+        temperature: "1.0",
+        inputPrice: "1.4",
+        outputPrice: "4.4",
+        builtIn: false,
+        supportsImages: VIBE_GLM_SUPPORTS_IMAGES
+      });
+    }
+    return specs;
+  }
+
+  function vibeGatewayModelsFingerprint(specs) {
+    var names = [];
+    for (var i = 0; i < specs.length; i++) { names.push(specs[i].name); }
+    return names.sort().join(",");
+  }
+
+  function vibeGatewayModelSpec(options, vibeHome) {
+    var specs = vibeGatewayModelSpecs(options, vibeHome);
+    for (var i = 0; i < specs.length; i++) {
+      if (specs[i].alias === specs[i].activeModel) { return specs[i]; }
+    }
+    return specs[0];
   }
 
   function convertigoGatewayKeyFile(options) {
@@ -144,6 +312,18 @@
       return base ? trim(base[1]).replace(/\/+$/, "") : "";
     }
     return "";
+  }
+
+  function parseVibeGatewayModels(text) {
+    var pattern = /\[\[models\]\]([\s\S]*?)(?=\n\[\[|\n\[|$)/g;
+    var match, names = [];
+    while ((match = pattern.exec(String(text || ""))) !== null) {
+      var block = "\n" + match[1];
+      if (!/\nprovider\s*=\s*["']convertigo["']/.test(block)) { continue; }
+      var name = block.match(/\nname\s*=\s*["']([^"']+)["']/);
+      if (name) { names.push(trim(name[1])); }
+    }
+    return names.sort().join(",");
   }
 
   var VIBE_IMAGE_MIME_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
@@ -6061,6 +6241,7 @@
       bearerTokenEnv: "",
       endpoint: "",
       gatewayUrl: "",
+      gatewayModels: "",
       revealMode: false,
       noLog: false,
       valid: false
@@ -6091,6 +6272,7 @@
       break;
     }
     info.gatewayUrl = parseVibeGatewayUrl(text);
+    info.gatewayModels = parseVibeGatewayModels(text);
     info.playwrightEndpoint = "";
     info.playwrightCommand = "";
     var playwrightPattern = /\[\[mcp_servers\]\]([\s\S]*?)(?=\n\[\[mcp_servers\]\]|$)/g;
@@ -6238,7 +6420,19 @@
     ensureDirectory(configDir);
     var configFile = new File(configDir, "config.toml");
     var gateway = isConvertigoGatewayProfile(options);
-    var spec = gateway ? vibeGatewayModelSpec(options) : vibeModelSpec(model);
+    var gatewayOptions = options || {};
+    if (gateway && trim(model).length && !trim(gatewayOptions.llmGatewayDefaultModel).length) {
+      gatewayOptions = withVibeProfile(gatewayOptions, "convertigo");
+      gatewayOptions.llmGatewayDefaultModel = model;
+    }
+    var specs = gateway ? vibeGatewayModelSpecs(gatewayOptions, vibeHome) : [vibeModelSpec(model)];
+    var spec = specs[0];
+    for (var activeIndex = 0; activeIndex < specs.length; activeIndex++) {
+      if (specs[activeIndex].alias === specs[activeIndex].activeModel) {
+        spec = specs[activeIndex];
+        break;
+      }
+    }
     var lines = gateway ? [
       '# Generated by lib_ConvertigoAgentBridge (Convertigo gateway profile).',
       'active_model = "' + tomlString(spec.activeModel) + '"',
@@ -6276,17 +6470,21 @@
       '[providers.extra_headers]',
       ''
     ];
-    if (spec.builtIn !== true) {
+    for (var specIndex = 0; specIndex < specs.length; specIndex++) {
+      var modelSpec = specs[specIndex];
+      if (modelSpec.builtIn === true) {
+        continue;
+      }
       lines.push(
         '[[models]]',
-        'name = "' + tomlString(spec.name) + '"',
+        'name = "' + tomlString(modelSpec.name) + '"',
         'provider = "' + (gateway ? "convertigo" : "mistral") + '"',
-        'alias = "' + tomlString(spec.alias) + '"',
-        'temperature = ' + spec.temperature,
-        'input_price = ' + spec.inputPrice,
-        'output_price = ' + spec.outputPrice,
-        spec.thinking.length ? 'thinking = "' + tomlString(spec.thinking) + '"' : '',
-        'supports_images = ' + (spec.supportsImages === true ? 'true' : 'false'),
+        'alias = "' + tomlString(modelSpec.alias) + '"',
+        'temperature = ' + modelSpec.temperature,
+        'input_price = ' + modelSpec.inputPrice,
+        'output_price = ' + modelSpec.outputPrice,
+        modelSpec.thinking.length ? 'thinking = "' + tomlString(modelSpec.thinking) + '"' : '',
+        'supports_images = ' + (modelSpec.supportsImages === true ? 'true' : 'false'),
         'auto_compact_threshold = 200000',
         ''
       );
@@ -7228,6 +7426,17 @@
     var modelOption = findAcpConfigOption(configOptions, "model");
     var thinkingOption = findAcpConfigOption(configOptions, "thinking");
     var modelChoices = normalizeAcpSelectOptions(modelOption);
+    var convertigoMode = normalizeProvider(provider.id) === "convertigo";
+    var gatewayAliases = convertigoMode && provider.gateway && provider.gateway.models ? provider.gateway.models : [];
+    if (gatewayAliases.length) {
+      // Vibe always advertises its built-in Mistral models; the Convertigo home has no key for
+      // that provider, so only the gateway offer is selectable.
+      var offered = [];
+      for (var choiceIndex = 0; choiceIndex < modelChoices.length; choiceIndex++) {
+        if (gatewayAliases.indexOf(modelChoices[choiceIndex].id) >= 0) { offered.push(modelChoices[choiceIndex]); }
+      }
+      if (offered.length) { modelChoices = offered; }
+    }
     if (!modelChoices.length) {
       return provider;
     }
@@ -7241,7 +7450,7 @@
         label: model.label,
         description: model.description,
         configuredName: model.description,
-        provider: "mistral",
+        provider: convertigoMode ? "convertigo" : "mistral",
         defaultReasoning: defaultReasoning,
         reasoningLevels: reasoningLevels,
         serviceTiers: [],
@@ -7252,6 +7461,11 @@
     provider.id = normalizeProvider(provider.id) === "convertigo" ? "convertigo" : "vibe";
     provider.label = provider.label || (provider.id === "convertigo" ? "Convertigo" : "Vibe");
     provider.defaultModel = trim(modelOption.currentValue || modelOption.current_value) || models[0].id;
+    var defaultOffered = false;
+    for (var offeredIndex = 0; offeredIndex < models.length; offeredIndex++) {
+      if (models[offeredIndex].id === provider.defaultModel) { defaultOffered = true; }
+    }
+    if (!defaultOffered) { provider.defaultModel = models[0].id; }
     provider.models = models;
     provider.reasoningMode = reasoningLevels.length ? "runtime_selectable" : "model_bound";
     provider.supports = provider.supports || {};
@@ -7375,24 +7589,37 @@
     var user = gatewayProfile ? { path: "", exists: false, activeModel: "", models: [] } : parseVibeModelsFromConfig(new File(new File(String(System.getProperty("user.home")), ".vibe"), "config.toml"));
     var config = selected.exists ? selected : user;
     var models = config.models;
-    if (!models.length && (gatewayProfile || setup.model)) {
-      var spec = gatewayProfile ? vibeGatewayModelSpec(options) : vibeModelSpec(setup.model);
-      models = [{
-        id: spec.activeModel,
-        label: spec.activeModel,
-        configuredName: spec.name,
-        provider: gatewayProfile ? "convertigo" : "mistral",
-        defaultReasoning: spec.thinking,
-        reasoningLevels: spec.thinking.length ? [{
-          id: spec.thinking,
-          label: spec.thinking,
-          description: "Configured by Vibe model"
-        }] : [],
-        serviceTiers: [],
-        speedTiers: []
-      }];
+    // The Convertigo mode always lists the gateway offer, never what an older config.toml
+    // still declares: the offer can change between two conversations.
+    var gatewaySpecs = gatewayProfile ? vibeGatewayModelSpecs(options, setup.vibeHome) : [];
+    if (gatewayProfile || (!models.length && setup.model)) {
+      var settingSpecs = gatewayProfile ? gatewaySpecs : [vibeModelSpec(setup.model)];
+      models = [];
+      for (var settingIndex = 0; settingIndex < settingSpecs.length; settingIndex++) {
+        var spec = settingSpecs[settingIndex];
+        models.push({
+          id: gatewayProfile ? spec.alias : spec.activeModel,
+          label: gatewayProfile ? spec.alias : spec.activeModel,
+          configuredName: spec.name,
+          provider: gatewayProfile ? "convertigo" : "mistral",
+          defaultReasoning: spec.thinking,
+          reasoningLevels: spec.thinking.length ? [{
+            id: spec.thinking,
+            label: spec.thinking,
+            description: "Configured by Vibe model"
+          }] : [],
+          serviceTiers: [],
+          speedTiers: []
+        });
+      }
     }
-    var defaultModel = config.activeModel || setup.model || (models.length ? models[0].id : "");
+    var gatewayAliases = [];
+    for (var aliasIndex = 0; aliasIndex < gatewaySpecs.length; aliasIndex++) { gatewayAliases.push(gatewaySpecs[aliasIndex].alias); }
+    var configuredDefault = trim(config.activeModel);
+    if (gatewayProfile && gatewayAliases.indexOf(configuredDefault) < 0) {
+      configuredDefault = gatewaySpecs.length ? gatewaySpecs[0].activeModel : "";
+    }
+    var defaultModel = configuredDefault || setup.model || (models.length ? models[0].id : "");
     var provider = {
       id: gatewayProfile ? "convertigo" : "vibe",
       label: gatewayProfile ? "Convertigo" : "Vibe",
@@ -7400,7 +7627,7 @@
       // driving it so the Assistant never hard-codes Vibe for it.
       harness: "vibe",
       profile: resolveVibeProfile(options),
-      gateway: gatewayProfile ? { url: convertigoGatewayUrl(options), model: convertigoGatewayModel(options), apiKeyEnv: CONVERTIGO_LLM_API_KEY_ENV } : null,
+      gateway: gatewayProfile ? { url: convertigoGatewayUrl(options), model: gatewaySpecs.length ? gatewaySpecs[0].name : convertigoGatewayModel(options), models: gatewayAliases, apiKeyEnv: CONVERTIGO_LLM_API_KEY_ENV } : null,
       identity: gatewayProfile ? { email: studioOwnerEmail() } : null,
       status: profileSupported ? (managedVibeReady ? "ready" : "missing") : "unsupported_profile",
       ready: profileSupported && managedVibeReady,
