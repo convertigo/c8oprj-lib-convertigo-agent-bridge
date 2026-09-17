@@ -586,15 +586,7 @@
             discovered[key] = provider[key];
           }
         });
-        var offeredAliases = discovered.gateway && discovered.gateway.models ? discovered.gateway.models : [];
-        if (offeredAliases.length && discovered.models && discovered.models.length) {
-          var offeredModels = discovered.models.filter(function (model) { return offeredAliases.indexOf(model.id) >= 0; });
-          if (offeredModels.length) {
-            discovered.models = offeredModels;
-            if (offeredAliases.indexOf(discovered.defaultModel) < 0) { discovered.defaultModel = offeredModels[0].id; }
-          }
-        }
-        return discovered;
+        return applyGatewayOfferToProvider(discovered);
       }
       provider.source = provider.source || {};
       provider.source.discoveryError = started && started.error ? String(started.error) : "Vibe model discovery returned no catalog";

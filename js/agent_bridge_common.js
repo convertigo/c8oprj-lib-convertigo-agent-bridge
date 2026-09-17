@@ -129,14 +129,7 @@
   function convertigoGatewayApiKey(options, vibeHome) {
     var explicit = trim(options && (options.gatewayApiKey || options.llmGatewayApiKey));
     if (explicit.length) { return explicit; }
-    try {
-      if (trim(vibeHome).length) {
-        var parsed = readEnvFile(new File(trim(vibeHome), ".env"));
-        var fromEnv = trim(parsed.values[CONVERTIGO_LLM_API_KEY_ENV]);
-        if (fromEnv.length) { return fromEnv; }
-      }
-    } catch (_ignoreGatewayEnvKey) {}
-    return readConvertigoGatewayKeyFile(options);
+    return resolveConvertigoGatewayKey(options, vibeHome).key;
   }
 
   function convertigoGatewayModelsCacheFile(options) {
@@ -155,11 +148,13 @@
       var cached = JSON.parse(readTextFile(file));
       if (trim(cached.url) !== convertigoGatewayUrl(options)) { return null; }
       var names = normalizeGatewayModelIds(cached.models);
-      return names.length ? { models: names, at: Number(cached.at) || 0 } : null;
+      return names.length ? { models: names, at: Number(cached.at) || 0, efforts: cached.efforts && typeof cached.efforts === "object" ? cached.efforts : {} } : null;
     } catch (_ignoreGatewayCacheRead) {
       return null;
     }
   }
+
+  var convertigoGatewayKeyRejected = false;
 
   function fetchConvertigoGatewayModelIds(options, apiKey) {
     var connection = null, stream = null;
@@ -170,7 +165,12 @@
       connection.setRequestMethod("GET");
       connection.setRequestProperty("Accept", "application/json");
       connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-      if (connection.getResponseCode() !== 200) { return []; }
+      var gatewayStatus = connection.getResponseCode();
+      convertigoGatewayKeyRejected = gatewayStatus === 401 || gatewayStatus === 403;
+      if (convertigoGatewayKeyRejected) {
+        try { log.warn("The Convertigo gateway rejected the agent key (HTTP " + gatewayStatus + "). Check " + filePath(convertigoGatewayKeyFile(options))); } catch (_ignoreRejectedKeyLog) {}
+      }
+      if (gatewayStatus !== 200) { return []; }
       stream = connection.getInputStream();
       var body = String(new java.lang.String(stream.readAllBytes(), "UTF-8"));
       var data = JSON.parse(body).data || [];
@@ -184,6 +184,96 @@
       try { if (stream !== null) stream.close(); } catch (_ignoreGatewayStreamClose) {}
       try { if (connection !== null) connection.disconnect(); } catch (_ignoreGatewayDisconnect) {}
     }
+  }
+
+  // Accepted reasoning_effort values differ per model (GLM 5.2 takes medium, GLM 5.3 does not)
+  // and the gateway does not publish them, so each new model is probed once with one-token
+  // requests. The answer is cached with the offer.
+  var GATEWAY_REASONING_EFFORTS = ["low", "medium", "high", "max"];
+
+  function probeGatewayModelEffort(options, apiKey, name, effort) {
+    var connection = null, stream = null;
+    try {
+      connection = new URL(convertigoGatewayUrl(options) + "/chat/completions").openConnection();
+      connection.setConnectTimeout(4000);
+      connection.setReadTimeout(20000);
+      connection.setRequestMethod("POST");
+      connection.setDoOutput(true);
+      connection.setRequestProperty("Content-Type", "application/json");
+      connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+      var body = JSON.stringify({ model: name, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false, reasoning_effort: effort });
+      var out = connection.getOutputStream();
+      out.write(new java.lang.String(body).getBytes("UTF-8"));
+      out.close();
+      var code = connection.getResponseCode();
+      stream = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
+      var text = stream === null ? "" : String(new java.lang.String(stream.readAllBytes(), "UTF-8"));
+      if (code === 200) { return "yes"; }
+      if ((code === 400 || code === 422) && /reasoning_effort|not supported|UnsupportedParams/i.test(text)) { return "no"; }
+      return "unknown";
+    } catch (_ignoreEffortProbe) {
+      return "unknown";
+    } finally {
+      try { if (stream !== null) stream.close(); } catch (_ignoreProbeStreamClose) {}
+      try { if (connection !== null) connection.disconnect(); } catch (_ignoreProbeDisconnect) {}
+    }
+  }
+
+  function probeGatewayModelEfforts(options, apiKey, name) {
+    var supported = [];
+    for (var i = 0; i < GATEWAY_REASONING_EFFORTS.length; i++) {
+      var answer = probeGatewayModelEffort(options, apiKey, name, GATEWAY_REASONING_EFFORTS[i]);
+      if (answer === "unknown") { return null; }
+      if (answer === "yes") { supported.push(GATEWAY_REASONING_EFFORTS[i]); }
+    }
+    return supported;
+  }
+
+  function normalizeGatewayEfforts(value) {
+    if (typeof value === "string") { value = value.split(/[\s,;]+/); }
+    if (!Array.isArray(value)) { return null; }
+    var levels = [];
+    for (var i = 0; i < GATEWAY_REASONING_EFFORTS.length; i++) {
+      if (value.indexOf(GATEWAY_REASONING_EFFORTS[i]) >= 0) { levels.push(GATEWAY_REASONING_EFFORTS[i]); }
+    }
+    return levels;
+  }
+
+  // null: not probed yet; []: the model takes no reasoning_effort at all.
+  function convertigoGatewayModelEfforts(options, name) {
+    var explicit = options && options.gatewayModelEfforts;
+    if (explicit && typeof explicit === "object" && Object.prototype.hasOwnProperty.call(explicit, name)) {
+      return normalizeGatewayEfforts(explicit[name]);
+    }
+    var cached = readConvertigoGatewayModelsCache(options || {});
+    return cached !== null && Object.prototype.hasOwnProperty.call(cached.efforts, name) ? normalizeGatewayEfforts(cached.efforts[name]) : null;
+  }
+
+  function gatewayEffortsForAlias(options, alias) {
+    alias = trim(alias);
+    var explicit = options && options.gatewayModelEfforts;
+    var names = [];
+    if (explicit && typeof explicit === "object") { for (var key in explicit) { names.push(key); } }
+    var cached = readConvertigoGatewayModelsCache(options || {});
+    if (cached !== null) { names = names.concat(cached.models); }
+    for (var i = 0; i < names.length; i++) {
+      if (names[i] === alias || gatewayModelAlias(names[i]) === alias) { return convertigoGatewayModelEfforts(options, names[i]); }
+    }
+    return null;
+  }
+
+  function gatewayEffortFor(requested, supported) {
+    requested = trim(requested).toLowerCase();
+    if (!requested.length || requested === "off" || requested === "none") { return ""; }
+    if (supported === null) { return requested === "medium" ? "high" : requested; }
+    if (!supported.length) { return ""; }
+    if (supported.indexOf(requested) >= 0) { return requested; }
+    // Closest accepted level, preferring the stronger one: medium becomes high on GLM 5.3.
+    var rank = GATEWAY_REASONING_EFFORTS.indexOf(requested);
+    for (var up = rank + 1; rank >= 0 && up < GATEWAY_REASONING_EFFORTS.length; up++) {
+      if (supported.indexOf(GATEWAY_REASONING_EFFORTS[up]) >= 0) { return GATEWAY_REASONING_EFFORTS[up]; }
+    }
+    return supported[supported.length - 1];
   }
 
   function convertigoGatewayModelNames(options, vibeHome) {
@@ -200,10 +290,18 @@
       var fetched = fetchConvertigoGatewayModelIds(options, apiKey);
       if (fetched.length) {
         try {
+          var knownEfforts = cached !== null ? cached.efforts : {};
+          var efforts = {};
+          for (var effortIndex = 0; effortIndex < fetched.length; effortIndex++) {
+            var modelName = fetched[effortIndex];
+            var levels = Object.prototype.hasOwnProperty.call(knownEfforts, modelName) ? normalizeGatewayEfforts(knownEfforts[modelName]) : null;
+            if (levels === null) { levels = probeGatewayModelEfforts(options, apiKey, modelName); }
+            if (levels !== null) { efforts[modelName] = levels; }
+          }
           var cacheFile = convertigoGatewayModelsCacheFile(options);
           if (cacheFile !== null) {
             ensureDirectory(cacheFile.getParentFile());
-            writeTextFile(cacheFile, JSON.stringify({ url: convertigoGatewayUrl(options), at: now(), models: fetched }));
+            writeTextFile(cacheFile, JSON.stringify({ url: convertigoGatewayUrl(options), at: now(), models: fetched, efforts: efforts }));
           }
         } catch (_ignoreGatewayCacheWrite) {}
         return fetched;
@@ -236,12 +334,14 @@
       var alias = gatewayModelAlias(names[i]);
       if (seenAlias[alias]) { continue; }
       seenAlias[alias] = true;
+      var modelEfforts = convertigoGatewayModelEfforts(options, names[i]);
       specs.push({
         activeModel: active,
         name: names[i],
         alias: alias,
         provider: "convertigo",
-        thinking: thinking,
+        efforts: modelEfforts,
+        thinking: gatewayEffortFor(thinking, modelEfforts),
         temperature: "1.0",
         inputPrice: "1.4",
         outputPrice: "4.4",
@@ -253,8 +353,9 @@
   }
 
   function vibeGatewayModelsFingerprint(specs) {
+    // Name and thinking level: a level that a model stopped accepting rewrites the config too.
     var names = [];
-    for (var i = 0; i < specs.length; i++) { names.push(specs[i].name); }
+    for (var i = 0; i < specs.length; i++) { names.push(specs[i].name + ":" + specs[i].thinking); }
     return names.sort().join(",");
   }
 
@@ -286,6 +387,73 @@
       }
     } catch (_ignoreGatewayKeyRead) {}
     return "";
+  }
+
+  // The key file is the stable drop location: whenever its content changes, it replaces the key
+  // of every Vibe home at the next start. The .env remembers the fingerprint of the file key it
+  // was given, because file dates are useless here (the .env is copied between homes). A key
+  // stored through vibeGatewayKeyStore stays until the file changes again.
+  var CONVERTIGO_LLM_API_KEY_FILE_MARKER = "CONVERTIGO_LLM_API_KEY_FILE_SHA";
+
+  function gatewayKeyFingerprint(key) {
+    try {
+      var digest = java.security.MessageDigest.getInstance("SHA-256").digest(new java.lang.String(String(key)).getBytes("UTF-8"));
+      var hex = "";
+      for (var i = 0; i < 8; i++) {
+        var value = (digest[i] & 0xff).toString(16);
+        hex += value.length < 2 ? "0" + value : value;
+      }
+      return hex;
+    } catch (_ignoreKeyFingerprint) {
+      return "";
+    }
+  }
+
+  function gatewayKeySyncDecision(envKey, envMarker, fileKey, fileFingerprint) {
+    envKey = trim(envKey); envMarker = trim(envMarker); fileKey = trim(fileKey); fileFingerprint = trim(fileFingerprint);
+    if (!fileKey.length) {
+      return { key: envKey, write: false, reason: "no_key_file" };
+    }
+    if (!envKey.length) {
+      return { key: fileKey, write: true, reason: "env_empty" };
+    }
+    if (fileFingerprint.length && envMarker === fileFingerprint) {
+      return { key: envKey, write: false, reason: "file_already_applied" };
+    }
+    // Unknown or outdated marker: the file changed since this home was written, or the home
+    // predates the marker (it may hold a placeholder typed before the real key was dropped).
+    return { key: fileKey, write: true, reason: envKey === fileKey ? "marker_missing" : "file_changed" };
+  }
+
+  function resolveConvertigoGatewayKey(options, vibeHome) {
+    var envKey = "", envMarker = "";
+    try {
+      if (trim(vibeHome).length) {
+        var parsed = readEnvFile(new File(trim(vibeHome), ".env"));
+        envKey = trim(parsed.values[CONVERTIGO_LLM_API_KEY_ENV]);
+        envMarker = trim(parsed.values[CONVERTIGO_LLM_API_KEY_FILE_MARKER]);
+      }
+    } catch (_ignoreGatewayEnvRead) {}
+    var fileKey = readConvertigoGatewayKeyFile(options);
+    var decision = gatewayKeySyncDecision(envKey, envMarker, fileKey, fileKey.length ? gatewayKeyFingerprint(fileKey) : "");
+    decision.fileFingerprint = fileKey.length ? gatewayKeyFingerprint(fileKey) : "";
+    return decision;
+  }
+
+  function syncConvertigoGatewayKey(options, homeDir, report) {
+    var decision = resolveConvertigoGatewayKey(options, filePath(homeDir));
+    if (decision.write) {
+      var envFile = new File(homeDir, ".env");
+      writeEnvFileValue(envFile, CONVERTIGO_LLM_API_KEY_ENV, decision.key);
+      if (decision.fileFingerprint.length) {
+        writeEnvFileValue(envFile, CONVERTIGO_LLM_API_KEY_FILE_MARKER, decision.fileFingerprint);
+      }
+      if (report && report.copied) { report.copied.push(".env"); }
+      if (decision.reason === "file_changed") {
+        try { log.info("Convertigo agent key replaced from " + filePath(convertigoGatewayKeyFile(options)) + " in " + filePath(homeDir)); } catch (_ignoreKeySyncLog) {}
+      }
+    }
+    return decision;
   }
 
   function studioOwnerEmail() {
@@ -321,7 +489,8 @@
       var block = "\n" + match[1];
       if (!/\nprovider\s*=\s*["']convertigo["']/.test(block)) { continue; }
       var name = block.match(/\nname\s*=\s*["']([^"']+)["']/);
-      if (name) { names.push(trim(name[1])); }
+      var thinking = block.match(/\nthinking\s*=\s*["']([^"']*)["']/);
+      if (name) { names.push(trim(name[1]) + ":" + (thinking ? trim(thinking[1]) : "")); }
     }
     return names.sort().join(",");
   }
@@ -3740,12 +3909,8 @@
       var homeDir = new File(report.home);
       ensureDirectory(homeDir);
       syncNewestAgentUserFile(vibeCredentialSourceDirs(options, homeDir), homeDir, ".env", report);
-      if (isConvertigoGatewayProfile(options) && !vibeEnvHasKey(new File(homeDir, ".env"), CONVERTIGO_LLM_API_KEY_ENV)) {
-        var gatewayKey = readConvertigoGatewayKeyFile(options);
-        if (gatewayKey.length) {
-          writeEnvFileValue(new File(homeDir, ".env"), CONVERTIGO_LLM_API_KEY_ENV, gatewayKey);
-          report.copied.push(".env");
-        }
+      if (isConvertigoGatewayProfile(options)) {
+        report.gatewayKey = syncConvertigoGatewayKey(options, homeDir, report).reason;
       }
       report.message = "Scoped VIBE_HOME credentials synchronized";
     } catch (e) {
@@ -4115,6 +4280,15 @@
       file.setWritable(false, false);
       file.setWritable(true, true);
     } catch (_ignoreEnvPermissions) {}
+  }
+
+  function rejectedGatewayKeyAuthentication(options) {
+    // A key is present but the gateway answered 401/403: say so, or the user keeps looking for
+    // a missing key while a wrong one is silently sent.
+    var info = authenticationInfo(false, "", "convertigo_key");
+    info.status = "rejected";
+    info.message = "The Convertigo gateway rejected the agent key. Replace the first line of " + filePath(convertigoGatewayKeyFile(options)) + " with a valid key.";
+    return info;
   }
 
   function inspectVibeAuthentication(vibeHome, profile) {
@@ -4873,6 +5047,40 @@
     }
   }
 
+  // Re-applies the live gateway offer on a model list that may come from an older ACP catalog:
+  // only offered models, each with the reasoning levels it accepts.
+  function applyGatewayOfferToProvider(provider) {
+    if (!provider || normalizeProvider(provider.id) !== "convertigo" || !provider.gateway || !provider.gateway.models || !provider.gateway.models.length) {
+      return provider;
+    }
+    var aliases = provider.gateway.models, efforts = provider.gateway.efforts || {}, known = {}, models = [];
+    var source = provider.models || [];
+    for (var i = 0; i < source.length; i++) { known[source[i].id] = source[i]; }
+    for (var a = 0; a < aliases.length; a++) {
+      var alias = aliases[a];
+      var model = known[alias] || { id: alias, label: alias, configuredName: alias, provider: "convertigo", defaultReasoning: "", reasoningLevels: [], serviceTiers: [], speedTiers: [] };
+      if (Object.prototype.hasOwnProperty.call(efforts, alias)) {
+        var accepted = efforts[alias];
+        var offeredLevels = (model.reasoningLevels || []).filter(function (level) {
+          var id = String(level.id).toLowerCase();
+          return id === "off" || id === "none" || accepted.indexOf(id) >= 0;
+        });
+        for (var l = 0; l < accepted.length; l++) {
+          var present = false;
+          for (var o = 0; o < offeredLevels.length; o++) { if (String(offeredLevels[o].id).toLowerCase() === accepted[l]) { present = true; } }
+          if (!present) { offeredLevels.push({ id: accepted[l], label: accepted[l], description: "Accepted by this gateway model" }); }
+        }
+        model.reasoningLevels = offeredLevels;
+        model.defaultReasoning = gatewayEffortFor(model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING, accepted);
+      }
+      model.provider = "convertigo";
+      models.push(model);
+    }
+    provider.models = models;
+    if (aliases.indexOf(trim(provider.defaultModel)) < 0) { provider.defaultModel = models[0].id; }
+    return provider;
+  }
+
   function hydrateProviderSettingsFromCache(workspaceRoot, provider, preferCached) {
     provider = provider || {};
     if (!preferCached && provider.models && provider.models.length) {
@@ -4889,7 +5097,7 @@
     provider.source = provider.source || {};
     provider.source.settingsCached = true;
     provider.source.settingsCachedAt = provider.source.modelCatalogRefreshRequired ? 0 : Number(cached.cachedAt || 0);
-    return provider;
+    return applyGatewayOfferToProvider(provider);
   }
 
   function requireCachedProviderConfiguration(provider) {
@@ -7442,17 +7650,28 @@
     }
     var reasoningLevels = normalizeAcpSelectOptions(thinkingOption);
     var defaultReasoning = trim(thinkingOption && (thinkingOption.currentValue || thinkingOption.current_value));
+    var gatewayEfforts = convertigoMode && provider.gateway && provider.gateway.efforts ? provider.gateway.efforts : {};
     var models = [];
     for (var i = 0; i < modelChoices.length; i++) {
       var model = modelChoices[i];
+      var modelLevels = reasoningLevels, modelDefaultReasoning = defaultReasoning;
+      if (Object.prototype.hasOwnProperty.call(gatewayEfforts, model.id)) {
+        // Only the levels this gateway model accepts, plus the "off" choice Vibe offers.
+        var accepted = gatewayEfforts[model.id];
+        modelLevels = reasoningLevels.filter(function (level) {
+          var id = String(level.id).toLowerCase();
+          return id === "off" || id === "none" || accepted.indexOf(id) >= 0;
+        });
+        modelDefaultReasoning = gatewayEffortFor(defaultReasoning, accepted) || defaultReasoning;
+      }
       models.push({
         id: model.id,
         label: model.label,
         description: model.description,
         configuredName: model.description,
         provider: convertigoMode ? "convertigo" : "mistral",
-        defaultReasoning: defaultReasoning,
-        reasoningLevels: reasoningLevels,
+        defaultReasoning: modelDefaultReasoning,
+        reasoningLevels: modelLevels,
         serviceTiers: [],
         speedTiers: []
       });
@@ -7548,6 +7767,22 @@
       });
     }
     var thinkingOption = findAcpConfigOption(configOptions, "thinking");
+    var convertigoSession = isConvertigoGatewayProfile(options) || (entry.providerSettings && normalizeProvider(entry.providerSettings.id) === "convertigo");
+    if (convertigoSession && thinkingOption) {
+      // The thinking level is a session value while its accepted values depend on the model:
+      // re-align it whenever the model or the level changes (medium is refused by GLM 5.3).
+      var activeModelOption = findAcpConfigOption(configOptions, "model");
+      var activeAlias = trim(activeModelOption && (activeModelOption.currentValue || activeModelOption.current_value)) || requestedModel;
+      var currentThinking = trim(thinkingOption.currentValue || thinkingOption.current_value);
+      var alignedReasoning = gatewayEffortFor(requestedReasoning || currentThinking, gatewayEffortsForAlias(options, activeAlias));
+      if (alignedReasoning.length && alignedReasoning !== (requestedReasoning || currentThinking)) {
+        pushEvent(entry, "warning", {
+          phase: "session/config",
+          message: "Thinking level " + (requestedReasoning || currentThinking) + " is not accepted by " + activeAlias + "; using " + alignedReasoning + "."
+        });
+      }
+      if (alignedReasoning.length) { requestedReasoning = alignedReasoning; }
+    }
     if (requestedReasoning.length && acpConfigOptionHasValue(thinkingOption, requestedReasoning) && requestedReasoning !== trim(thinkingOption.currentValue || thinkingOption.current_value)) {
       var reasoningResult = acpRequest(entry, "session/set_config_option", {
         sessionId: entry.sessionId,
@@ -7603,18 +7838,23 @@
           configuredName: spec.name,
           provider: gatewayProfile ? "convertigo" : "mistral",
           defaultReasoning: spec.thinking,
-          reasoningLevels: spec.thinking.length ? [{
+          reasoningLevels: gatewayProfile && spec.efforts ? spec.efforts.map(function (level) {
+            return { id: level, label: level, description: "Accepted by this gateway model" };
+          }) : (spec.thinking.length ? [{
             id: spec.thinking,
             label: spec.thinking,
             description: "Configured by Vibe model"
-          }] : [],
+          }] : []),
           serviceTiers: [],
           speedTiers: []
         });
       }
     }
-    var gatewayAliases = [];
-    for (var aliasIndex = 0; aliasIndex < gatewaySpecs.length; aliasIndex++) { gatewayAliases.push(gatewaySpecs[aliasIndex].alias); }
+    var gatewayAliases = [], gatewayEfforts = {};
+    for (var aliasIndex = 0; aliasIndex < gatewaySpecs.length; aliasIndex++) {
+      gatewayAliases.push(gatewaySpecs[aliasIndex].alias);
+      if (gatewaySpecs[aliasIndex].efforts) { gatewayEfforts[gatewaySpecs[aliasIndex].alias] = gatewaySpecs[aliasIndex].efforts; }
+    }
     var configuredDefault = trim(config.activeModel);
     if (gatewayProfile && gatewayAliases.indexOf(configuredDefault) < 0) {
       configuredDefault = gatewaySpecs.length ? gatewaySpecs[0].activeModel : "";
@@ -7627,12 +7867,14 @@
       // driving it so the Assistant never hard-codes Vibe for it.
       harness: "vibe",
       profile: resolveVibeProfile(options),
-      gateway: gatewayProfile ? { url: convertigoGatewayUrl(options), model: gatewaySpecs.length ? gatewaySpecs[0].name : convertigoGatewayModel(options), models: gatewayAliases, apiKeyEnv: CONVERTIGO_LLM_API_KEY_ENV } : null,
+      gateway: gatewayProfile ? { url: convertigoGatewayUrl(options), model: gatewaySpecs.length ? gatewaySpecs[0].name : convertigoGatewayModel(options), models: gatewayAliases, efforts: gatewayEfforts, apiKeyEnv: CONVERTIGO_LLM_API_KEY_ENV } : null,
       identity: gatewayProfile ? { email: studioOwnerEmail() } : null,
       status: profileSupported ? (managedVibeReady ? "ready" : "missing") : "unsupported_profile",
       ready: profileSupported && managedVibeReady,
       runtime: runtime,
-      authentication: inspectVibeAuthentication(setup.vibeHome, resolveVibeProfile(options)),
+      authentication: gatewayProfile && convertigoGatewayKeyRejected
+        ? rejectedGatewayKeyAuthentication(options)
+        : inspectVibeAuthentication(setup.vibeHome, resolveVibeProfile(options)),
       setup: compactVibeSetup(setup),
       skills: skills,
       source: {

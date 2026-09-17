@@ -283,7 +283,8 @@ console.log("Vibe image attachment contract OK");
   assert.equal(spec.name, "mistral/zai-glm-5-2");
   assert.equal(spec.alias, "glm-5-2");
   assert.equal(spec.provider, "convertigo");
-  assert.equal(spec.thinking, "medium", "thinking is on by default now that the gateway allows reasoning_effort");
+  assert.equal(spec.thinking, "high", "thinking is on by default; an unprobed model gets a level every known model accepts");
+  assert.equal(vibeGatewayModelSpec({ gatewayModelEfforts: { "mistral/zai-glm-5-2": ["low", "medium", "high", "max"] } }).thinking, "medium");
   assert.equal(vibeGatewayModelSpec({ llmGatewayThinking: "off" }).thinking, "");
   assert.equal(vibeGatewayModelSpec({ llmGatewayThinking: "high" }).thinking, "high");
   assert.equal(convertigoGatewayUrl({ llmGatewayUrl: "https://gw.example/v1/" }), "https://gw.example/v1");
@@ -341,10 +342,10 @@ console.log("Vibe image attachment contract OK");
   assert.equal(vibeGatewayModelSpecs(Object.assign({ model: "devstral-small" }, offer), "")[0].activeModel, "glm-5-3", "an unknown model falls back to the default");
   assert.deepEqual(vibeGatewayModelSpecs({ llmGatewayModel: "mistral/zai-glm-5-2", gatewayModelIds: offer.gatewayModelIds }, "").map(s => s.name),
     ["mistral/zai-glm-5-2"], "an explicit llmGatewayModel pins the offer");
-  assert.equal(vibeGatewayModelsFingerprint(specs), "mistral/zai-glm-5-2,mistral/zai-glm-5-3");
+  assert.equal(vibeGatewayModelsFingerprint(specs), "mistral/zai-glm-5-2:high,mistral/zai-glm-5-3:high");
 
   const toml = 'active_model = "glm-5-3"\n\n[[providers]]\nname = "convertigo"\napi_base = "https://llm.convertigo.com/v1"\n\n[[models]]\nname = "mistral/zai-glm-5-3"\nprovider = "convertigo"\nalias = "glm-5-3"\n\n[[models]]\nname = "mistral/zai-glm-5-2"\nprovider = "convertigo"\nalias = "glm-5-2"\n\n[[models]]\nname = "devstral-small-latest"\nprovider = "mistral"\nalias = "devstral-small"\n';
-  assert.equal(parseVibeGatewayModels(toml), "mistral/zai-glm-5-2,mistral/zai-glm-5-3", "only gateway models count in the reuse fingerprint");
+  assert.equal(parseVibeGatewayModels(toml), "mistral/zai-glm-5-2:,mistral/zai-glm-5-3:", "only gateway models count in the reuse fingerprint");
   assert.match(vibeSource, /selected\.gatewayModels\) === expectedGatewayModels/);
 
   // Vibe advertises its built-in Mistral models over ACP; the Convertigo mode hides them.
@@ -373,10 +374,85 @@ console.log("Vibe image attachment contract OK");
     assert.match(written, /name = "mistral\/zai-glm-5-3"\nprovider = "convertigo"\nalias = "glm-5-3"/);
     assert.match(written, /name = "mistral\/zai-glm-5-2"\nprovider = "convertigo"\nalias = "glm-5-2"/);
     assert.doesNotMatch(written, /provider = "mistral"/);
-    assert.equal(parseVibeGatewayModels(written), "mistral/zai-glm-5-2,mistral/zai-glm-5-3");
+    assert.equal(parseVibeGatewayModels(written), "mistral/zai-glm-5-2:high,mistral/zai-glm-5-3:high");
     assert.equal(result.model, "glm-5-2");
   } finally {
     writeTextFile = originalWrite;
     ensureDirectory = originalEnsure;
   }
+}
+
+// Convertigo agent key: the drop file replaces a stale .env value, whatever the file dates.
+{
+  const FP = "aabbccdd00112233", OLD_FP = "0011223344556677";
+  // The reported bug: a placeholder typed first, the real key dropped in the file later.
+  let d = gatewayKeySyncDecision("xxx", "", "sk-real-key", FP);
+  assert.deepEqual([d.key, d.write, d.reason], ["sk-real-key", true, "file_changed"]);
+  // First start of a home.
+  d = gatewayKeySyncDecision("", "", "sk-real-key", FP);
+  assert.deepEqual([d.key, d.write, d.reason], ["sk-real-key", true, "env_empty"]);
+  // Steady state: nothing is rewritten.
+  d = gatewayKeySyncDecision("sk-real-key", FP, "sk-real-key", FP);
+  assert.deepEqual([d.key, d.write, d.reason], ["sk-real-key", false, "file_already_applied"]);
+  // A key stored from the UI after the file was applied wins until the file changes.
+  d = gatewayKeySyncDecision("sk-ui-key", FP, "sk-real-key", FP);
+  assert.deepEqual([d.key, d.write], ["sk-ui-key", false]);
+  d = gatewayKeySyncDecision("sk-ui-key", OLD_FP, "sk-rotated", FP);
+  assert.deepEqual([d.key, d.write, d.reason], ["sk-rotated", true, "file_changed"]);
+  // A home written before the marker existed only gains the marker.
+  d = gatewayKeySyncDecision("sk-real-key", "", "sk-real-key", FP);
+  assert.deepEqual([d.key, d.write, d.reason], ["sk-real-key", true, "marker_missing"]);
+  // No drop file: the .env key is left alone.
+  d = gatewayKeySyncDecision("sk-ui-key", "", "", "");
+  assert.deepEqual([d.key, d.write, d.reason], ["sk-ui-key", false, "no_key_file"]);
+
+  assert.doesNotMatch(commonSource, /isConvertigoGatewayProfile\(options\) && !vibeEnvHasKey\(/, "the only-when-empty guard is gone");
+  assert.match(commonSource, /report\.gatewayKey = syncConvertigoGatewayKey\(options, homeDir, report\)\.reason/);
+  const rejected = rejectedGatewayKeyAuthentication({});
+  assert.equal(rejected.configured, false);
+  assert.equal(rejected.status, "rejected");
+  assert.equal(rejected.action, "convertigo_key");
+  assert.match(rejected.message, /rejected the agent key/);
+}
+
+// Reasoning effort levels are per gateway model: GLM 5.3 refuses medium.
+{
+  const efforts = { "mistral/zai-glm-5-2": ["low", "medium", "high", "max"], "mistral/zai-glm-5-3": ["low", "high", "max"] };
+  const offer = { gatewayModelIds: Object.keys(efforts), gatewayModelEfforts: efforts };
+  assert.equal(gatewayEffortFor("medium", efforts["mistral/zai-glm-5-3"]), "high", "the closest stronger level");
+  assert.equal(gatewayEffortFor("medium", efforts["mistral/zai-glm-5-2"]), "medium");
+  assert.equal(gatewayEffortFor("max", ["low"]), "low");
+  assert.equal(gatewayEffortFor("high", []), "", "a model without reasoning gets no level");
+  assert.equal(gatewayEffortFor("off", efforts["mistral/zai-glm-5-3"]), "");
+  assert.equal(gatewayEffortFor("medium", null), "high");
+  const specs = vibeGatewayModelSpecs(offer, "");
+  assert.deepEqual(specs.map(s => [s.alias, s.thinking]), [["glm-5-3", "high"], ["glm-5-2", "medium"]]);
+  assert.deepEqual(gatewayEffortsForAlias(offer, "glm-5-3"), ["low", "high", "max"]);
+
+  const acp = [
+    { id: "model", currentValue: "glm-5-3", options: [{ value: "glm-5-3", name: "glm-5-3" }, { value: "glm-5-2", name: "glm-5-2" }] },
+    { id: "thinking", currentValue: "medium", options: ["off", "low", "medium", "high", "max"].map(v => ({ value: v, name: v })) }];
+  const normalized = normalizeVibeAcpProviderSettings(acp, { id: "convertigo", gateway: { models: ["glm-5-3", "glm-5-2"], efforts: { "glm-5-3": ["low", "high", "max"], "glm-5-2": ["low", "medium", "high", "max"] } } });
+  const byId = Object.fromEntries(normalized.models.map(m => [m.id, m]));
+  assert.deepEqual(byId["glm-5-3"].reasoningLevels.map(l => l.id), ["off", "low", "high", "max"], "medium is not offered for GLM 5.3");
+  assert.equal(byId["glm-5-3"].defaultReasoning, "high");
+  assert.deepEqual(byId["glm-5-2"].reasoningLevels.map(l => l.id), ["off", "low", "medium", "high", "max"]);
+  assert.equal(byId["glm-5-2"].defaultReasoning, "medium");
+  assert.match(commonSource, /var alignedReasoning = gatewayEffortFor\(requestedReasoning \|\| currentThinking, gatewayEffortsForAlias\(options, activeAlias\)\)/);
+}
+
+// A cached ACP catalog is re-aligned on the live gateway offer.
+{
+  const stale = { id: "convertigo", defaultModel: "devstral-small",
+    gateway: { models: ["glm-5-3", "glm-5-2"], efforts: { "glm-5-3": ["low", "high", "max"], "glm-5-2": ["low", "medium", "high", "max"] } },
+    models: [
+      { id: "glm-5-2", label: "glm-5-2", defaultReasoning: "medium", reasoningLevels: ["off", "low", "medium", "high", "max"].map(id => ({ id, label: id })) },
+      { id: "devstral-small", label: "devstral-small", defaultReasoning: "off", reasoningLevels: [] }] };
+  const aligned = applyGatewayOfferToProvider(stale);
+  assert.deepEqual(aligned.models.map(m => m.id), ["glm-5-3", "glm-5-2"], "the new model appears, the built-in one goes");
+  assert.deepEqual(aligned.models[0].reasoningLevels.map(l => l.id), ["low", "high", "max"]);
+  assert.equal(aligned.models[0].defaultReasoning, "high");
+  assert.deepEqual(aligned.models[1].reasoningLevels.map(l => l.id), ["off", "low", "medium", "high", "max"]);
+  assert.equal(aligned.defaultModel, "glm-5-3");
+  assert.equal(applyGatewayOfferToProvider({ id: "vibe", models: [{ id: "x" }] }).models.length, 1, "other providers are untouched");
 }

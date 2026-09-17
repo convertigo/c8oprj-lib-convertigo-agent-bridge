@@ -1145,7 +1145,7 @@ Check or install the local Vibe CLI runtime used by the agent bridge.
 <td>llmGatewayModel</td><td>Convertigo profile only: pins the offer to this single gateway model. By default the offer is every model the gateway lists for the user key (GET /models), newest first.</td>
 </tr>
 <tr>
-<td>llmGatewayThinking</td><td>Convertigo profile only: thinking level (off, low, medium, high). Defaults to medium; the gateway passes reasoning_effort to the GLM models.</td>
+<td>llmGatewayThinking</td><td>Convertigo profile only: thinking level (off, low, medium, high, max). Defaults to medium, aligned on the closest level the selected gateway model accepts (each model is probed once).</td>
 </tr>
 <tr>
 <td>llmGatewayUrl</td><td>Convertigo profile only: LiteLLM gateway base URL. Defaults to https://llm.convertigo.com/v1.</td>
@@ -1286,7 +1286,7 @@ Start a long-running vibe-acp process and create an ACP session.
 <td>llmGatewayModel</td><td>Convertigo profile only: pins the offer to this single gateway model (default: every model the gateway lists for the user key).</td>
 </tr>
 <tr>
-<td>llmGatewayThinking</td><td>Convertigo profile only: thinking level (off, low, medium, high).</td>
+<td>llmGatewayThinking</td><td>Convertigo profile only: thinking level (off, low, medium, high, max), aligned on what the selected gateway model accepts.</td>
 </tr>
 <tr>
 <td>llmGatewayUrl</td><td>Convertigo profile only: LiteLLM gateway base URL.</td>

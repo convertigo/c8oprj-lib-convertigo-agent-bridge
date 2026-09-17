@@ -184,8 +184,8 @@ responseTimeout: 900
   comment: 'Convertigo profile only: pins the offer to this single gateway model. By default the offer is every model the gateway lists for the user key (GET /models), newest first.'
   description: 'Convertigo profile only: pins the offer to this single gateway model. By default the offer is every model the gateway lists for the user key (GET /models), newest first.'
 ↓llmGatewayThinking [variables.RequestableVariable-1789560000007]: 
-  comment: 'Convertigo profile only: thinking level (off, low, medium, high). Defaults to off until the gateway accepts reasoning_effort.'
-  description: 'Convertigo profile only: thinking level (off, low, medium, high). Defaults to off until the gateway accepts reasoning_effort.'
+  comment: 'Convertigo profile only: thinking level (off, low, medium, high, max), aligned on what the selected gateway model accepts. Defaults to off until the gateway accepts reasoning_effort.'
+  description: 'Convertigo profile only: thinking level (off, low, medium, high, max), aligned on what the selected gateway model accepts. Defaults to off until the gateway accepts reasoning_effort.'
 ↓gatewayApiKey [variables.RequestableVariable-1789560000009]: 
   comment: 'Convertigo profile only: stores the user''s LiteLLM virtual key in the user scoped VIBE_HOME .env (never returned).'
   description: 'Convertigo profile only: stores the user''s LiteLLM virtual key in the user scoped VIBE_HOME .env (never returned).'
