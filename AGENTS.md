@@ -183,6 +183,20 @@ same context.
   Synchronize a NoCode-only `AGENTS.md` for both Codex and Vibe; never suggest
   fallback to generic requestable/project tools. Read existing forms through
   `nocode-form-get` before advice or edits; empty updates are never reads.
+- Vibe caches the MCP tool catalog on disk for 24 h, keyed on sha256 of the
+  serialized server entry (`registry.py:_server_key`), and never reruns
+  `tools/list` while that entry is fresh. Skills and `config.toml` are pushed by
+  the bridge, but the catalog is pulled by Vibe, so a stack upgrade alone leaves
+  an existing home on the previous tool list: that is how a 0.2.13 `SKILL.md`
+  ended up telling an agent to call a `nocode-form-get` its catalog did not
+  expose. `vibeMcpTransportEndpoint` therefore carries
+  `toolsRevision=<managedMcpCatalogRevision()>`, folding the deployed
+  `lib_ConvertigoMCP` version and the source skill hash into the URL, and
+  `pruneVibeDescriptorCache` drops the entries left behind when the server entry
+  is rewritten. Keep this parameter separate from `descriptorVersion`: the MCP
+  compares that one byte for byte and reports `mcp_guidance_version_mismatch` on
+  every guarded tool call. `buildMcpServers` and the managed `config.toml` must
+  keep producing the same URL, or Vibe maintains two catalog caches.
 - For Studio/generalist sessions, the Assistant supplies an opaque handle for a
   short-lived `lib_ConvertigoMCP` token. Resolve it only from the shared server
   store, inject it as `CONVERTIGO_MCP_TOKEN`, and configure Codex or Vibe to

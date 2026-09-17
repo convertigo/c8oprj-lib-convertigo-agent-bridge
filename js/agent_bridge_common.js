@@ -18,6 +18,7 @@
   var NOCODE_MCP_TOKEN_ENV = "C8O_NOCODE_MCP_TOKEN";
   var MCP_TOKEN_ENV = "CONVERTIGO_MCP_TOKEN";
   var MCP_GUIDANCE_VERSION = "2026-09-04.vibe-serial-transport-v1";
+  var MCP_CATALOG_PROJECT = "lib_ConvertigoMCP";
   // GLM 5.2 routed through the Mistral account has no vision: Mistral answers
   // "Image input is not enabled for this model" (400, code 3051) when an image
   // block is sent. Verified on 2026-09-14; flip only after a new live check.
@@ -480,13 +481,57 @@
     return text + fragment;
   }
 
-  function vibeMcpTransportEndpoint(endpoint) {
+  // Identity of the deployed MCP tool catalog. Vibe keys its persistent tool
+  // cache on sha256 of the serialized server entry and keeps it for 24 h, so the
+  // URL is the only lever the bridge has to invalidate that cache when the MCP
+  // stack changes under an existing home. The project version alone would miss a
+  // catalog change shipped without a version bump, and the skill hash alone would
+  // miss a new tool shipped without a skill change, so both are folded in.
+  function managedMcpCatalogRevision(options) {
+    var parts = [];
+    var project = null;
+    try {
+      var manager = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager;
+      project = manager.getOriginalProjectByName(MCP_CATALOG_PROJECT);
+      if (project === null || typeof project === "undefined") {
+        project = manager.getProjectByName(MCP_CATALOG_PROJECT);
+      }
+    } catch (_ignoreCatalogProject) {
+      project = null;
+    }
+    if (project !== null && typeof project !== "undefined" && project.getVersion) {
+      try {
+        var version = trim(project.getVersion());
+        if (version.length) {
+          parts.push(version);
+        }
+      } catch (_ignoreCatalogVersion) {}
+    }
+    try {
+      // The source skill, not the copy installed in the home: skills are
+      // synchronized after the config is written, so the home copy would always
+      // be one session behind.
+      var skillSource = noCodeSkillSourceFile(options);
+      if (skillSource !== null && skillSource.isFile()) {
+        parts.push(sha256File(skillSource));
+      }
+    } catch (_ignoreCatalogSkill) {}
+    return parts.length ? hashShort(parts.join(":")) : "";
+  }
+
+  function vibeMcpTransportEndpoint(endpoint, options) {
     // Vibe's MCP client requires standard text content alongside structuredContent.
-    return endpointQueryParameter(
+    var url = endpointQueryParameter(
       mcpTransportEndpoint(endpoint, false),
       "descriptorVersion",
       MCP_GUIDANCE_VERSION
     );
+    // Deliberately a separate parameter: the MCP compares descriptorVersion
+    // byte for byte against its own guidance version and would report
+    // mcp_guidance_version_mismatch on every guarded tool call. toolsRevision is
+    // ignored server side; it exists only to change the cache key.
+    var revision = managedMcpCatalogRevision(options);
+    return revision.length ? endpointQueryParameter(url, "toolsRevision", revision) : url;
   }
 
   function intValue(value, defaultValue, minValue, maxValue) {
@@ -6250,7 +6295,7 @@
       '[[mcp_servers]]',
       'name = "Convertigo"',
       'transport = "http"',
-      'url = "' + tomlString(vibeMcpTransportEndpoint(mcpEndpoint)) + '"',
+      'url = "' + tomlString(vibeMcpTransportEndpoint(mcpEndpoint, options)) + '"',
       'startup_timeout_sec = 60.0',
       ''
     );
@@ -6307,6 +6352,28 @@
       model: spec.activeModel,
       bytes: writeTextFile(configFile, text)
     };
+  }
+
+  // Vibe keys its persistent tool cache on the serialized server entry, so a
+  // rewritten config leaves the entries discovered under the previous one behind
+  // forever. They are a pure cache, rebuilt on the next discovery.
+  function pruneVibeDescriptorCache(vibeHome) {
+    var report = { attempted: false, removed: [], errors: [] };
+    var home = trim(vibeHome);
+    if (!home.length) {
+      return report;
+    }
+    try {
+      var dir = new File(new File(home, "logs"), "mcp-descriptors");
+      if (!dir.isDirectory()) {
+        return report;
+      }
+      report.attempted = true;
+      deleteDirectoryTree(dir, report.removed, report.errors, false);
+    } catch (e) {
+      report.errors.push({ path: home, error: String(e) });
+    }
+    return report;
   }
 
   function vibePlaywrightEnabled(options) {
@@ -8797,7 +8864,7 @@
     return [{
       type: "http",
       name: "Convertigo",
-      url: vibeMcpTransportEndpoint(mcpEndpoint),
+      url: vibeMcpTransportEndpoint(mcpEndpoint, options),
       headers: headers
     }];
   }

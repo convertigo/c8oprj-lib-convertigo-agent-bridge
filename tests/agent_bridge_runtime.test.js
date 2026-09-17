@@ -396,6 +396,44 @@ assert.equal(
   vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp?transport=managed&jsonOnly=true#viewer"),
   "http://localhost:18082/convertigo/api/mcp?transport=managed&jsonOnly=false&descriptorVersion=2026-09-04.vibe-serial-transport-v1#viewer"
 );
+// Vibe caches the MCP tool catalog for 24 h under sha256 of the serialized
+// server entry, so the deployed catalog identity has to travel in the URL or a
+// stack upgrade stays invisible to an existing home.
+const originalManagedMcpCatalogRevision = managedMcpCatalogRevision;
+managedMcpCatalogRevision = () => "a1b2c3";
+assert.equal(
+  vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp"),
+  "http://localhost:18082/convertigo/api/mcp?jsonOnly=false&descriptorVersion=2026-09-04.vibe-serial-transport-v1&toolsRevision=a1b2c3"
+);
+assert.equal(
+  vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp?transport=managed#viewer"),
+  "http://localhost:18082/convertigo/api/mcp?transport=managed&jsonOnly=false&descriptorVersion=2026-09-04.vibe-serial-transport-v1&toolsRevision=a1b2c3#viewer",
+  "the cache-busting parameter must stay inside the query, before the fragment"
+);
+const firstRevisionEndpoint = vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp");
+managedMcpCatalogRevision = () => "d4e5f6";
+const secondRevisionEndpoint = vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp");
+assert.notEqual(
+  firstRevisionEndpoint,
+  secondRevisionEndpoint,
+  "two MCP catalog revisions must produce two URLs, otherwise Vibe reuses its cached tool list"
+);
+assert.match(
+  secondRevisionEndpoint,
+  /[?&]descriptorVersion=2026-09-04\.vibe-serial-transport-v1(&|$)/,
+  "descriptorVersion is compared byte for byte by the MCP guidance check and must stay untouched"
+);
+assert.equal(
+  buildMcpServers("http://localhost:18082/convertigo/api/mcp")[0].url,
+  secondRevisionEndpoint,
+  "the session-level server must carry the same URL as config.toml, or Vibe keeps two catalog caches"
+);
+managedMcpCatalogRevision = originalManagedMcpCatalogRevision;
+assert.match(
+  vibeSource,
+  /writeLocalVibeConfig\([\s\S]{0,400}?pruneVibeDescriptorCache\(setup\.vibeHome\)/,
+  "rewriting the MCP server entry must drop the descriptor cache discovered under the previous one"
+);
 const compactCodexConfig = patchCodexMcpConfigText(
   "",
   "http://localhost:18082/convertigo/api/mcp",

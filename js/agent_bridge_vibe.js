@@ -72,7 +72,7 @@
         var expectedPlaywrightEndpoint = expectedPlaywright === null ? "" : resolvePlaywrightMcpCdpEndpoint(options);
         var expectedPlaywrightCommand = expectedPlaywright === null ? "" : trim(expectedPlaywright.command);
         if (setup.config.selected.valid
-            && trim(setup.config.selected.endpoint) === vibeMcpTransportEndpoint(setup.mcpEndpoint)
+            && trim(setup.config.selected.endpoint) === vibeMcpTransportEndpoint(setup.mcpEndpoint, options)
             && trim(setup.config.selected.bearerTokenEnv) === expectedBearerEnv
             && Number(setup.config.selected.viewerDebugPort || 0) === (expectedBearerEnv.length ? expectedViewerDebugPort : 0)
             && trim(setup.config.selected.playwrightEndpoint) === expectedPlaywrightEndpoint
@@ -84,6 +84,12 @@
         } else {
           var written = writeLocalVibeConfig(setup.vibeHome, setup.mcpEndpoint, options.model || options.agentModel, options);
           messages.push("Local VIBE_HOME config written: " + written.path + " (" + written.model + ")");
+          // The MCP server entry just changed, so the tool catalog Vibe cached
+          // under the previous one is unreachable and stale.
+          var prunedDescriptors = pruneVibeDescriptorCache(setup.vibeHome);
+          if (prunedDescriptors.removed.length) {
+            messages.push("Stale Vibe MCP descriptor cache removed: " + prunedDescriptors.removed.join(", "));
+          }
         }
         var presetMigration = migrateManagedVibeConfig(setup.vibeHome);
         if (presetMigration.removed.length) {
