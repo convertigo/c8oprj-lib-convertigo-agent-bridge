@@ -6506,6 +6506,26 @@
     return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   }
 
+  // GLM models routed by Mistral are not Vibe CLI defaults: the Bridge declares them in the
+  // managed config.toml of the Vibe (personal Mistral account) profile. Newest first. `efforts`
+  // are the reasoning_effort values Mistral accepts for the model.
+  var MANAGED_VIBE_GLM_PRESETS = [
+    { name: "zai-glm-5-3", alias: "glm-5-3", efforts: ["low", "high", "max"] },
+    { name: "zai-glm-5-2", alias: "glm-5-2", efforts: ["low", "medium", "high", "max"] }
+  ];
+
+  function managedVibeGlmPreset(value) {
+    var lower = trim(value).toLowerCase();
+    for (var i = 0; i < MANAGED_VIBE_GLM_PRESETS.length; i++) {
+      if (lower === MANAGED_VIBE_GLM_PRESETS[i].name || lower === MANAGED_VIBE_GLM_PRESETS[i].alias) { return MANAGED_VIBE_GLM_PRESETS[i]; }
+    }
+    return null;
+  }
+
+  function managedVibeGlmPresetBlock(preset) {
+    return '[[models]]\nname = "' + preset.name + '"\nprovider = "mistral"\nalias = "' + preset.alias + '"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\nsupports_images = ' + (VIBE_GLM_SUPPORTS_IMAGES ? 'true' : 'false') + '\n';
+  }
+
   function vibeModelSpec(value) {
     var model = trim(value);
     var lower = model.toLowerCase();
@@ -6537,11 +6557,13 @@
         supportsImages: true
       };
     }
-    if (lower === "zai-glm-5-2" || lower === "glm-5-2") {
+    var glmPreset = managedVibeGlmPreset(lower);
+    if (glmPreset !== null) {
       return {
-        activeModel: "glm-5-2",
-        name: "zai-glm-5-2",
-        alias: "glm-5-2",
+        activeModel: glmPreset.alias,
+        name: glmPreset.name,
+        alias: glmPreset.alias,
+        efforts: glmPreset.efforts,
         thinking: "high",
         temperature: "1.0",
         inputPrice: "1.4",
@@ -6563,7 +6585,8 @@
 
   function migrateManagedVibeModelPresets(text) {
     var removed = [];
-    var hasGlm = false;
+    var presentPresets = {};
+    var userManagedGlm = false;
     if (parseVibeGatewayUrl(text).length) {
       // Convertigo gateway profile: the model catalog is the gateway's, not Mistral's.
       return { text: String(text || ""), removed: [], added: false, migratedActiveModel: false };
@@ -6571,7 +6594,14 @@
     var result = String(text || "").replace(/(^|\n)\[\[models\]\]([\s\S]*?)(?=\n\[\[|\n\[|$)/g, function (match, prefix, block) {
       var name = parseTomlValue(block, "name");
       var alias = parseTomlValue(block, "alias");
-      hasGlm = hasGlm || name === "zai-glm-5-2" || alias === "glm-5-2" || alias === "zai-glm-5-2";
+      for (var presetIndex = 0; presetIndex < MANAGED_VIBE_GLM_PRESETS.length; presetIndex++) {
+        var candidate = MANAGED_VIBE_GLM_PRESETS[presetIndex];
+        if (name === candidate.name || alias === candidate.alias || alias === candidate.name) { presentPresets[candidate.name] = true; }
+      }
+      // A GLM entry with its own provider or alias belongs to the user: leave the file alone.
+      if (/^zai-glm-/i.test(name) && (parseTomlValue(block, "provider") !== "mistral" || (managedVibeGlmPreset(alias) === null && alias !== name))) {
+        userManagedGlm = true;
+      }
       var managed = parseTomlValue(block, "name") === "zai-glm-5-2"
         && parseTomlValue(block, "alias") === "zai-glm-5-2"
         && parseTomlValue(block, "provider") === "mistral"
@@ -6585,7 +6615,7 @@
       return match.replace(/(alias\s*=\s*["'])zai-glm-5-2(["'])/, "$1glm-5-2$2");
     });
     var glmImagesLine = "supports_images = " + (VIBE_GLM_SUPPORTS_IMAGES ? "true" : "false");
-    result = result.replace(/((?:^|\n)\[\[models\]\]\s*\nname\s*=\s*["']zai-glm-5-2["'][\s\S]*?)(supports_images\s*=\s*(?:true|false))/g, function (match, head, current) {
+    result = result.replace(/((?:^|\n)\[\[models\]\]\s*\nname\s*=\s*["']zai-glm-[0-9.-]+["'][\s\S]*?)(supports_images\s*=\s*(?:true|false))/g, function (match, head, current) {
       return current === glmImagesLine ? match : head + glmImagesLine;
     });
     var migratedActiveModel = false;
@@ -6593,14 +6623,21 @@
       result = result.replace(/^(\s*active_model\s*=\s*["'])zai-glm-5-2(["'])/m, "$1glm-5-2$2");
       migratedActiveModel = true;
     }
-    if (!hasGlm) {
-      // GLM can be account-routed, but is not a guaranteed CLI default.
-      result = result.replace(/\s*$/, "") + '\n\n[[models]]\nname = "zai-glm-5-2"\nprovider = "mistral"\nalias = "glm-5-2"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\nsupports_images = ' + (VIBE_GLM_SUPPORTS_IMAGES ? 'true' : 'false') + '\n';
+    // GLM can be account-routed, but is not a guaranteed CLI default: declare every preset that
+    // the config does not have yet, so a new GLM release reaches existing homes too.
+    var addedPresets = [];
+    for (var addIndex = 0; addIndex < MANAGED_VIBE_GLM_PRESETS.length; addIndex++) {
+      var preset = MANAGED_VIBE_GLM_PRESETS[addIndex];
+      if (!userManagedGlm && !presentPresets[preset.name]) {
+        result = result.replace(/\s*$/, "") + "\n\n" + managedVibeGlmPresetBlock(preset);
+        addedPresets.push(preset.alias);
+      }
     }
     return {
       text: result.replace(/\n{3,}/g, "\n\n"),
       removed: removed,
-      added: !hasGlm,
+      added: addedPresets.length > 0,
+      addedPresets: addedPresets,
       migratedActiveModel: migratedActiveModel
     };
   }
@@ -7655,9 +7692,10 @@
     for (var i = 0; i < modelChoices.length; i++) {
       var model = modelChoices[i];
       var modelLevels = reasoningLevels, modelDefaultReasoning = defaultReasoning;
-      if (Object.prototype.hasOwnProperty.call(gatewayEfforts, model.id)) {
-        // Only the levels this gateway model accepts, plus the "off" choice Vibe offers.
-        var accepted = gatewayEfforts[model.id];
+      var vibePreset = convertigoMode ? null : managedVibeGlmPreset(model.id);
+      if (Object.prototype.hasOwnProperty.call(gatewayEfforts, model.id) || vibePreset !== null) {
+        // Only the levels this model accepts, plus the "off" choice Vibe offers.
+        var accepted = vibePreset !== null ? vibePreset.efforts : gatewayEfforts[model.id];
         modelLevels = reasoningLevels.filter(function (level) {
           var id = String(level.id).toLowerCase();
           return id === "off" || id === "none" || accepted.indexOf(id) >= 0;
@@ -7782,6 +7820,20 @@
         });
       }
       if (alignedReasoning.length) { requestedReasoning = alignedReasoning; }
+    } else if (thinkingOption) {
+      var presetModelOption = findAcpConfigOption(configOptions, "model");
+      var presetForSession = managedVibeGlmPreset(trim(presetModelOption && (presetModelOption.currentValue || presetModelOption.current_value)) || requestedModel);
+      if (presetForSession !== null) {
+        var presetThinking = requestedReasoning || trim(thinkingOption.currentValue || thinkingOption.current_value);
+        var alignedPresetThinking = gatewayEffortFor(presetThinking, presetForSession.efforts);
+        if (alignedPresetThinking.length && alignedPresetThinking !== presetThinking) {
+          pushEvent(entry, "warning", {
+            phase: "session/config",
+            message: "Thinking level " + presetThinking + " is not accepted by " + presetForSession.alias + "; using " + alignedPresetThinking + "."
+          });
+          requestedReasoning = alignedPresetThinking;
+        }
+      }
     }
     if (requestedReasoning.length && acpConfigOptionHasValue(thinkingOption, requestedReasoning) && requestedReasoning !== trim(thinkingOption.currentValue || thinkingOption.current_value)) {
       var reasoningResult = acpRequest(entry, "session/set_config_option", {

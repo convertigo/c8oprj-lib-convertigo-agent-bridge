@@ -456,3 +456,36 @@ console.log("Vibe image attachment contract OK");
   assert.equal(aligned.defaultModel, "glm-5-3");
   assert.equal(applyGatewayOfferToProvider({ id: "vibe", models: [{ id: "x" }] }).models.length, 1, "other providers are untouched");
 }
+
+// Vibe (personal Mistral account) profile: GLM 5.3 is a managed preset next to GLM 5.2.
+{
+  assert.equal(vibeModelSpec("glm-5-3").name, "zai-glm-5-3");
+  assert.equal(vibeModelSpec("zai-glm-5-3").activeModel, "glm-5-3");
+  assert.equal(vibeModelSpec("glm-5-3").thinking, "high");
+  assert.equal(vibeModelSpec("glm-5-2").name, "zai-glm-5-2");
+
+  // An existing home that only knows GLM 5.2 gains GLM 5.3, once.
+  const existing = 'active_model = "glm-5-2"\n\n[[providers]]\nname = "mistral"\n\n[[models]]\nname = "zai-glm-5-2"\nprovider = "mistral"\nalias = "glm-5-2"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\nsupports_images = false\n';
+  const upgraded = migrateManagedVibeModelPresets(existing);
+  assert.deepEqual(upgraded.addedPresets, ["glm-5-3"]);
+  assert.match(upgraded.text, /name = "zai-glm-5-3"\nprovider = "mistral"\nalias = "glm-5-3"/);
+  assert.match(upgraded.text, /^active_model = "glm-5-2"$/m, "the active model is not changed behind the user's back");
+  const again = migrateManagedVibeModelPresets(upgraded.text);
+  assert.equal(again.added, false);
+  assert.equal(again.text, upgraded.text, "idempotent");
+  // A fresh config gets both, newest first.
+  const fresh = migrateManagedVibeModelPresets('active_model = "vibe-thinking"\n');
+  assert.deepEqual(fresh.addedPresets, ["glm-5-3", "glm-5-2"]);
+  assert.ok(fresh.text.indexOf("zai-glm-5-3") < fresh.text.indexOf("zai-glm-5-2"));
+
+  // Same per-model thinking levels as through the gateway.
+  const acp = [
+    { id: "model", currentValue: "glm-5-3", options: [{ value: "glm-5-3", name: "glm-5-3" }, { value: "glm-5-2", name: "glm-5-2" }, { value: "mistral-medium-3.5", name: "mistral-medium-3.5" }] },
+    { id: "thinking", currentValue: "medium", options: ["off", "low", "medium", "high", "max"].map(v => ({ value: v, name: v })) }];
+  const vibe = normalizeVibeAcpProviderSettings(acp, { id: "vibe" });
+  const byId = Object.fromEntries(vibe.models.map(m => [m.id, m]));
+  assert.deepEqual(byId["glm-5-3"].reasoningLevels.map(l => l.id), ["off", "low", "high", "max"]);
+  assert.equal(byId["glm-5-3"].defaultReasoning, "high");
+  assert.deepEqual(byId["mistral-medium-3.5"].reasoningLevels.map(l => l.id), ["off", "low", "medium", "high", "max"], "other Vibe models are untouched");
+  assert.equal(byId["mistral-medium-3.5"].defaultReasoning, "medium");
+}
