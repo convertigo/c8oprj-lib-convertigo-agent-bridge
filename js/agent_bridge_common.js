@@ -6552,10 +6552,15 @@
       info.endpoint = match ? match[1] : "";
       var bearerMatch = block.match(/api_key_env\s*=\s*["']([^"']+)["']/);
       info.bearerTokenEnv = bearerMatch ? bearerMatch[1] : "";
-      var viewerPortMatch = block.match(/["']X-Convertigo-Viewer-Debug-Port["']\s*=\s*["'](\d+)["']/);
+      // The quotes around the header keys are optional on purpose: the Bridge writes them
+      // quoted, but the Vibe runtime re-serializes config.toml on every session start and
+      // emits bare keys (`X-Convertigo-No-Log = "true"`). Requiring the quotes made every
+      // header read back as absent, so the reuse check below never matched and the config
+      // was rewritten at each start.
+      var viewerPortMatch = block.match(/["']?X-Convertigo-Viewer-Debug-Port["']?\s*=\s*["'](\d+)["']/);
       info.viewerDebugPort = viewerPortMatch ? Number(viewerPortMatch[1]) : 0;
-      info.revealMode = /["']X-Convertigo-Reveal-Mode["']\s*=\s*["']true["']/.test(block);
-      info.noLog = /["']X-Convertigo-No-Log["']\s*=\s*["']true["']/.test(block);
+      info.revealMode = /["']?X-Convertigo-Reveal-Mode["']?\s*=\s*["']true["']/.test(block);
+      info.noLog = /["']?X-Convertigo-No-Log["']?\s*=\s*["']true["']/.test(block);
       break;
     }
     info.gatewayUrl = parseVibeGatewayUrl(text);
@@ -6580,6 +6585,92 @@
     }
     info.valid = info.hasMcpServers && info.hasConvertigoServer && info.hasHttpTransport && info.endpoint.length > 0;
     return info;
+  }
+
+  // The managed config.toml is post-processed right after the Bridge writes it:
+  // `lib_ConvertigoMCP._setupVibe` (called from installAgentSkills) rewrites the Convertigo
+  // MCP `url` to its own `?jsonOnly=true` form, drops the `descriptorVersion` and
+  // `toolsRevision` parameters the Bridge put there, and folds `[mcp_servers.auth.headers]`
+  // into an inline table. The file therefore cannot be read back as the record of what the
+  // Bridge intended: comparing the parsed `url` against the expected one NEVER matched, so
+  // every single start rewrote a byte-identical file and pruned the MCP descriptor cache.
+  // The intent is recorded beside config.toml instead, in a file nothing else touches.
+  var VIBE_CONFIG_INTENT_FILE = ".convertigo-bridge-config";
+  // The subset of the intent that describes the Convertigo/Playwright MCP server entries.
+  // Only a change here invalidates the descriptor cache Vibe keyed on the previous entry.
+  var VIBE_CONFIG_MCP_INTENT_KEYS = {
+    bearerTokenEnv: true,
+    endpoint: true,
+    noLog: true,
+    playwrightCommand: true,
+    playwrightEndpoint: true,
+    revealMode: true,
+    viewerDebugPort: true
+  };
+
+  function vibeConfigIntentFile(vibeHome) {
+    return new File(vibeHome, VIBE_CONFIG_INTENT_FILE);
+  }
+
+  // Stable `key=value` lines: readable on disk, and comparable field by field.
+  function vibeConfigIntent(expected) {
+    expected = expected || {};
+    var keys = [];
+    for (var key in expected) {
+      if (Object.prototype.hasOwnProperty.call(expected, key)) {
+        keys.push(key);
+      }
+    }
+    keys.sort();
+    var lines = [];
+    for (var i = 0; i < keys.length; i++) {
+      lines.push(keys[i] + "=" + String(expected[keys[i]]));
+    }
+    return lines.join("\n");
+  }
+
+  function vibeConfigIntentSubset(intent, keys) {
+    var lines = String(intent == null ? "" : intent).split(/\r?\n/);
+    var kept = [];
+    for (var i = 0; i < lines.length; i++) {
+      var mark = lines[i].indexOf("=");
+      if (mark > 0 && keys[lines[i].substring(0, mark)] === true) {
+        kept.push(lines[i]);
+      }
+    }
+    return kept.join("\n");
+  }
+
+  function readVibeConfigIntent(vibeHome) {
+    if (!trim(vibeHome).length) {
+      return "";
+    }
+    try {
+      var file = vibeConfigIntentFile(vibeHome);
+      return file.isFile() ? String(readTextFile(file)).replace(/\r\n?/g, "\n").replace(/\s+$/, "") : "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function writeVibeConfigIntent(vibeHome, intent) {
+    if (!trim(vibeHome).length) {
+      return false;
+    }
+    try {
+      writeTextFile(vibeConfigIntentFile(vibeHome), String(intent == null ? "" : intent) + "\n");
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // `_setupVibe` keeps the host and path of the MCP url but owns its query string, so only
+  // the base is comparable against the file. The full url stays in the recorded intent.
+  function mcpEndpointBaseUrl(endpoint) {
+    var text = trim(endpoint);
+    var mark = text.indexOf("?");
+    return mark < 0 ? text : text.substring(0, mark);
   }
 
   function tomlString(value) {

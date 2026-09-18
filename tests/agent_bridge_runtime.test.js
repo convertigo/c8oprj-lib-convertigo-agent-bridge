@@ -504,8 +504,13 @@ assert.equal(
 managedMcpCatalogRevision = originalManagedMcpCatalogRevision;
 assert.match(
   vibeSource,
-  /writeLocalVibeConfig\([\s\S]{0,400}?pruneVibeDescriptorCache\(setup\.vibeHome\)/,
+  /writeLocalVibeConfig\([\s\S]{0,900}?mcpEntryChanged[\s\S]{0,200}?pruneVibeDescriptorCache\(setup\.vibeHome\)/,
   "rewriting the MCP server entry must drop the descriptor cache discovered under the previous one"
+);
+assert.match(
+  vibeSource,
+  /var mcpEntryChanged = !recordedIntent\.length\s*\n\s*\|\| vibeConfigIntentSubset\(recordedIntent, VIBE_CONFIG_MCP_INTENT_KEYS\)/,
+  "a rewrite that leaves the MCP server entry alone must keep the descriptor cache"
 );
 const compactCodexConfig = patchCodexMcpConfigText(
   "",

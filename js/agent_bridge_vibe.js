@@ -69,17 +69,43 @@
         // Rewrite the config, hence restart Vibe on it, when the gateway offer changed since
         // this home was written. It also covers a resumed conversation.
         var expectedGatewayModels = profile === "convertigo" ? vibeGatewayModelsFingerprint(vibeGatewayModelSpecs(options, setup.vibeHome)) : "";
-        var expectedRevealMode = expectedBearerEnv.length && revealModeEnabled(options, null);
-        var expectedNoLog = expectedBearerEnv.length && mcpNoLogEnabled(options);
+        // `!!` on purpose: `"".length && true` is the number 0, which never compares equal to
+        // the boolean read back from the file.
+        var expectedRevealMode = !!(expectedBearerEnv.length && revealModeEnabled(options, null));
+        var expectedNoLog = !!(expectedBearerEnv.length && mcpNoLogEnabled(options));
         var expectedPlaywright = vibePlaywrightServer(options);
         var expectedPlaywrightEndpoint = expectedPlaywright === null ? "" : resolvePlaywrightMcpCdpEndpoint(options);
         var expectedPlaywrightCommand = expectedPlaywright === null ? "" : trim(expectedPlaywright.command);
         // A home written before the `mistral-direct` provider existed only declares `mistral`:
         // rewrite it once so the managed GLM presets get the generic backend, then reuse it.
         var expectedProviderNames = expectedVibeProviderNames(profile);
+        var expectedEndpoint = vibeMcpTransportEndpoint(setup.mcpEndpoint, options);
+        var expectedModel = options.model || options.agentModel;
+        // What a write would produce. `lib_ConvertigoMCP._setupVibe` post-processes config.toml
+        // after the write (see VIBE_CONFIG_INTENT_FILE), so the full MCP url can only be
+        // compared through the intent recorded beside the file. `active_model` is deliberately
+        // out: agent_vibe_start passes an empty model on purpose and sets the session model over
+        // ACP, so recording it would make start and setup fight over the file.
+        var expectedIntent = vibeConfigIntent({
+          bearerTokenEnv: expectedBearerEnv,
+          endpoint: expectedEndpoint,
+          gatewayModels: expectedGatewayModels,
+          gatewayUrl: expectedGatewayUrl,
+          noLog: expectedNoLog,
+          playwrightCommand: expectedPlaywrightCommand,
+          playwrightEndpoint: expectedPlaywrightEndpoint,
+          providerNames: expectedProviderNames,
+          revealMode: expectedRevealMode,
+          viewerDebugPort: expectedBearerEnv.length ? expectedViewerDebugPort : 0
+        });
+        var recordedIntent = readVibeConfigIntent(setup.vibeHome);
+        // The file-derived checks stay: they catch a config.toml deleted or hand-edited behind
+        // the recorded intent. Only the MCP url is compared on its base, the part `_setupVibe`
+        // leaves alone.
         if (setup.config.selected.valid
+            && recordedIntent === expectedIntent
             && trim(setup.config.selected.providerNames) === expectedProviderNames
-            && trim(setup.config.selected.endpoint) === vibeMcpTransportEndpoint(setup.mcpEndpoint, options)
+            && mcpEndpointBaseUrl(setup.config.selected.endpoint) === mcpEndpointBaseUrl(expectedEndpoint)
             && trim(setup.config.selected.bearerTokenEnv) === expectedBearerEnv
             && Number(setup.config.selected.viewerDebugPort || 0) === (expectedBearerEnv.length ? expectedViewerDebugPort : 0)
             && trim(setup.config.selected.playwrightEndpoint) === expectedPlaywrightEndpoint
@@ -90,13 +116,19 @@
             && (setup.config.selected.noLog === true) === expectedNoLog) {
           messages.push("Local VIBE_HOME config reused: " + setup.config.selected.path);
         } else {
-          var written = writeLocalVibeConfig(setup.vibeHome, setup.mcpEndpoint, options.model || options.agentModel, options);
+          var written = writeLocalVibeConfig(setup.vibeHome, setup.mcpEndpoint, expectedModel, options);
+          writeVibeConfigIntent(setup.vibeHome, expectedIntent);
           messages.push("Local VIBE_HOME config written: " + written.path + " (" + written.model + ")");
-          // The MCP server entry just changed, so the tool catalog Vibe cached
-          // under the previous one is unreachable and stale.
-          var prunedDescriptors = pruneVibeDescriptorCache(setup.vibeHome);
-          if (prunedDescriptors.removed.length) {
-            messages.push("Stale Vibe MCP descriptor cache removed: " + prunedDescriptors.removed.join(", "));
+          // Vibe keys its tool catalog cache on the serialized MCP server entry, so prune only
+          // when that entry really changed: a model or provider change leaves it valid.
+          var mcpEntryChanged = !recordedIntent.length
+            || vibeConfigIntentSubset(recordedIntent, VIBE_CONFIG_MCP_INTENT_KEYS)
+              !== vibeConfigIntentSubset(expectedIntent, VIBE_CONFIG_MCP_INTENT_KEYS);
+          if (mcpEntryChanged) {
+            var prunedDescriptors = pruneVibeDescriptorCache(setup.vibeHome);
+            if (prunedDescriptors.removed.length) {
+              messages.push("Stale Vibe MCP descriptor cache removed: " + prunedDescriptors.removed.join(", "));
+            }
           }
         }
         var presetMigration = migrateManagedVibeConfig(setup.vibeHome);

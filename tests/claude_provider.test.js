@@ -320,7 +320,10 @@ console.log("Vibe image attachment contract OK");
   assert.equal(mcpNoLogEnabled({ mcpNoLog: "true" }), true);
   assert.equal(mcpNoLogEnabled({}), true, "symbol unreachable in tests: default is true");
   assert.match(commonSource, /'"X-Convertigo-No-Log" = "true"'/);
-  assert.match(commonSource, /info\.revealMode = \/\["'\]X-Convertigo-Reveal-Mode/);
+  // The quotes around the header key are optional: the Vibe runtime re-serializes config.toml
+  // with bare keys, and a header read back as absent rewrites the config at every start.
+  assert.match(commonSource, /info\.revealMode = \/\["'\]\?X-Convertigo-Reveal-Mode/);
+  assert.match(commonSource, /info\.noLog = \/\["'\]\?X-Convertigo-No-Log/);
   assert.match(vibeSource, /reason: "reveal_mode_changed"/);
   assert.match(claudeSource, /headers\["X-Convertigo-No-Log"\] = "true";/);
 }
