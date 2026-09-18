@@ -472,22 +472,31 @@
 
   // Authentication ---------------------------------------------------------
 
+  function emptyClaudeCredentialsState() {
+    return { exists: false, expired: false, stale: false, expiresAt: 0, updatedAt: 0, hasRefreshToken: false, method: "" };
+  }
+
   function claudeCredentialsState(file) {
     if (!fileHasContent(file)) {
-      return { exists: false, expired: false, expiresAt: 0, updatedAt: 0, hasRefreshToken: false, method: "" };
+      return emptyClaudeCredentialsState();
     }
     var parsed = readJsonFile(file) || {};
     var oauth = parsed.claudeAiOauth || parsed.oauth || {};
     var accessToken = trim(oauth.accessToken || oauth.access_token);
     var apiKey = trim(parsed.apiKey || parsed.anthropicApiKey);
     if (!accessToken.length && !apiKey.length) {
-      return { exists: false, expired: false, expiresAt: 0, updatedAt: 0, hasRefreshToken: false, method: "" };
+      return emptyClaudeCredentialsState();
     }
     var expiresAt = Number(oauth.expiresAt || oauth.expires_at || 0);
     var hasRefreshToken = trim(oauth.refreshToken || oauth.refresh_token).length > 0;
+    var outdated = expiresAt > 0 && expiresAt <= now() + 60000;
     return {
       exists: true,
-      expired: expiresAt > 0 && expiresAt <= now() + 60000 && !hasRefreshToken,
+      // Hard expiry: nothing local can revive the session.
+      expired: outdated && !hasRefreshToken,
+      // A refresh token is only a promise: it may have been revoked server side, so the
+      // copy is "stale" and must be re-validated instead of being trusted for ever.
+      stale: outdated && hasRefreshToken,
       expiresAt: expiresAt,
       updatedAt: Number(file.lastModified() || 0),
       hasRefreshToken: hasRefreshToken,
@@ -565,6 +574,21 @@
     return target;
   }
 
+  // Identity of a stored session: the tokens and their expiry, whatever the file layout.
+  function claudeCredentialsFingerprint(text) {
+    var parsed = parseJsonSafe(trim(text), null);
+    if (parsed === null || typeof parsed !== "object") {
+      return trim(text);
+    }
+    var oauth = parsed.claudeAiOauth || parsed.oauth || {};
+    return [
+      trim(oauth.accessToken || oauth.access_token),
+      trim(oauth.refreshToken || oauth.refresh_token),
+      String(Number(oauth.expiresAt || oauth.expires_at || 0)),
+      trim(parsed.apiKey || parsed.anthropicApiKey)
+    ].join("|");
+  }
+
   function syncClaudeCredentials(sourceDirs, homeDir, report) {
     var target = new File(homeDir, CLAUDE_CREDENTIALS_FILE);
     var targetState = claudeCredentialsState(target);
@@ -575,16 +599,33 @@
       report.authenticationImported = !targetState.exists || targetState.expired;
       return;
     }
-    if (targetState.exists && !targetState.expired) {
+    // No readable file source. On macOS `~/.claude/.credentials.json` never exists: the
+    // credentials live in the Keychain and the managed copy is only a snapshot. Re-read the
+    // Keychain and refresh the copy as soon as it differs, otherwise a rotated or revoked
+    // session is kept for ever and the agent keeps declaring itself authenticated.
+    var keychain = trim(readKeychainClaudeCredentials());
+    if (keychain.length) {
+      var current = "";
+      try {
+        current = fileHasContent(target) ? readTextFile(target) : "";
+      } catch (_ignoreCredentialCompare) {
+        current = "";
+      }
+      // Compare the tokens, not the bytes: the CLI rewrites the file in its own layout, so
+      // a raw text comparison would copy the very same session over and over.
+      if (!targetState.exists || claudeCredentialsFingerprint(current) !== claudeCredentialsFingerprint(keychain)) {
+        writeClaudeCredentialsFile(homeDir, keychain);
+        report.copied.push(CLAUDE_CREDENTIALS_FILE);
+        report.authenticationSource = "keychain";
+        report.authenticationImported = true;
+        return;
+      }
       report.reused.push(CLAUDE_CREDENTIALS_FILE);
+      report.authenticationSource = "keychain";
       return;
     }
-    var keychain = readKeychainClaudeCredentials();
-    if (keychain.length) {
-      writeClaudeCredentialsFile(homeDir, keychain);
-      report.copied.push(CLAUDE_CREDENTIALS_FILE);
-      report.authenticationSource = "keychain";
-      report.authenticationImported = true;
+    if (targetState.exists && !targetState.expired) {
+      report.reused.push(CLAUDE_CREDENTIALS_FILE);
     }
   }
 
@@ -623,6 +664,12 @@
       info.home = path;
       info.expiresAt = state.expiresAt;
       info.updatedAt = state.updatedAt;
+      if (state.stale === true) {
+        // The access token is past its expiry and only a refresh token is left: the CLI may
+        // still be able to refresh it, so stay configured, but ask for a real check.
+        info.status = "stale";
+        info.staleCredentials = true;
+      }
       return info;
     }
     if (readKeychainClaudeCredentials().length) {
@@ -631,24 +678,350 @@
     return firstExpired !== null ? firstExpired : authenticationInfo(false, "", "claude_login");
   }
 
-  function claudeDoctorAuthentication(options, homePath, commandPath, forceCheck) {
-    var authentication = inspectClaudeAuthentication(homePath);
-    if ((authentication.configured === true && forceCheck !== true) || !trim(commandPath).length) {
-      return authentication;
+  // Authentication probe ---------------------------------------------------
+  //
+  // Codex has `codex doctor` plus an app-server probe (agent_bridge_common.js) to tell a
+  // revoked session from a healthy one. Claude had nothing: `claude auth status` was only
+  // run when the credentials file already said "not configured", so a revoked session that
+  // still has a refresh token on disk stayed `configured: true` for ever. The probe below
+  // is the Claude equivalent: it asks the CLI, caches the answer, and never breaks the
+  // settings call when the CLI is missing, slow or answers something unexpected.
+
+  var CLAUDE_AUTH_PROBE_CACHE_KEY = "lib_ConvertigoAgentBridge.claudeAuthProbeCache.v1";
+  var CLAUDE_AUTH_PROBE_CACHE_FILE = "claude-auth-checks.json";
+  var CLAUDE_AUTH_PROBE_CACHE_MS = 300000;
+
+  // Wordings the Claude CLI and the Anthropic API use when the stored OAuth session cannot
+  // be used any more (revoked, refresh refused, signed out elsewhere).
+  var CLAUDE_REVOKED_SESSION_PATTERNS = [
+    "not logged in",
+    "please run /login",
+    "please run `claude login`",
+    "please log in again",
+    "please sign in again",
+    "authentication_error",
+    "invalid api key",
+    "invalid bearer token",
+    "oauth token has expired",
+    "oauth token expired",
+    "oauth token is invalid",
+    "oauth token revoked",
+    "token has been revoked",
+    "refresh token was revoked",
+    "refresh token has expired",
+    "refresh token not found",
+    "refresh token is invalid",
+    "invalid refresh token",
+    "failed to refresh",
+    "could not refresh",
+    "unable to refresh",
+    "invalid_grant",
+    "session has expired",
+    "session expired",
+    "credentials are invalid",
+    "401 unauthorized"
+  ];
+
+  function claudeMatchesAny(text, patterns) {
+    var lower = String(text || "").toLowerCase();
+    if (!lower.length) {
+      return false;
     }
+    for (var i = 0; i < patterns.length; i++) {
+      if (lower.indexOf(patterns[i]) !== -1) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function claudeLooksLikeRevokedSession(text) {
+    return claudeMatchesAny(text, CLAUDE_REVOKED_SESSION_PATTERNS);
+  }
+
+  // Small local cache, in the spirit of cachedRuntimeUpdate() but kept inside this file so
+  // the Claude probe owns its own (much shorter) lifetime. It lives in the engine server
+  // store when there is one, so it survives between sequence executions.
+  function claudeAuthProbeCacheMap() {
     try {
-      var probe = runCommand([commandPath, "auth", "status"], {
-        timeoutMs: intValue(options && options.authProbeTimeoutMs, 15000, 1000, 60000),
+      var store = getServerStore();
+      if (store !== null) {
+        var cache = store.get(CLAUDE_AUTH_PROBE_CACHE_KEY);
+        if (cache === null || typeof cache === "undefined") {
+          cache = new ConcurrentHashMap();
+          store.set(CLAUDE_AUTH_PROBE_CACHE_KEY, cache);
+        }
+        return cache;
+      }
+    } catch (_ignoreClaudeAuthProbeStore) {}
+    if (!C8O.agentBridge._claudeAuthProbeCache) {
+      C8O.agentBridge._claudeAuthProbeCache = {};
+    }
+    return C8O.agentBridge._claudeAuthProbeCache;
+  }
+
+  // The engine store does not always survive between sequence executions (that is why the
+  // shared runtime cache also has a file), so the probe answer is mirrored in a small JSON
+  // file next to the managed agents. Both layers are best effort: any failure just means
+  // one more `claude auth status` call.
+  function claudeAuthProbeCacheFile(options) {
+    try {
+      var root = trim(resolveWorkspaceRoot(options || {}));
+      return root.length ? new File(childPath(root, "agents"), CLAUDE_AUTH_PROBE_CACHE_FILE) : null;
+    } catch (_ignoreClaudeAuthProbeFile) {
+      return null;
+    }
+  }
+
+  function claudeAuthProbeFileRead(options, key) {
+    try {
+      var file = claudeAuthProbeCacheFile(options);
+      if (file === null || !fileHasContent(file)) {
+        return null;
+      }
+      var value = readJsonFile(file);
+      var stored = value && value.checks ? value.checks[key] : null;
+      return stored && typeof stored === "object" ? stored : null;
+    } catch (_ignoreClaudeAuthProbeFileRead) {
+      return null;
+    }
+  }
+
+  function claudeAuthProbeFileWrite(options, key, value) {
+    var lock = null;
+    try {
+      var file = claudeAuthProbeCacheFile(options);
+      if (file === null) {
+        return;
+      }
+      ensureDirectory(file.getParentFile());
+      try {
+        lock = acquireFileLock(new File(file.getParentFile(), CLAUDE_AUTH_PROBE_CACHE_FILE + ".lock"), 5000);
+      } catch (_ignoreClaudeAuthProbeLock) {
+        lock = null;
+      }
+      var current = readJsonFile(file);
+      if (current === null || typeof current !== "object" || typeof current.checks !== "object" || current.checks === null) {
+        current = { version: 1, checks: {} };
+      }
+      var currentTime = now();
+      for (var existing in current.checks) {
+        if (Object.prototype.hasOwnProperty.call(current.checks, existing) &&
+          Number(current.checks[existing] && current.checks[existing].nextCheckAt || 0) <= currentTime) {
+          delete current.checks[existing];
+        }
+      }
+      current.checks[key] = value;
+      writeTextFile(file, JSON.stringify(current));
+    } catch (_ignoreClaudeAuthProbeFileWrite) {
+    } finally {
+      try { if (lock !== null) { lock.release(); } } catch (_ignoreClaudeAuthProbeUnlock) {}
+    }
+  }
+
+  function claudeAuthProbeCacheRead(cache, key) {
+    try {
+      var raw = typeof cache.get === "function" ? cache.get(key) : cache[key];
+      if (raw === null || typeof raw === "undefined") {
+        return null;
+      }
+      return parseJsonSafe(String(raw), null);
+    } catch (_ignoreClaudeAuthProbeRead) {
+      return null;
+    }
+  }
+
+  function claudeAuthProbeCacheWrite(cache, key, value) {
+    try {
+      var raw = JSON.stringify(value);
+      if (typeof cache.put === "function") {
+        cache.put(key, raw);
+      } else {
+        cache[key] = raw;
+      }
+    } catch (_ignoreClaudeAuthProbeWrite) {}
+  }
+
+  function claudeCachedAuthenticationProbe(key, options, loader) {
+    options = options || {};
+    var cacheMs = intValue(options.claudeAuthCheckCacheMs, CLAUDE_AUTH_PROBE_CACHE_MS, 0, 86400000);
+    // Only an explicit Claude authentication refresh (a sign-in, or a caller asking for a
+    // forced check) bypasses the window: `refreshUpdateCheck` is the runtime/version flag
+    // and the settings call sets it routinely, which would defeat the cache entirely.
+    var refresh = boolValue(options.refreshClaudeAuthCheck, false);
+    var cache = claudeAuthProbeCacheMap();
+    var currentTime = now();
+    if (!refresh && cacheMs > 0) {
+      var cached = claudeAuthProbeCacheRead(cache, key);
+      if (cached !== null && Number(cached.nextCheckAt || 0) > currentTime) {
+        cached.cached = true;
+        return cached;
+      }
+      var persisted = claudeAuthProbeFileRead(options, key);
+      if (persisted !== null && Number(persisted.nextCheckAt || 0) > currentTime) {
+        persisted.cached = true;
+        claudeAuthProbeCacheWrite(cache, key, persisted);
+        return persisted;
+      }
+    }
+    var loaded = loader();
+    loaded.checkedAt = currentTime;
+    loaded.nextCheckAt = cacheMs > 0 ? currentTime + cacheMs : currentTime;
+    loaded.cached = false;
+    // Only a conclusive answer is worth caching: a timeout or a missing CLI must be retried.
+    if (loaded.conclusive === true && cacheMs > 0) {
+      claudeAuthProbeCacheWrite(cache, key, loaded);
+      claudeAuthProbeFileWrite(options, key, loaded);
+    }
+    return loaded;
+  }
+
+  function claudeAuthenticationProbe(options, homePath, commandPath) {
+    var startedAt = now();
+    var result = {
+      checked: true,
+      conclusive: false,
+      valid: false,
+      unauthorized: false,
+      loggedIn: false,
+      authMethod: "",
+      reason: "",
+      error: "",
+      durationMs: 0
+    };
+    var command = trim(commandPath);
+    if (!command.length) {
+      result.reason = "cli_missing";
+      result.error = "The Claude CLI is not available; authentication was not verified.";
+      result.durationMs = now() - startedAt;
+      return result;
+    }
+    var probe = null;
+    try {
+      probe = runCommand([command, "auth", "status"], {
+        timeoutMs: intValue(options && options.claudeAuthCheckTimeoutMs, intValue(options && options.authProbeTimeoutMs, 10000, 1000, 60000), 1000, 60000),
         env: claudeRuntimeEnv(options || {}, homePath)
       });
-      var parsed = parseJsonSafe(trim(probe.stdout), null);
-      if (parsed && typeof parsed === "object" && typeof parsed.loggedIn !== "undefined") {
-        var loggedIn = parsed.loggedIn === true || String(parsed.loggedIn) === "true";
-        var verified = authenticationInfo(loggedIn, loggedIn ? ("cli:" + trim(parsed.authMethod || "unknown")) : "", loggedIn ? "" : "claude_login");
-        verified.verifiedByCli = true;
-        return verified;
+    } catch (e) {
+      result.reason = "probe_failed";
+      result.error = String(e);
+      result.durationMs = now() - startedAt;
+      return result;
+    }
+    var output = String((probe.stdout || "") + "\n" + (probe.stderr || ""));
+    result.exitCode = Number(probe.exitCode);
+    if (trim(probe.error) === "timeout") {
+      result.reason = "timeout";
+      result.error = "The `claude auth status` probe timed out.";
+      result.durationMs = now() - startedAt;
+      return result;
+    }
+    var parsed = parseJsonSafe(trim(probe.stdout), null);
+    if (parsed && typeof parsed === "object" && typeof parsed.loggedIn !== "undefined") {
+      var loggedIn = parsed.loggedIn === true || String(parsed.loggedIn) === "true";
+      result.conclusive = true;
+      result.loggedIn = loggedIn;
+      result.authMethod = trim(parsed.authMethod || parsed.auth_method || "");
+      result.valid = loggedIn && !claudeLooksLikeRevokedSession(probe.stderr);
+      result.unauthorized = !result.valid;
+      result.reason = result.valid ? "logged_in" : "logged_out";
+      return finishClaudeAuthenticationProbe(result, startedAt);
+    }
+    if (claudeLooksLikeRevokedSession(output)) {
+      result.conclusive = true;
+      result.unauthorized = true;
+      result.reason = "revoked";
+      result.error = trim(output).substring(0, 400);
+      return finishClaudeAuthenticationProbe(result, startedAt);
+    }
+    if (claudeMatchesAny(output, ["command not found", "no such file or directory", "is not recognized"])) {
+      result.reason = "cli_missing";
+      result.error = trim(output).substring(0, 400);
+      return finishClaudeAuthenticationProbe(result, startedAt);
+    }
+    result.reason = "unexpected_output";
+    result.error = trim(output).substring(0, 400) || ("`claude auth status` exited with " + probe.exitCode);
+    return finishClaudeAuthenticationProbe(result, startedAt);
+  }
+
+  function finishClaudeAuthenticationProbe(result, startedAt) {
+    result.durationMs = now() - startedAt;
+    return result;
+  }
+
+  function claudeDoctorAuthentication(options, homePath, commandPath, forceCheck) {
+    var authentication = inspectClaudeAuthentication(homePath);
+    var command = trim(commandPath);
+    if (!command.length) {
+      // Presence-only settings call, or no CLI at all: keep the file/Keychain verdict.
+      authentication.check = { checked: false, reason: "cli_missing" };
+      return authentication;
+    }
+    if (authentication.configured === true && trim(authentication.method) === "environment") {
+      // ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN win over the stored session.
+      return authentication;
+    }
+    var probeOptions = {};
+    options = options || {};
+    for (var key in options) {
+      if (Object.prototype.hasOwnProperty.call(options, key)) {
+        probeOptions[key] = options[key];
       }
-    } catch (_ignoreAuthProbe) {}
+    }
+    if (forceCheck === true) {
+      probeOptions.refreshClaudeAuthCheck = true;
+    }
+    // The cache key carries the credentials timestamps: a refreshed or re-imported session
+    // invalidates it on its own, so a stale copy still costs at most one probe per window.
+    // The key stays on the CLI and the home: `claude auth status` itself refreshes and
+    // rewrites the credentials file, so keying on its timestamps would miss the cache on
+    // every single call. The short window plus the forced check on login covers freshness.
+    var cacheKey = "claude-auth:" + hashShort(command + ":" + filePath(new File(effectiveClaudeHomePath(homePath))));
+    var probe = null;
+    try {
+      probe = claudeCachedAuthenticationProbe(cacheKey, probeOptions, function () {
+        return claudeAuthenticationProbe(probeOptions, homePath, command);
+      });
+    } catch (_ignoreAuthProbe) {
+      probe = null;
+    }
+    if (probe === null) {
+      authentication.check = { checked: false, reason: "probe_failed" };
+      return authentication;
+    }
+    authentication.check = probe;
+    authentication.checked = true;
+    authentication.checkMethod = "auth-status";
+    if (probe.conclusive !== true) {
+      // Missing CLI, timeout or unexpected output: never let the probe break the settings
+      // call, fall back to what the credentials say and report why.
+      authentication.checkFallbackReason = trim(probe.reason) || "unknown";
+      return authentication;
+    }
+    if (probe.unauthorized === true) {
+      var revoked = authenticationInfo(false, "", "claude_login", probe.reason === "revoked" ? "revoked" : "expired");
+      revoked.home = trim(authentication.home);
+      revoked.expiresAt = Number(authentication.expiresAt || 0);
+      revoked.updatedAt = Number(authentication.updatedAt || 0);
+      revoked.checked = true;
+      revoked.checkMethod = "auth-status";
+      revoked.check = probe;
+      revoked.verifiedByCli = true;
+      revoked.message = "The stored Claude session is no longer usable. Sign in again to Claude Code.";
+      return revoked;
+    }
+    if (authentication.configured !== true || trim(authentication.status) === "stale") {
+      var verified = authenticationInfo(true, "cli:" + (trim(probe.authMethod) || "unknown"), "");
+      verified.home = trim(authentication.home);
+      verified.expiresAt = Number(authentication.expiresAt || 0);
+      verified.updatedAt = Number(authentication.updatedAt || 0);
+      verified.checked = true;
+      verified.checkMethod = "auth-status";
+      verified.check = probe;
+      verified.verifiedByCli = true;
+      return verified;
+    }
+    authentication.verifiedByCli = true;
     return authentication;
   }
 
@@ -2071,12 +2444,14 @@
   }
 
   function claudeLooksLikeAuthenticationError(text) {
+    // A revoked session does not say "oauth token has expired": it says the refresh failed,
+    // the token was revoked or the request was unauthorized. Recognising those wordings is
+    // what makes the Assistant show the sign-in button instead of a generic turn error.
     var lower = String(text || "").toLowerCase();
-    return lower.indexOf("not logged in") !== -1 ||
-      lower.indexOf("please run /login") !== -1 ||
-      lower.indexOf("authentication_error") !== -1 ||
-      lower.indexOf("invalid api key") !== -1 ||
-      lower.indexOf("oauth token has expired") !== -1;
+    return claudeLooksLikeRevokedSession(lower) ||
+      lower.indexOf("please run `claude auth login`") !== -1 ||
+      lower.indexOf("claude setup-token") !== -1 ||
+      lower.indexOf("oauth authentication") !== -1;
   }
 
   function claudeHandleResult(entry, message) {
