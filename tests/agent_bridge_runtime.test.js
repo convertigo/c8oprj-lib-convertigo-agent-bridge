@@ -596,7 +596,8 @@ const vibeConfigWithPreset = [
 const unchangedVibeConfig = migrateManagedVibeModelPresets(vibeConfigWithPreset);
 assert.deepEqual(unchangedVibeConfig.removed, []);
 assert.equal(unchangedVibeConfig.added, true);
-assert.match(unchangedVibeConfig.text, /alias = "glm-5-2"/);
+assert.match(unchangedVibeConfig.text, /alias = "glm-5-3"/);
+assert.doesNotMatch(unchangedVibeConfig.text, /glm-5-2/, "GLM 5.2 is no longer pushed to new homes");
 assert.equal(migrateManagedVibeModelPresets(unchangedVibeConfig.text).text, unchangedVibeConfig.text);
 
 const migratedVibeConfig = migrateManagedVibeModelPresets([

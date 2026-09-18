@@ -26,8 +26,9 @@
   // "Convertigo" agent mode: Vibe talks to the Convertigo LiteLLM gateway with a
   // per-user virtual key instead of a personal Mistral account.
   var CONVERTIGO_LLM_GATEWAY_URL = "https://llm.convertigo.com/v1";
-  var CONVERTIGO_LLM_GATEWAY_MODEL = "mistral/zai-glm-5-2";
-  var CONVERTIGO_LLM_GATEWAY_ALIAS = "glm-5-2";
+  // Fallback only: the offer normally comes from the gateway (GET /models).
+  var CONVERTIGO_LLM_GATEWAY_MODEL = "mistral/zai-glm-5-3";
+  var CONVERTIGO_LLM_GATEWAY_ALIAS = "glm-5-3";
   var CONVERTIGO_LLM_API_KEY_ENV = "CONVERTIGO_LLM_API_KEY";
   // The gateway lets reasoning_effort through for GLM 5.2 (allowed_openai_params on the
   // model); think by default, llmGatewayThinking or the ACP reasoning effort override it.
@@ -6509,9 +6510,11 @@
   // GLM models routed by Mistral are not Vibe CLI defaults: the Bridge declares them in the
   // managed config.toml of the Vibe (personal Mistral account) profile. Newest first. `efforts`
   // are the reasoning_effort values Mistral accepts for the model.
+  // `push: false` keeps a model known (its levels, its spec when a conversation still asks for
+  // it) without declaring it in new homes. Existing config.toml files are left as they are.
   var MANAGED_VIBE_GLM_PRESETS = [
     { name: "zai-glm-5-3", alias: "glm-5-3", efforts: ["low", "high", "max"] },
-    { name: "zai-glm-5-2", alias: "glm-5-2", efforts: ["low", "medium", "high", "max"] }
+    { name: "zai-glm-5-2", alias: "glm-5-2", efforts: ["low", "medium", "high", "max"], push: false }
   ];
 
   function managedVibeGlmPreset(value) {
@@ -6628,7 +6631,7 @@
     var addedPresets = [];
     for (var addIndex = 0; addIndex < MANAGED_VIBE_GLM_PRESETS.length; addIndex++) {
       var preset = MANAGED_VIBE_GLM_PRESETS[addIndex];
-      if (!userManagedGlm && !presentPresets[preset.name]) {
+      if (!userManagedGlm && preset.push !== false && !presentPresets[preset.name]) {
         result = result.replace(/\s*$/, "") + "\n\n" + managedVibeGlmPresetBlock(preset);
         addedPresets.push(preset.alias);
       }
@@ -8649,6 +8652,13 @@
       type: String(type),
       data: data || {}
     };
+    // Every provider reports its turns with these three events: keep a common "turn running"
+    // flag so interrupt() needs no provider-specific state.
+    if (event.type === "turn/start") {
+      entry.turnActive = true;
+    } else if (event.type === "turn/end" || event.type === "turn/error" || event.type === "system/closed") {
+      entry.turnActive = false;
+    }
     entry.events.add(event);
     while (entry.events.size() > MAX_EVENT_BUFFER) {
       entry.events.remove(0);
@@ -8849,8 +8859,210 @@
     return new File(dir, safePathPart(handle) + ".json");
   }
 
+  // ---------------------------------------------------------------------------------------
+  // Agent process lifecycle, common to every provider.
+  //
+  // A child of ProcessBuilder outlives its JVM unless something stops it. Four layers, all
+  // applied in startProcess() so that a new provider inherits them with no specific code:
+  //   1. a PID file per running agent, carrying the owner JVM pid and the Bridge version;
+  //   2. a sweep of every provider's PID files before each launch: agents whose owner JVM is
+  //      gone, or that were started by another Bridge version, are stopped at once;
+  //   3. a JVM shutdown hook that stops every registered agent on a normal exit;
+  //   4. a guard process around the agent that stops it when the owner JVM disappears
+  //      (kill -9, crash), which no in-JVM mechanism can cover.
+  // ---------------------------------------------------------------------------------------
   function entryUsesPidTree(entry) {
-    return entry && (entry.protocol === "codex-app-server" || entry.protocol === "claude-stream-json");
+    return !!entry && entry.process !== null && typeof entry.process !== "undefined";
+  }
+
+  function currentJvmPid() {
+    try {
+      return Number(ProcessHandle.current().pid());
+    } catch (_ignoreCurrentPid) {
+      return 0;
+    }
+  }
+
+  function bridgeProjectVersion() {
+    try {
+      return trim(String(context.project.getVersion()));
+    } catch (_ignoreBridgeVersion) {
+      return "";
+    }
+  }
+
+  function forceDestroyPidTree(pid) {
+    var handle = processHandleForPid(pid);
+    if (handle === null) {
+      return false;
+    }
+    try {
+      var iterator = handle.descendants().iterator();
+      while (iterator.hasNext()) {
+        destroyProcessHandle(iterator.next(), true);
+      }
+    } catch (_ignoreForceDescendants) {}
+    return destroyProcessHandle(handle, true);
+  }
+
+  var SHUTDOWN_HOOK_PROPERTY = "convertigo.agentbridge.shutdownHook";
+
+  function ensureAgentShutdownHook() {
+    try {
+      if (String(System.getProperty(SHUTDOWN_HOOK_PROPERTY)) === "installed") {
+        return false;
+      }
+      var registry = getRegistry();
+      var hook = new java.lang.Thread(new java.lang.Runnable({
+        run: function () {
+          try {
+            var keys = registry.keySet().toArray();
+            for (var i = 0; i < keys.length; i++) {
+              try {
+                var entry = registry.get(keys[i]);
+                var pid = entry ? Number(entry.pid || 0) : 0;
+                if (pid > 0) {
+                  forceDestroyPidTree(pid);
+                } else if (entry && entry.process) {
+                  entry.process.destroyForcibly();
+                }
+                if (entry && entry.pidFile) { new File(String(entry.pidFile))["delete"](); }
+              } catch (_ignoreHookEntry) {}
+            }
+          } catch (_ignoreHook) {}
+        }
+      }), "convertigo-agent-bridge-shutdown");
+      java.lang.Runtime.getRuntime().addShutdownHook(hook);
+      System.setProperty(SHUTDOWN_HOOK_PROPERTY, "installed");
+      return true;
+    } catch (_ignoreShutdownHook) {
+      return false;
+    }
+  }
+
+  // The guard is a provider-agnostic Node script: `node agent-guard.cjs <ownerPid> -- <command>`.
+  // It shares its stdio with the agent, so the JSON streams are not proxied.
+  var AGENT_GUARD_VERSION = "1";
+  var AGENT_GUARD_SOURCE = [
+    "// Generated by lib_ConvertigoAgentBridge. Stops the agent when its owner process disappears.",
+    "const { spawn, spawnSync } = require('child_process');",
+    "const owner = Number(process.argv[2]);",
+    "const split = process.argv.indexOf('--');",
+    "const command = process.argv[split + 1];",
+    "const args = process.argv.slice(split + 2);",
+    "const windows = process.platform === 'win32';",
+    "const startedUnder = process.ppid;",
+    "const child = spawn(command, args, { stdio: 'inherit', windowsHide: true, detached: !windows });",
+    "let stopping = false;",
+    "function stopChild() {",
+    "  if (stopping) { return; }",
+    "  stopping = true;",
+    "  try {",
+    "    if (windows) { spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); }",
+    "    else { try { process.kill(-child.pid, 'SIGTERM'); } catch (e) { child.kill('SIGTERM'); } }",
+    "  } catch (e) {}",
+    "  setTimeout(() => {",
+    "    try { if (!windows) { process.kill(-child.pid, 'SIGKILL'); } } catch (e) {}",
+    "    process.exit(143);",
+    "  }, 1500).unref();",
+    "}",
+    "function ownerAlive() {",
+    "  if (!windows && process.ppid !== startedUnder) { return false; }",
+    "  if (!(owner > 0)) { return true; }",
+    "  try { process.kill(owner, 0); return true; } catch (e) { return e && e.code === 'EPERM'; }",
+    "}",
+    "const watch = setInterval(() => { if (!ownerAlive()) { clearInterval(watch); stopChild(); } }, 2000);",
+    "child.on('exit', (code, signal) => { clearInterval(watch); process.exit(code === null ? (signal ? 143 : 1) : code); });",
+    "child.on('error', () => { clearInterval(watch); process.exit(127); });",
+    "['SIGTERM', 'SIGINT', 'SIGHUP'].forEach(name => { try { process.on(name, stopChild); } catch (e) {} });",
+    ""
+  ].join("\n");
+
+  function agentGuardEnabled(options) {
+    var explicit = trim(options && (options.agentProcessGuard || options.processGuard));
+    if (explicit.length) {
+      return boolValue(explicit, true);
+    }
+    try {
+      var symbol = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue("agentbridge.process.guard");
+      if (symbol !== null && typeof symbol !== "undefined" && trim(String(symbol)).length) {
+        return boolValue(String(symbol), true);
+      }
+    } catch (_ignoreGuardSymbol) {}
+    return true;
+  }
+
+  // Returns the command to launch, guarded when possible. `reason` explains a missing guard so
+  // the caller can warn: a provider without guard leaks its agent when the JVM is killed.
+  function agentGuardedCommand(entry, options) {
+    var command = entry.command || [];
+    if (!agentGuardEnabled(options || entry.options || {})) {
+      return { command: command, guarded: false, reason: "disabled" };
+    }
+    var executable = trim(command[0]).toLowerCase();
+    if (isWindows() && (/\.(cmd|bat)$/).test(executable)) {
+      // Node refuses to spawn .cmd/.bat without a shell; quoting a JSON-RPC agent command
+      // through cmd.exe is not worth the risk.
+      return { command: command, guarded: false, reason: "windows_script_command" };
+    }
+    var node = null;
+    try { node = detectNodeRuntime(options || entry.options || {}); } catch (_ignoreGuardNode) {}
+    if (!node || !node.found) {
+      return { command: command, guarded: false, reason: "node_runtime_missing" };
+    }
+    var ownerPid = currentJvmPid();
+    if (!ownerPid) {
+      return { command: command, guarded: false, reason: "owner_pid_unknown" };
+    }
+    try {
+      var root = trim(entry.workspaceRoot) || engineWorkspaceRoot();
+      var script = new File(new File(new File(root, "agents"), "guard"), "agent-guard-v" + AGENT_GUARD_VERSION + ".cjs");
+      if (!script.isFile() || String(readTextFile(script)) !== AGENT_GUARD_SOURCE) {
+        ensureDirectory(script.getParentFile());
+        writeTextFile(script, AGENT_GUARD_SOURCE);
+      }
+      return { command: [node.path, filePath(script), String(ownerPid), "--"].concat(command), guarded: true, reason: "" };
+    } catch (guardError) {
+      return { command: command, guarded: false, reason: "guard_script_error: " + String(guardError) };
+    }
+  }
+
+  // Decides what to do with a live agent found through its PID file.
+  function pidRecordVerdict(record, state) {
+    record = record || {};
+    if (state.registered) {
+      return { stop: false, reason: "registered" };
+    }
+    var ownerPid = Number(record.ownerPid || 0);
+    if (ownerPid > 0 && ownerPid !== Number(state.currentPid || 0)) {
+      // Started by another JVM: stop it only once that JVM is gone.
+      return state.ownerAlive ? { stop: false, reason: "other_owner" } : { stop: true, reason: "owner_gone" };
+    }
+    var recorded = trim(record.bridgeVersion), running = trim(state.bridgeVersion);
+    if (recorded.length && running.length && recorded !== running) {
+      return { stop: true, reason: "bridge_version_changed" };
+    }
+    // Ours (or a record older than the owner field) but no longer registered: idle rule.
+    return state.maxIdleMs <= 0 || state.idleMs > state.maxIdleMs ? { stop: true, reason: "orphan" } : { stop: false, reason: "grace" };
+  }
+
+  // Provider-agnostic sweep: every agents/<provider>/app-server-pids directory.
+  function sweepAllProviderPidFiles(workspaceRoot, maxIdleMs) {
+    var result = { stopped: [], kept: [] };
+    try {
+      var root = trim(workspaceRoot) || engineWorkspaceRoot();
+      var agents = new File(root, "agents");
+      var providers = agents.isDirectory() ? agents.listFiles() : null;
+      for (var i = 0; providers !== null && i < providers.length; i++) {
+        if (!providers[i].isDirectory() || !new File(providers[i], "app-server-pids").isDirectory()) {
+          continue;
+        }
+        var swept = sweepProviderPidFiles(root, String(providers[i].getName()), maxIdleMs);
+        result.stopped = result.stopped.concat(swept.stopped);
+        result.kept = result.kept.concat(swept.kept);
+      }
+    } catch (_ignoreSweepAll) {}
+    return result;
   }
 
   function registryContainsPid(pid) {
@@ -8891,6 +9103,9 @@
       cwd: entry.cwd,
       workspaceRoot: entry.workspaceRoot || "",
       codexHome: entry.home && entry.home.path ? entry.home.path : "",
+      ownerPid: currentJvmPid(),
+      bridgeVersion: bridgeProjectVersion(),
+      guarded: entry.guarded === true,
       createdAt: entry.createdAt,
       lastAccess: entry.lastAccess,
       ttlMs: entry.ttlMillis
@@ -8931,18 +9146,22 @@
         try { file["delete"](); } catch (_ignoreDeleteDeadPidFile) {}
         continue;
       }
-      if (registryContainsPid(pid)) {
-        result.kept.push({ pid: pid, handle: record.handle || "", reason: "registered" });
-        continue;
-      }
       var lastAccess = Number(record.lastAccess || record.createdAt || file.lastModified() || 0);
-      var idle = current - lastAccess;
-      if (maxIdleMs <= 0 || idle > maxIdleMs) {
+      var ownerPid = Number(record.ownerPid || 0);
+      var verdict = pidRecordVerdict(record, {
+        registered: registryContainsPid(pid),
+        currentPid: currentJvmPid(),
+        ownerAlive: ownerPid > 0 && processHandleAlive(ownerPid),
+        bridgeVersion: bridgeProjectVersion(),
+        idleMs: current - lastAccess,
+        maxIdleMs: maxIdleMs
+      });
+      if (verdict.stop) {
         destroyPidTree(pid);
         try { file["delete"](); } catch (_ignoreDeleteStoppedPidFile) {}
-        result.stopped.push({ pid: pid, handle: record.handle || "", idleMs: idle, reason: "orphan" });
+        result.stopped.push({ pid: pid, handle: record.handle || "", idleMs: current - lastAccess, reason: verdict.reason });
       } else {
-        result.kept.push({ pid: pid, handle: record.handle || "", idleMs: idle, reason: "grace" });
+        result.kept.push({ pid: pid, handle: record.handle || "", idleMs: current - lastAccess, reason: verdict.reason });
       }
     }
     return result;
@@ -9187,6 +9406,12 @@
 
     if (message.method) {
       if (String(message.method) === "session/update") {
+        if (entry.replayingSession === true) {
+          // session/load replays the stored history as updates: it is context being restored,
+          // not a new answer, so it must not reach the conversation stream.
+          entry.replayedUpdates = Number(entry.replayedUpdates || 0) + 1;
+          return;
+        }
         normalizeSessionUpdate(entry, message.params || {});
         return;
       }
@@ -9445,17 +9670,94 @@
   }
 
   function startProcess(entry, env) {
-    var pb = new ProcessBuilder(toJavaList(entry.command));
+    ensureAgentShutdownHook();
+    var orphanSweep = sweepAllProviderPidFiles(entry.workspaceRoot || "", intValue(entry.ttlMillis, 0, 0, 86400000));
+    var guard = agentGuardedCommand(entry, entry.options || {});
+    entry.guarded = guard.guarded === true;
+    var pb = new ProcessBuilder(toJavaList(guard.command));
     pb.directory(new File(entry.cwd));
     applyEngineProxyEnvironment(pb.environment(), agentProxyTargetUrl(entry.provider, env));
     envObjectToMap(pb.environment(), env);
     entry.process = pb.start();
     entry.writer = new BufferedWriter(new OutputStreamWriter(entry.process.getOutputStream(), StandardCharsets.UTF_8));
     writeEntryPidFile(entry);
+    if (orphanSweep.stopped.length) {
+      pushEvent(entry, "system/orphans_stopped", { stopped: orphanSweep.stopped });
+    }
+    if (!entry.guarded && guard.reason !== "disabled") {
+      pushEvent(entry, "system/unguarded", {
+        phase: "process/guard",
+        reason: guard.reason,
+        message: "This agent runs without a parent-death guard (" + guard.reason + "): it will keep running if Convertigo is killed."
+      });
+    }
     entry.stdoutThread = startReaderThread(entry, entry.process.getInputStream(), "stdout");
     entry.stderrThread = startReaderThread(entry, entry.process.getErrorStream(), "stderr");
     startCodexSessionWatcher(entry);
   }
+
+  // Stops the running turn and keeps the agent process, hence the conversation context.
+  // One thin adapter per protocol sends the stop message; everything else is common. A protocol
+  // without adapter answers "unsupported" and the caller falls back to closing the process.
+  var TURN_INTERRUPT_ADAPTERS = {
+    "acp": function (entry) {
+      if (!trim(entry.sessionId).length) { return false; }
+      writeJson(entry, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: entry.sessionId } });
+      return true;
+    },
+    "codex-app-server": function (entry) {
+      if (!trim(entry.codexThreadId).length || !trim(entry.activeTurnId).length) { return false; }
+      var id = entry.nextRequestId++;
+      writeJson(entry, { jsonrpc: "2.0", id: id, method: "turn/interrupt", params: { threadId: entry.codexThreadId, turnId: entry.activeTurnId } });
+      return true;
+    },
+    "claude-stream-json": function (entry) {
+      writeJson(entry, { type: "control_request", request_id: "interrupt-" + String(UUID.randomUUID()), request: { subtype: "interrupt" } });
+      return true;
+    }
+  };
+
+  C8O.agentBridge.interrupt = function (options) {
+    options = options || {};
+    var handle = resolveHandle(options.handle);
+    if (!handle.length) {
+      return { ok: false, status: "error", error: "handle is required", timestamp: now() };
+    }
+    var entry = getRegistry().get(handle);
+    if (entry === null || typeof entry === "undefined") {
+      return { ok: false, status: "not_found", handle: handle, timestamp: now() };
+    }
+    if (!processAlive(entry.process)) {
+      return { ok: false, status: "exited", handle: handle, timestamp: now() };
+    }
+    if (entry.turnActive !== true) {
+      return { ok: true, status: "idle", handle: handle, state: statusOf(entry), timestamp: now() };
+    }
+    var adapter = TURN_INTERRUPT_ADAPTERS[String(entry.protocol)];
+    if (typeof adapter !== "function") {
+      return { ok: false, status: "unsupported", handle: handle, protocol: String(entry.protocol), timestamp: now() };
+    }
+    try {
+      if (adapter(entry) !== true) {
+        return { ok: false, status: "not_interruptible", handle: handle, timestamp: now() };
+      }
+    } catch (interruptError) {
+      return { ok: false, status: "error", handle: handle, error: String(interruptError), timestamp: now() };
+    }
+    pushEvent(entry, "turn/interrupt_requested", { protocol: String(entry.protocol) });
+    var deadline = now() + intValue(options.waitMs, 8000, 0, 30000);
+    while (entry.turnActive === true && processAlive(entry.process) && now() < deadline) {
+      try { Thread.sleep(100); } catch (_ignoreInterruptSleep) {}
+    }
+    var stopped = entry.turnActive !== true && processAlive(entry.process);
+    return {
+      ok: stopped,
+      status: stopped ? "interrupted" : (processAlive(entry.process) ? "timeout" : "exited"),
+      handle: handle,
+      state: statusOf(entry),
+      timestamp: now()
+    };
+  };
 
   C8O.agentBridge.events = function (options) {
     options = options || {};

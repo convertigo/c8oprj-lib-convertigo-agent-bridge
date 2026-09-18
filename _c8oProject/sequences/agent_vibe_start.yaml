@@ -17,6 +17,7 @@ comment: Start a long-running vibe-acp process and create an ACP session.
       vibeHomeScope: typeof vibeHomeScope === "undefined" ? "" : vibeHomeScope,
       userId: typeof userId === "undefined" ? "" : userId,
       conversationId: typeof conversationId === "undefined" ? "" : conversationId,
+      sessionId: typeof sessionId === "undefined" ? "" : sessionId,
       projectId: typeof projectId === "undefined" ? "" : projectId,
       credentialsPolicy: typeof credentialsPolicy === "undefined" ? "" : credentialsPolicy,
       autoConfigure: typeof autoConfigure === "undefined" ? "" : autoConfigure,
@@ -178,3 +179,6 @@ comment: Start a long-running vibe-acp process and create an ACP session.
 ↓llmGatewayThinking [variables.RequestableVariable-1789560000017]: 
   comment: 'Convertigo profile only: thinking level (off, low, medium, high, max), aligned on what the selected gateway model accepts.'
   description: 'Convertigo profile only: thinking level (off, low, medium, high, max), aligned on what the selected gateway model accepts.'
+↓sessionId [variables.RequestableVariable-1789800000011]: 
+  comment: Previous ACP session id of this conversation. When the harness supports it the session is reloaded, so the context survives a process restart.
+  description: Previous ACP session id of this conversation. When the harness supports it the session is reloaded, so the context survives a process restart.

@@ -1,0 +1,28 @@
+comment: Stop the running turn of an agent and keep its process, so the conversation context survives. Works for every provider; answers unsupported when the protocol has no interrupt adapter.
+responseTimeout: 60
+↓Run [steps.SimpleStep-1789800000001]: 
+  expression: |
+    'include("js/vibe_agent_bridge.js");
+    result = C8O.agentBridge.interrupt({
+      handle: typeof handle === "undefined" ? "" : handle,
+      waitMs: typeof waitMs === "undefined" ? "" : waitMs
+    });'
+↓result [steps.JsonToXmlStep-1789800000002]: 
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: result
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: result
+↓handle [variables.RequestableVariable-1789800000003]: 
+  comment: Agent handle returned by the start sequence.
+  description: Agent handle returned by the start sequence.
+↓waitMs [variables.RequestableVariable-1789800000004]: 
+  comment: How long to wait for the turn to stop, in milliseconds (default 8000).
+  description: How long to wait for the turn to stop, in milliseconds (default 8000).

@@ -280,11 +280,11 @@ console.log("Vibe image attachment contract OK");
   assert.equal(resolveVibeProfile({ agentMode: "gateway" }), "convertigo");
   assert.equal(withVibeProfile({ provider: "convertigo" }, "convertigo").provider, "vibe");
   const spec = vibeGatewayModelSpec({});
-  assert.equal(spec.name, "mistral/zai-glm-5-2");
-  assert.equal(spec.alias, "glm-5-2");
+  assert.equal(spec.name, "mistral/zai-glm-5-3", "the fallback model when the gateway cannot be listed");
+  assert.equal(spec.alias, "glm-5-3");
   assert.equal(spec.provider, "convertigo");
   assert.equal(spec.thinking, "high", "thinking is on by default; an unprobed model gets a level every known model accepts");
-  assert.equal(vibeGatewayModelSpec({ gatewayModelEfforts: { "mistral/zai-glm-5-2": ["low", "medium", "high", "max"] } }).thinking, "medium");
+  assert.equal(vibeGatewayModelSpec({ gatewayModelIds: ["mistral/zai-glm-5-2"], gatewayModelEfforts: { "mistral/zai-glm-5-2": ["low", "medium", "high", "max"] } }).thinking, "medium");
   assert.equal(vibeGatewayModelSpec({ llmGatewayThinking: "off" }).thinking, "");
   assert.equal(vibeGatewayModelSpec({ llmGatewayThinking: "high" }).thinking, "high");
   assert.equal(convertigoGatewayUrl({ llmGatewayUrl: "https://gw.example/v1/" }), "https://gw.example/v1");
@@ -475,8 +475,9 @@ console.log("Vibe image attachment contract OK");
   assert.equal(again.text, upgraded.text, "idempotent");
   // A fresh config gets both, newest first.
   const fresh = migrateManagedVibeModelPresets('active_model = "vibe-thinking"\n');
-  assert.deepEqual(fresh.addedPresets, ["glm-5-3", "glm-5-2"]);
-  assert.ok(fresh.text.indexOf("zai-glm-5-3") < fresh.text.indexOf("zai-glm-5-2"));
+  assert.deepEqual(fresh.addedPresets, ["glm-5-3"], "only the current GLM is pushed to new homes");
+  assert.doesNotMatch(fresh.text, /zai-glm-5-2/);
+  assert.equal(vibeModelSpec("glm-5-2").name, "zai-glm-5-2", "GLM 5.2 stays resolvable for conversations that still use it");
 
   // Same per-model thinking levels as through the gateway.
   const acp = [
@@ -488,4 +489,60 @@ console.log("Vibe image attachment contract OK");
   assert.equal(byId["glm-5-3"].defaultReasoning, "high");
   assert.deepEqual(byId["mistral-medium-3.5"].reasoningLevels.map(l => l.id), ["off", "low", "medium", "high", "max"], "other Vibe models are untouched");
   assert.equal(byId["mistral-medium-3.5"].defaultReasoning, "medium");
+}
+
+// Agent process lifecycle: common to every provider.
+{
+  assert.equal(entryUsesPidTree({ protocol: "acp", process: {} }), true, "ACP agents (Vibe) are tracked too");
+  assert.equal(entryUsesPidTree({ protocol: "some-future-protocol", process: {} }), true, "a new provider is tracked with no specific code");
+  assert.equal(entryUsesPidTree({ protocol: "acp", process: null }), false);
+
+  const mine = { currentPid: 100, bridgeVersion: "0.4.17", maxIdleMs: 60000, idleMs: 1000, ownerAlive: false, registered: false };
+  assert.deepEqual(pidRecordVerdict({ ownerPid: 100, bridgeVersion: "0.4.17" }, Object.assign({}, mine, { registered: true })), { stop: false, reason: "registered" });
+  assert.deepEqual(pidRecordVerdict({ ownerPid: 77, bridgeVersion: "0.4.17" }, mine), { stop: true, reason: "owner_gone" }, "the JVM that started it was killed");
+  assert.deepEqual(pidRecordVerdict({ ownerPid: 77 }, Object.assign({}, mine, { ownerAlive: true })), { stop: false, reason: "other_owner" }, "another live Convertigo on the same workspace keeps its agents");
+  assert.deepEqual(pidRecordVerdict({ ownerPid: 100, bridgeVersion: "0.4.16" }, mine), { stop: true, reason: "bridge_version_changed" });
+  assert.deepEqual(pidRecordVerdict({ ownerPid: 100, bridgeVersion: "0.4.17" }, mine), { stop: false, reason: "grace" });
+  assert.deepEqual(pidRecordVerdict({ ownerPid: 100, bridgeVersion: "0.4.17" }, Object.assign({}, mine, { idleMs: 90000 })), { stop: true, reason: "orphan" });
+  assert.deepEqual(pidRecordVerdict({}, Object.assign({}, mine, { idleMs: 90000 })), { stop: true, reason: "orphan" }, "records written before the owner field follow the idle rule");
+
+  // One launch point applies every layer.
+  const launch = commonSource.match(/function startProcess\(entry, env\) \{[\s\S]*?\n  \}/)[0];
+  for (const layer of ["ensureAgentShutdownHook()", "sweepAllProviderPidFiles(", "agentGuardedCommand(entry", "writeEntryPidFile(entry)", "system/unguarded"]) {
+    assert.ok(launch.includes(layer), layer);
+  }
+  assert.match(commonSource, /addShutdownHook\(hook\)/);
+  // The guard script itself is valid JavaScript and watches both the owner pid and re-parenting.
+  const guardLines = eval("[" + commonSource.match(/var AGENT_GUARD_SOURCE = \[([\s\S]*?)\]\.join\("\\n"\);/)[1] + "]");
+  new vm.Script(guardLines.join("\n"));
+  assert.ok(guardLines.some(l => l.includes("process.ppid !== startedUnder")) && guardLines.some(l => l.includes("process.kill(owner, 0)")));
+  assert.equal(agentGuardedCommand({ command: ["vibe-acp"] }, { agentProcessGuard: "false" }).reason, "disabled");
+}
+
+// Stop interrupts the turn and keeps the agent; one thin adapter per protocol.
+{
+  const written = [];
+  const fakeEntry = (protocol, extra) => Object.assign({ protocol, turnActive: true, nextRequestId: 7, nextIndex: 0, firstIndex: 0,
+    events: { add() {}, size: () => 0, remove() {} }, writer: { write: t => written.push(JSON.parse(t)), newLine() {}, flush() {} } }, extra);
+  assert.equal(TURN_INTERRUPT_ADAPTERS["acp"](fakeEntry("acp", { sessionId: "s-1" })), true);
+  assert.deepEqual(written.pop(), { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "s-1" } }, "ACP cancel is a notification: no id");
+  assert.equal(TURN_INTERRUPT_ADAPTERS["acp"](fakeEntry("acp", { sessionId: "" })), false);
+  assert.equal(TURN_INTERRUPT_ADAPTERS["codex-app-server"](fakeEntry("codex-app-server", { codexThreadId: "t-1", activeTurnId: "turn-9" })), true);
+  assert.deepEqual(written.pop(), { id: 7, method: "turn/interrupt", params: { threadId: "t-1", turnId: "turn-9" } });
+  assert.equal(TURN_INTERRUPT_ADAPTERS["claude-stream-json"](fakeEntry("claude-stream-json", {})), true);
+  assert.equal(written.pop().request.subtype, "interrupt");
+  assert.equal(typeof TURN_INTERRUPT_ADAPTERS["some-future-protocol"], "undefined", "a new provider answers unsupported until it gets an adapter");
+
+  // The common turn flag follows the three events every provider emits.
+  const entry = fakeEntry("acp", { turnActive: false });
+  pushEvent(entry, "turn/start", {}); assert.equal(entry.turnActive, true);
+  pushEvent(entry, "session/update", {}); assert.equal(entry.turnActive, true);
+  pushEvent(entry, "turn/end", {}); assert.equal(entry.turnActive, false);
+  pushEvent(entry, "turn/start", {}); pushEvent(entry, "turn/error", {}); assert.equal(entry.turnActive, false);
+
+  // A restarted Vibe process reloads the conversation and hides the replayed history.
+  assert.match(vibeSource, /entry\.init\.agentCapabilities\.loadSession === true/);
+  assert.match(vibeSource, /acpRequest\(entry, "session\/load", \{\s*sessionId: previousSessionId/);
+  assert.match(vibeSource, /finally \{\s*entry\.replayingSession = false;/);
+  assert.match(commonSource, /if \(entry\.replayingSession === true\) \{[\s\S]*?return;\s*\}\s*normalizeSessionUpdate/);
 }

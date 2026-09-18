@@ -487,11 +487,43 @@
         }
       }, timeoutMs);
 
-      entry.phase = "session/new";
-      entry.session = acpRequest(entry, "session/new", {
-        cwd: cwd,
-        mcpServers: buildMcpServers(mcpEndpoint, options)
-      }, timeoutMs);
+      // A conversation whose agent process died (restart, crash, idle sweep) gets its context
+      // back when the harness can reload a session; otherwise, or on failure, a new one starts.
+      var previousSessionId = trim(options.sessionId || options.externalSessionId || options.vibeSessionId);
+      var canLoadSession = !!(entry.init && entry.init.agentCapabilities && entry.init.agentCapabilities.loadSession === true);
+      entry.session = null;
+      if (previousSessionId.length && canLoadSession) {
+        entry.phase = "session/load";
+        entry.replayingSession = true;
+        try {
+          var loaded = acpRequest(entry, "session/load", {
+            sessionId: previousSessionId,
+            cwd: cwd,
+            mcpServers: buildMcpServers(mcpEndpoint, options)
+          }, timeoutMs);
+          entry.session = loaded || {};
+          entry.session.sessionId = previousSessionId;
+          entry.sessionRestored = true;
+        } catch (loadError) {
+          entry.session = null;
+          pushEvent(entry, "warning", {
+            phase: "session/load",
+            message: "The previous agent session could not be reloaded, starting a new one: " + String(loadError)
+          });
+        } finally {
+          entry.replayingSession = false;
+        }
+        if (entry.sessionRestored === true) {
+          pushEvent(entry, "session/restored", { sessionId: previousSessionId, replayedUpdates: Number(entry.replayedUpdates || 0) });
+        }
+      }
+      if (entry.session === null) {
+        entry.phase = "session/new";
+        entry.session = acpRequest(entry, "session/new", {
+          cwd: cwd,
+          mcpServers: buildMcpServers(mcpEndpoint, options)
+        }, timeoutMs);
+      }
       entry.sessionId = String(entry.session.sessionId || entry.session.session_id || "");
       var sessionProvider = vibeSettings({
         vibeProfile: resolveVibeProfile(options),
