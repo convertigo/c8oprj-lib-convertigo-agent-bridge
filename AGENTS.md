@@ -255,6 +255,44 @@ same context.
   `[mcp_servers.playwright]` starts `@playwright/mcp` against the visible viewer
   instead of opening a separate browser.
 
+## Who owns the managed MCP url (contract with lib_ConvertigoMCP)
+
+Two independently released projects write the same `[[mcp_servers]]` entry of
+the managed Vibe `config.toml`: this Bridge writes the file, then calls
+`lib_ConvertigoMCP._setupVibe` through `installAgentSkills`, so the MCP project
+always runs last on it.
+
+**The Bridge owns the `url` of that entry.** It is built by
+`vibeMcpTransportEndpoint` in `js/agent_bridge_common.js` and looks like:
+
+```
+http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersion=<guidance>&toolsRevision=<hash>
+```
+
+- `from_bridge=true` is the ownership marker. `_setupVibe` (and `_setupCodex` /
+  `_setupClaude`) must leave a marked url byte for byte alone. They still repair
+  everything else in the entry: `tool_timeout_sec`, `[mcp_servers.auth]`, the
+  `X-Convertigo-Guidance-Version` header, the `[tools.*]` permissions.
+- Without the marker the MCP setup keeps its previous behaviour and rewrites the
+  url to its own `?jsonOnly=true` form. That is deliberate: it still repairs a
+  stale or hand-written entry, and an older Bridge paired with a newer MCP
+  behaves exactly as it does today.
+- A newer Bridge paired with an older MCP simply gets its url clobbered again,
+  as before. Nothing crashes; only the cache-busting is lost.
+- The marker is inert server side. `_c8oProject/sequences/mcp_endpoint.yaml`
+  reads only `request`, `jsonOnly` and — as a fallback when the
+  `X-Convertigo-Guidance-Version` header is absent — `descriptorVersion`. The
+  `/api/mcp` URL mapper maps `request` and `jsonOnly` only, and ignores every
+  other query parameter. Verified live: the same `tools/call` with and without
+  `from_bridge=true` returns byte-identical responses, guidance handshake
+  included.
+- Why the url has to survive: Vibe caches the MCP tool catalog for 24 h under
+  sha256 of the serialized server entry. `toolsRevision` (MCP project version +
+  hash of the source skill) is the only lever that invalidates that cache under
+  an existing home, and it only works if it is still in the file Vibe reads.
+- Covered by `tests/agent_bridge_runtime.test.js` here, and by
+  `tests/scripts/validate_setup_vibe_config.js` on the MCP side.
+
 ## Vibe Integration
 
 - Keep `resolveVibeProfile` distinct from the public `vibeProfile` sequence

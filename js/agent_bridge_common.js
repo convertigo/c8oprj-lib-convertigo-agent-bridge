@@ -997,10 +997,28 @@
     return parts.length ? hashShort(parts.join(":")) : "";
   }
 
+  // Ownership marker of the managed Vibe MCP url (cross-project contract with
+  // lib_ConvertigoMCP, see AGENTS.md "Who owns the managed MCP url"). `_setupVibe`
+  // runs AFTER the Bridge wrote config.toml and used to rewrite the url to its
+  // own `?jsonOnly=true` form, dropping descriptorVersion and toolsRevision.
+  // When it finds this marker it leaves the url alone and still repairs
+  // everything else it owns in the entry. An MCP that predates the contract
+  // ignores the marker and clobbers the url exactly as before: no crash, just
+  // today's behaviour. The parameter is inert server side (mcp_endpoint only
+  // reads `request`, `jsonOnly` and, as a fallback, `descriptorVersion`).
+  var VIBE_MCP_URL_OWNER_PARAMETER = "from_bridge";
+
   function vibeMcpTransportEndpoint(endpoint, options) {
     // Vibe's MCP client requires standard text content alongside structuredContent.
+    // The marker is added first so it reads right after jsonOnly, before the two
+    // long opaque values.
     var url = endpointQueryParameter(
       mcpTransportEndpoint(endpoint, false),
+      VIBE_MCP_URL_OWNER_PARAMETER,
+      "true"
+    );
+    url = endpointQueryParameter(
+      url,
       "descriptorVersion",
       mcpProjectGuidanceVersion()
     );

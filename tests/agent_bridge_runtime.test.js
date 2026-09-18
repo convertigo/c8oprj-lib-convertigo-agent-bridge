@@ -467,7 +467,7 @@ assert.equal(
 );
 assert.equal(
   vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp?transport=managed&jsonOnly=true#viewer"),
-  "http://localhost:18082/convertigo/api/mcp?transport=managed&jsonOnly=false&descriptorVersion=2026-09-04.vibe-serial-transport-v1#viewer"
+  "http://localhost:18082/convertigo/api/mcp?transport=managed&jsonOnly=false&from_bridge=true&descriptorVersion=2026-09-04.vibe-serial-transport-v1#viewer"
 );
 // Vibe caches the MCP tool catalog for 24 h under sha256 of the serialized
 // server entry, so the deployed catalog identity has to travel in the URL or a
@@ -476,12 +476,56 @@ const originalManagedMcpCatalogRevision = managedMcpCatalogRevision;
 managedMcpCatalogRevision = () => "a1b2c3";
 assert.equal(
   vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp"),
-  "http://localhost:18082/convertigo/api/mcp?jsonOnly=false&descriptorVersion=2026-09-04.vibe-serial-transport-v1&toolsRevision=a1b2c3"
+  "http://localhost:18082/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersion=2026-09-04.vibe-serial-transport-v1&toolsRevision=a1b2c3"
 );
 assert.equal(
   vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp?transport=managed#viewer"),
-  "http://localhost:18082/convertigo/api/mcp?transport=managed&jsonOnly=false&descriptorVersion=2026-09-04.vibe-serial-transport-v1&toolsRevision=a1b2c3#viewer",
+  "http://localhost:18082/convertigo/api/mcp?transport=managed&jsonOnly=false&from_bridge=true&descriptorVersion=2026-09-04.vibe-serial-transport-v1&toolsRevision=a1b2c3#viewer",
   "the cache-busting parameter must stay inside the query, before the fragment"
+);
+// --- ownership marker (cross-project contract with lib_ConvertigoMCP) -------
+// `_setupVibe` runs after the Bridge wrote config.toml. Without this marker it
+// rewrote the url to its own `?jsonOnly=true` form and dropped descriptorVersion
+// and toolsRevision, so the cache-busting parameter never reached the runtime.
+for (const endpoint of [
+  "http://localhost:18082/convertigo/api/mcp",
+  "http://localhost:18082/convertigo/api/mcp?transport=managed#viewer",
+  "http://localhost:18082/convertigo/api/mcp?jsonOnly=true"
+]) {
+  assert.match(
+    vibeMcpTransportEndpoint(endpoint),
+    /[?&]from_bridge=true(&|#|$)/,
+    "every managed Vibe MCP url must claim Bridge ownership, or _setupVibe rewrites it"
+  );
+}
+// Idempotent: a home rewritten from its own previous url must not accumulate markers.
+assert.equal(
+  vibeMcpTransportEndpoint(vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp")),
+  vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp"),
+  "the ownership marker must be set, not appended"
+);
+// The marker travels in config.toml and on the session-level server alike.
+{
+  const originalWriteTextFile = writeTextFile, originalEnsureDirectory = ensureDirectory;
+  let writtenConfig = "";
+  writeTextFile = (_file, text) => { writtenConfig = String(text); };
+  ensureDirectory = () => {};
+  try {
+    writeLocalVibeConfig("/managed/vibe-home", "http://localhost:18082/convertigo/api/mcp", "glm-5-3", {});
+  } finally {
+    writeTextFile = originalWriteTextFile;
+    ensureDirectory = originalEnsureDirectory;
+  }
+  assert.match(
+    writtenConfig,
+    /^url = "[^"]*[?&]from_bridge=true[^"]*"$/m,
+    "the url written to config.toml must carry the ownership marker"
+  );
+}
+assert.match(
+  buildMcpServers("http://localhost:18082/convertigo/api/mcp")[0].url,
+  /[?&]from_bridge=true(&|#|$)/,
+  "the session-level server url must carry the marker too, or the two entries diverge"
 );
 const firstRevisionEndpoint = vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp");
 managedMcpCatalogRevision = () => "d4e5f6";
@@ -605,7 +649,7 @@ const managedTokenEnvironment = applyManagedMcpEnvironment({}, {
 assert.equal(managedTokenEnvironment.CONVERTIGO_MCP_TOKEN, "shared-jwt");
 assert.equal(
   buildMcpServers("http://localhost:18082/convertigo/api/mcp")[0].url,
-  "http://localhost:18082/convertigo/api/mcp?jsonOnly=false&descriptorVersion=2026-09-04.vibe-serial-transport-v1"
+  "http://localhost:18082/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersion=2026-09-04.vibe-serial-transport-v1"
 );
 assert.deepEqual(
   buildMcpServers("http://localhost:18082/convertigo/api/mcp", { mcpBearerToken: "managed-jwt" })[0].headers,
