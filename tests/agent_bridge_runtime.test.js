@@ -265,15 +265,88 @@ assert.equal(flowProjectLookups, 0, "unsupported Studio versions must not inspec
 assert.match(commonSource, /getAllProjectNamesList\(false\)/);
 engineProductVersion = originalEngineProductVersion;
 projectDirectoryByName = originalProjectDirectoryByName;
-assert.match(commonSource, /Bootstrap is required once per agent conversation/);
-assert.match(commonSource, /already used successfully in the current conversation/);
-assert.match(commonSource, /Common NGX contracts that do not require palette discovery/);
-assert.match(commonSource, /Never recursively search a drive root, user profile, workspace root/);
-assert.match(commonSource, /stateOnly:true, wait:true, timeoutSec:180/);
-assert.match(commonSource, /preserve the complete existing string and every `Begin_c8o_/);
-assert.match(commonSource, /must match `\[A-Za-z_\$\]\[A-Za-z0-9_\$\]\*`/);
-assert.match(commonSource, /optimizeMutations:true/);
-assert.match(commonSource, /Do not inspect `ALL_TOOLS`/);
+// The Convertigo skill doctrine has exactly one producer, the lib_ConvertigoMCP
+// project. The bridge used to carry a full second copy of it in its fallback
+// skill generators, which drifted and could install stale doctrine. Assert that
+// no copy came back rather than asserting a copy stays in sync.
+for (const doctrine of [
+  /Bootstrap is required once per agent conversation/,
+  /already used successfully in the current conversation/,
+  /Common NGX contracts that do not require palette discovery/,
+  /Never recursively search a drive root, user profile, workspace root/,
+  /stateOnly:true, wait:true, timeoutSec:180/,
+  /preserve the complete existing string and every `Begin_c8o_/,
+  /must match `\[A-Za-z_\$\]\[A-Za-z0-9_\$\]\*`/,
+  /optimizeMutations:true/,
+  /Do not inspect `ALL_TOOLS`/,
+  /convertigo:\/\/resources\/convertigo-crud-fastpath/
+]) {
+  assert.doesNotMatch(commonSource, doctrine,
+    `the bridge must not duplicate lib_ConvertigoMCP skill doctrine: ${doctrine}`);
+}
+
+// The fallback skill must say it is not the current guidance and must route the
+// user back to the setup sequence instead of asserting a guidance version.
+assert.match(commonSource, /This skill is NOT the current Convertigo guidance and carries no guidance version/);
+assert.match(commonSource, /function buildManagedFallbackSkill/);
+
+// Single producer for the guidance version: the bridge executes the MCP
+// project's own guidance_version.js instead of hard-coding a constant.
+assert.match(commonSource, /function mcpProjectGuidanceVersion/);
+assert.match(commonSource, /MCP_GUIDANCE_VERSION_FALLBACK/);
+assert.doesNotMatch(commonSource, /var MCP_GUIDANCE_VERSION\s*=/,
+  "the bridge must not keep its own hard-coded guidance version constant");
+// descriptorVersion, the Codex/Claude header and the preflight note all read the
+// produced value.
+assert.match(commonSource, /"descriptorVersion",\s*\n\s*mcpProjectGuidanceVersion\(\)/);
+assert.match(commonSource, /Current Convertigo guidance version: " \+ mcpProjectGuidanceVersion\(\)/);
+
+// --- guidance version behaviour -------------------------------------------
+// This harness has no lib_ConvertigoMCP project (every java File probe answers
+// false), so the resolver must degrade to the documented fallback instead of
+// throwing or returning an empty string.
+const resolvedGuidanceVersion = mcpProjectGuidanceVersion();
+assert.equal(typeof resolvedGuidanceVersion, "string");
+assert.ok(resolvedGuidanceVersion.length > 0, "a guidance version must always be resolvable");
+assert.equal(resolvedGuidanceVersion, "2026-09-04.vibe-serial-transport-v1",
+  "without lib_ConvertigoMCP the bridge keeps the legacy constant so an older MCP still matches");
+
+// Stability guard against a config rewrite loop: vibeStart reuses config.toml
+// only when the descriptorVersion it carries still equals the expected one, so
+// a resolver that answered differently on two consecutive calls would rewrite
+// config.toml and drop the Vibe MCP descriptor cache at every start.
+assert.equal(mcpProjectGuidanceVersion(), resolvedGuidanceVersion);
+assert.equal(mcpProjectGuidanceVersion(), resolvedGuidanceVersion);
+
+// The Vibe MCP URL must publish exactly the resolved version: any other value
+// makes every guarded tool call answer mcp_guidance_version_mismatch.
+const vibeEndpoint = vibeMcpTransportEndpoint("http://localhost:18082/convertigo/api/mcp", {});
+assert.match(vibeEndpoint, /[?&]descriptorVersion=/);
+assert.equal(
+  decodeURIComponent(/[?&]descriptorVersion=([^&]*)/.exec(vibeEndpoint)[1]),
+  resolvedGuidanceVersion,
+  "descriptorVersion must track the resolved guidance version, not a private constant"
+);
+
+// The Codex/Claude header uses the same producer, including when no home is known.
+assert.equal(codexSkillGuidanceVersion("", {}), resolvedGuidanceVersion);
+
+// --- fallback skills carry no doctrine and no guidance version -------------
+for (const fallback of [
+  buildConvertigoGeneralistSkill("http://localhost:18082/convertigo/api/mcp"),
+  buildConvertigoNoCodeSkill("http://localhost:18082/convertigo/api/mcp")
+]) {
+  assert.doesNotMatch(fallback, /^- Skill guidance version:/m,
+    "a fallback skill must never claim a guidance version it did not get from the MCP project");
+  assert.match(fallback, /NOT the current Convertigo guidance/);
+  assert.match(fallback, /lib_ConvertigoMCP/);
+  assert.match(fallback, /Convertigo MCP is the only authoring surface/);
+  assert.match(fallback, /http:\/\/localhost:18082\/convertigo\/api\/mcp/);
+  // Small by construction: the old copies were ~12 KB of duplicated doctrine.
+  assert.ok(fallback.length < 3000, `fallback skill must stay minimal, got ${fallback.length} chars`);
+}
+assert.match(buildConvertigoGeneralistSkill("http://x/mcp"), /^name: convertigo-generalist$/m);
+assert.match(buildConvertigoNoCodeSkill("http://x/mcp"), /^name: convertigo-nocode$/m);
 assert.equal(resolvePlaywrightMcpCdpEndpoint({ viewerDebugPort: 40811 }), "http://127.0.0.1:40811");
 
 const revealModePrompt = withRevealModePrompt("Build a Flow frontend", true);

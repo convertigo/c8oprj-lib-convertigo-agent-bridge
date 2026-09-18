@@ -1801,7 +1801,7 @@
         claudeSessionId: entry.sessionId,
         preflight: {
           setupStatus: managedPreflightCurrent ? "current" : "unverified",
-          guidanceVersion: MCP_GUIDANCE_VERSION,
+          guidanceVersion: mcpProjectGuidanceVersion(),
           skillBundle: entry.managedSkillBundle || null,
           mcpEndpoint: trim(entry.mcpEndpoint)
         },

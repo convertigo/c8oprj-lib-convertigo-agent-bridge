@@ -17,7 +17,13 @@
   var MAX_EVENT_BUFFER = 5000;
   var NOCODE_MCP_TOKEN_ENV = "C8O_NOCODE_MCP_TOKEN";
   var MCP_TOKEN_ENV = "CONVERTIGO_MCP_TOKEN";
-  var MCP_GUIDANCE_VERSION = "2026-09-04.vibe-serial-transport-v1";
+  // Last-resort value only. The guidance version has exactly one producer, the
+  // lib_ConvertigoMCP project, which computes it from the content of the skill
+  // sources (see js/guidance_version.js there). This constant is used only when
+  // that project is missing or too old to expose a computable version, so an
+  // older lib_ConvertigoMCP that still ships the hard-coded constant keeps
+  // working. Never edit it to "refresh" guidance: it no longer drives anything.
+  var MCP_GUIDANCE_VERSION_FALLBACK = "2026-09-04.vibe-serial-transport-v1";
   var MCP_CATALOG_PROJECT = "lib_ConvertigoMCP";
   // GLM 5.2 routed through the Mistral account has no vision: Mistral answers
   // "Image input is not enabled for this model" (400, code 3051) when an image
@@ -769,7 +775,7 @@
     var lines = [
       marker + ":",
       "- Scoped agent setup status: current.",
-      "- Current Convertigo guidance version: " + MCP_GUIDANCE_VERSION + ".",
+      "- Current Convertigo guidance version: " + mcpProjectGuidanceVersion() + ".",
       "- Do not call `_setupCodex`, do not update the global Codex home, and do not repeat setup for this turn.",
       "- Treat guidance mismatch warnings from earlier conversation turns as stale. React only if a current Convertigo MCP call returns a new mismatch warning."
     ];
@@ -874,7 +880,7 @@
     var url = endpointQueryParameter(
       mcpTransportEndpoint(endpoint, false),
       "descriptorVersion",
-      MCP_GUIDANCE_VERSION
+      mcpProjectGuidanceVersion()
     );
     // Deliberately a separate parameter: the MCP compares descriptorVersion
     // byte for byte against its own guidance version and would report
@@ -1488,6 +1494,109 @@
     return null;
   }
 
+  // --- Guidance version: one producer, lib_ConvertigoMCP ---------------------
+  //
+  // The MCP project computes its guidance version from the content of the skill
+  // sources. The bridge must publish exactly that value (Vibe descriptorVersion,
+  // X-Convertigo-Guidance-Version header, preflight note, generated skills), or
+  // every guarded tool call answers mcp_guidance_version_mismatch.
+  //
+  // Rather than reimplementing the fingerprint, we execute the MCP project's own
+  // js/guidance_version.js with the catalog accessors it expects, bound to that
+  // project directory. Same file, same algorithm, same inputs: no second
+  // producer to keep in sync. An older lib_ConvertigoMCP whose file simply
+  // assigns the old constant returns that constant, which is the wanted
+  // behaviour.
+  //
+  // The result is cached per engine run and keyed on the size/mtime of the
+  // source file. It must stay stable inside one run and across restarts: the
+  // Vibe config reuse check in vibeStart compares the descriptorVersion carried
+  // by config.toml, so a value that flapped between two sources would rewrite
+  // config.toml (and drop the MCP descriptor cache) at every single start.
+  var mcpGuidanceVersionCache = { stamp: "", value: "" };
+
+  function mcpProjectDirectory() {
+    var dir = projectDirectoryByName(MCP_CATALOG_PROJECT);
+    if (dir !== null && dir.isDirectory()) {
+      return dir;
+    }
+    var home = String(System.getProperty("user.home"));
+    var candidates = [
+      new File(home, "git/c8oprj-lib-c8o-mcp"),
+      new File(home, "git/c8oprj-convertigo-mcp")
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      if (candidates[i].isDirectory()) {
+        return candidates[i];
+      }
+    }
+    return null;
+  }
+
+  function evaluateMcpGuidanceVersion(projectDir) {
+    var source = new File(new File(projectDir, "js"), "guidance_version.js");
+    if (!source.isFile()) {
+      return "";
+    }
+    var text = trim(readTextFile(source));
+    if (!text.length) {
+      return "";
+    }
+    // Rhino: a Function body sees its parameters instead of the bridge globals,
+    // so the MCP file resolves its catalog reads against the MCP project.
+    var evaluator = new Function(
+      "C8O",
+      "include",
+      "c8oResolveCatalogDirectory",
+      "c8oReadCatalogFile",
+      text + "\nreturn C8O.MCP_GUIDANCE_VERSION;"
+    );
+    var resolveDirectory = function (folderName) {
+      return new File(projectDir, String(folderName == null ? "" : folderName));
+    };
+    var readCatalogFile = function (folderName, fileName) {
+      var file = new File(resolveDirectory(folderName), String(fileName == null ? "" : fileName));
+      if (!file.isFile()) {
+        throw new Error("Catalog file not found: " + filePath(file));
+      }
+      return readTextFile(file);
+    };
+    var version = trim(evaluator({}, function () {}, resolveDirectory, readCatalogFile));
+    // ".unresolved" means the MCP file could not read its own sources; it is not
+    // a usable version and must not be published.
+    return /\.unresolved$/.test(version) ? "" : version;
+  }
+
+  function mcpProjectGuidanceVersion() {
+    var projectDir = mcpProjectDirectory();
+    if (projectDir === null) {
+      return MCP_GUIDANCE_VERSION_FALLBACK;
+    }
+    var source = new File(new File(projectDir, "js"), "guidance_version.js");
+    var stamp = "";
+    try {
+      stamp = filePath(source) + "@" + String(source.length()) + "@" + String(source.lastModified());
+    } catch (_ignoreGuidanceStamp) {
+      stamp = "";
+    }
+    if (stamp.length && mcpGuidanceVersionCache.stamp === stamp && trim(mcpGuidanceVersionCache.value).length) {
+      return mcpGuidanceVersionCache.value;
+    }
+    var version = "";
+    try {
+      version = evaluateMcpGuidanceVersion(projectDir);
+    } catch (_ignoreGuidanceEvaluation) {
+      version = "";
+    }
+    if (!version.length) {
+      return MCP_GUIDANCE_VERSION_FALLBACK;
+    }
+    if (stamp.length) {
+      mcpGuidanceVersionCache = { stamp: stamp, value: version };
+    }
+    return version;
+  }
+
   function numericVersionParts(value) {
     var match = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(trim(value));
     if (match === null) {
@@ -1957,7 +2066,7 @@
 
   function normalizeNoCodeSkillContent(content, mcpEndpoint) {
     var text = String(content == null ? "" : content);
-    var versionLine = "- Skill guidance version: `" + MCP_GUIDANCE_VERSION + "`.";
+    var versionLine = "- Skill guidance version: `" + mcpProjectGuidanceVersion() + "`.";
     var endpointLine = "- Expected MCP endpoint: `" + trim(mcpEndpoint) + "`.";
     if (/^- Skill guidance version: `[^`]*`\./m.test(text)) {
       text = text.replace(/^- Skill guidance version: `[^`]*`\./m, versionLine);
@@ -2656,9 +2765,17 @@
   }
 
   function codexSkillGuidanceVersion(homePath, options) {
+    // The MCP project is the producer, so its current value wins over the copy
+    // installed in the home: skills are synchronized after the config is
+    // written, so the home copy is one session behind and would make the header
+    // disagree with the server on the very first guarded call.
+    var produced = trim(mcpProjectGuidanceVersion());
+    if (produced.length && produced !== MCP_GUIDANCE_VERSION_FALLBACK) {
+      return produced;
+    }
     var home = trim(homePath);
     if (!home.length) {
-      return MCP_GUIDANCE_VERSION;
+      return produced.length ? produced : MCP_GUIDANCE_VERSION_FALLBACK;
     }
     var preferred = managedSkillSlug(normalizeSkillProfile(options || {}));
     var slugs = [preferred, "convertigo-generalist", "convertigo-nocode"];
@@ -2676,7 +2793,7 @@
         return trim(match[1]);
       }
     }
-    return MCP_GUIDANCE_VERSION;
+    return MCP_GUIDANCE_VERSION_FALLBACK;
   }
 
   function patchCodexMcpConfigText(existingText, mcpEndpoint, options, homePath) {
@@ -2941,199 +3058,64 @@
     };
   }
 
-  function convertigoGeneralistReferenceLines() {
-    return [
-      "- `convertigo://capabilities` - Convertigo MCP capabilities: Core MCP capabilities and recommended authoring flow.",
-      "- `convertigo://recipes/quickstart` - Convertigo MCP quickstart recipes: Minimal MCP-first recipes for fast project delivery.",
-      "- `convertigo://resources/convertigo-start` - Convertigo Start Guide: Canonical entry guide for tree-first Convertigo MCP work.",
-      "- `convertigo://resources/convertigo-crud-fastpath` - Convertigo CRUD Fast Path: Recommended mono-agent path for deterministic SQL CRUD plus starter NGX UI work.",
-      "- `convertigo-quickstart` - Convertigo MCP Quickstart: Bootstrap guide selection and route standard SQL CRUD + starter NGX work to the fast path.",
-      "- `convertigo-crud-fastpath` - Convertigo CRUD Fast Path: Recommended mono-agent rail for deterministic SQL CRUD plus starter NGX UI work."
-    ];
-  }
-
-  function buildConvertigoGeneralistSkill(mcpEndpoint) {
+  // Minimal, doctrine-free fallbacks.
+  //
+  // These are reached only when lib_ConvertigoMCP could not produce the skill
+  // (project not loaded, setup sequence failed). They used to carry a full copy
+  // of the Convertigo skill, which drifted from the MCP project and could
+  // silently install stale doctrine that contradicted the live guides. They now
+  // state only what is certainly true without the MCP project, and point at the
+  // setup sequence that installs the real skill.
+  function buildManagedFallbackSkill(slug, description, title, mcpEndpoint, setupSequence) {
     return [
       "---",
-      "name: convertigo-generalist",
-      "description: Bootstrap Codex for general Convertigo work. Use it to discover Convertigo MCP guides first, choose between exploratory work and the CRUD fast path, and apply the correct naming and viewer rules.",
+      "name: " + slug,
+      "description: " + description,
       "---",
       "",
-      "# Convertigo Generalist",
+      "# " + title,
       "",
-      "Use this skill for general Convertigo work. Keep it procedural and rely on the MCP guides for the detailed knowledge.",
+      "This is a reduced fallback skill. The full Convertigo skill could not be produced by the `" + MCP_CATALOG_PROJECT + "` project on this Studio, so only the invariants that do not depend on it are stated here.",
       "",
       "## Skill freshness",
       "",
-      "- Skill guidance version: `" + MCP_GUIDANCE_VERSION + "`.",
-      "- During bootstrap, compare this value with `MCP guidance version` in `convertigo://capabilities`. If the MCP value differs or is missing, treat the installed skill and MCP endpoint as out of sync; rerun the Studio Codex setup for the current MCP endpoint or ask before project mutation.",
-      "- When the caller surface supports MCP request metadata, send `params._meta.convertigoGuidanceVersion` with this skill guidance version on the first guarded Convertigo `tools/call`; raw HTTP clients may use the `X-Convertigo-Guidance-Version` header. An `_meta.convertigoGuidanceWarning` mismatch requires setup refresh before project mutation. A missing-version warning is advisory when this skill version already matches `convertigo://capabilities`: continue the current task and let the managed host refresh its transport configuration.",
+      "- This skill is NOT the current Convertigo guidance and carries no guidance version.",
+      "- Read `convertigo://capabilities` and follow the `MCP guidance version` it reports.",
+      "- To install the real skill, run the local Studio sequence `" + setupSequence + "` from the `" + MCP_CATALOG_PROJECT + "` project, then start a new session.",
+      "- Until then, ask the user before any project mutation.",
       "",
-      "## Mandatory bootstrap",
+      "## What still holds",
       "",
-      "Bootstrap is required once per agent conversation for a given MCP endpoint and guidance version, not once per user message. On follow-up turns, reuse the skill, capabilities, and route guides already present in the conversation context. Do not reopen this `SKILL.md`, reread `convertigo://capabilities`, or reread an already-used guide unless the MCP endpoint changed, the MCP reports a guidance-version mismatch, or the required bootstrap context is explicitly unavailable.",
-      "",
-      "1. Read `convertigo://capabilities` directly and verify the skill freshness rule above.",
-      "2. Do not call `resources/list`, `resources/templates/list`, or `prompts/list` when this skill already names the required URI or tool. Use catalog discovery only when the task cannot be routed from this skill, a named resource is missing, or the MCP reports a guidance mismatch.",
-      "3. Select the smallest matching route and read only its entry recipe before mutation:",
-      "   - Standard SQL CRUD + starter NGX UI: read `convertigo://resources/convertigo-crud-fastpath` and use `convertigo-crud-fastpath`.",
-      "   - Existing deterministic CRUD project edits: also read `convertigo://resources/convertigo-crud-edit-fastpath`, then stay on the CRUD rail without replaying the new-project bootstrap.",
-      "   - New starter NGX app outside the CRUD rail: read `convertigo://resources/convertigo-recipe-starter-extension` before import, then if the app has backend or open-data results, read `convertigo://resources/convertigo-recipe-ngx-data-page` before any page mutation.",
-      "   - NGX / Ionic UI creation or edits outside the CRUD rail: read `convertigo://resources/convertigo-recipe-ngx-data-page` for data-backed pages. Read `convertigo://resources/convertigo-frontend-ngx` only when the recipe and live palette contract leave an implementation question.",
-      "   - Other tasks: read `convertigo://resources/convertigo-start`, then the smallest matching recipe. Read `convertigo://recipes/quickstart` only when route selection remains ambiguous.",
-      "4. Do not call `rag-query` before the chosen recipe was tried.",
-      "5. If the user explicitly wants MCP-only work or the starting workspace is empty/non-relevant, do not inspect the local shell workspace before the MCP route decision is made.",
-      "",
-      "## Tool economy and convergence",
-      "",
-      "- Treat every tool round trip and large response as part of the task cost. Prefer targeted reads and request only the depth, properties, logs, or detail needed for the next decision.",
-      "- Do not repeat catalog, guide, palette, tree, builder, or browser reads whose answer is already present in the current conversation.",
-      "- Do not use shell, PowerShell, `rg`, or filesystem scans to rediscover MCP tool signatures or examples already exposed by callable schemas and named recipes. Never recursively search a drive root, user profile, workspace root, or generated frontend tree for browser/build diagnostics; use `mobile-builder-open`, `log-view`, and the managed Playwright page.",
-      "- Use `palette-list` to locate an unfamiliar object type and `palette-describe` only for properties that remain uncertain. Group independent descriptions when the caller can do so safely.",
-      "- Build one coherent mutation plan before the first write. Prefer one optimized `batch-call` for independent or ordered source-object changes, followed by one targeted readback.",
-      "- A class/property shape already used successfully in the current conversation or returned by a targeted tree read is a confirmed contract. Do not reconfirm it through palette calls or tool-metadata inspection.",
-      "- Common NGX contracts that do not require palette discovery are `UIStyle#UIStyle.styleContent`, `UIAttribute#UIAttribute.attrName/attrValue`, `UIDynamicElement#TextItem`, `UIText#UIText.textValue`, `UIPageEvent#UIPageEvent.viewEvent`, and `UICustomAction#UICustomAction.actionValue`.",
-      "- For one intent spanning independent targets, call `batch-call` with `{calls:[{tool:\"databaseobject-tree-apply\",arguments:{...}}],onError:\"stop\",optimizeMutations:true}`. The optimized batch performs one final refresh, save, and mobile-builder notification.",
-      "- Named core tools in this skill are already routed. Do not inspect `ALL_TOOLS` merely to rediscover `batch-call`, `mobile-builder-open`, `log-view`, or Playwright calls.",
-      "- For `databaseobject-tree-get`, use `childrenDepth` for recursive descendants and request the needed subtree once instead of walking one QName level per call. `depth` is accepted only as a compatibility alias.",
-      "- `databaseobject-tree-apply` always takes the target QName in `target`, never in `qname`. With `at:\"inside\"`, `tree` is the one child being created and must include its own `className` and `name`; never submit a children-only wrapper. Put sibling creations in separate optimized `batch-call` entries.",
-      "- For an unfamiliar NGX object, call `palette-list` with the exact intended parent QName as `target`, then pass its returned logical `className` unchanged to `palette-describe`. Do not list at project scope and guess a `#logicalId`.",
-      "- Start the viewer asynchronously once UI work is known. Finish the source mutations while it builds, then perform one readiness check and one acceptance-oriented browser proof. Add another cycle only when the proof identifies a concrete defect.",
-      "- For a new standard NGX app, the canonical import call is `marketplace-import({project:\"template_ngxBuilderIonic\", importedProjectName:\"<targetProject>\"})`. Call `mobile-builder-open({project:\"<targetProject>\", wait:false})` immediately after import; do not probe `stateOnly:true` before launching.",
-      "- If that first viewer launch reports a Node download, npm install, or cold Angular build, finish useful mutations and make one readiness call with `stateOnly:true, wait:true, timeoutSec:180` instead of repeating 30-second polls.",
-      "- A browser proof should evaluate all relevant acceptance criteria together when practical: visible content, layout/style, interaction or timed state, and console/runtime errors.",
-      "- Stop after the requested behavior is green. Do not add an unsolicited polish pass or repeat proof that cannot change the conclusion.",
-      "",
-      "## NGX authoring invariants",
-      "",
-      "- Use the exact SmartType shape reported by the live palette or a successful readback. Do not invent aliases such as `JS`, `SCRIPT`, `PLAIN`, `expression`, or `value` interchangeably.",
-      "- Before changing a page `scriptContent`, read it with `properties:\"all\"`, preserve the complete existing string and every `Begin_c8o_...` / `End_c8o_...` section, and edit only the intended section. `mode:\"merge\"` replaces the whole string property; it does not merge script sections.",
-      "- Every non-empty NGX `identifier` becomes an Angular/TypeScript reference and must match `[A-Za-z_$][A-Za-z0-9_$]*`, for example `clockDisplay`, never `clock-display`.",
-      "- Do not declare framework lifecycle methods such as `ngOnDestroy` in page `scriptContent` unless the live Convertigo contract explicitly provides that extension point. Use a supported page event for cleanup instead of guessing a generated method name.",
-      "- For page state changed outside an Angular/Ionic event, such as timers, external callbacks, or third-party subscriptions, mutate the state and trigger Angular change detection through the supported page context in the same callback before claiming live updates.",
-      "- Scope page CSS to the element that actually paints the visible area. Do not assume a class or CSS variable crosses an Ionic shadow boundary; include background coverage in the first browser proof.",
-      "- When a mutation result reports skipped or normalized properties, repair them before browser proof instead of relying on runtime trial and error.",
-      "",
-      "## CRUD routing",
-      "",
-      "- Do not ask the user to choose `upsert-crud`.",
-      "- Decide it yourself: use the CRUD rail only when the task is a standard SQL CRUD + starter NGX UI fit.",
-      "- Generic CRUD UI default: `ui.variant=entity-pages`.",
-      "- CRM-specific UI default: `ui.variant=master-detail`.",
-      "- For a new UI project, validate the name, run `marketplace-import` with that exact name, open the viewer immediately with `mobile-builder-open(wait=false)`, then continue with `upsert-crud` and the staged UI kit while the builder warms up.",
-      "- For an existing deterministic CRUD project that is already green, use the edit rail: `crud-status` -> optional early `mobile-builder-open(wait=false)` when UI work is likely -> `upsert-crud` -> backend `crud-proof` -> one `upsert-ngx-crud-kit stage=final` -> `mobile-builder-open(stateOnly=true, wait=true)` -> final `crud-proof(viewerUrl)` -> optional `project-save`.",
-      "- For a low-detail CRUD prompt, stop after the first green scaffold + demo data: starter import, viewer open, `upsert-crud`, backend proof, `upsert-ngx-crud-kit` bootstrap/final, final UI proof, optional `project-save`, then return.",
-      "- The low-detail stop rule applies only when the user requested generic CRUD. Before mutation, list the explicit acceptance behaviors from the request. Filters, counters, domain actions, dashboards, or other named interactions are not proven by the presence of fields or a generic list/detail/form shell; implement and validate each one before claiming completion.",
-      "- If the CRUD kit has no declarative hint for an explicit interaction, treat the generated kit as a starting point and perform one focused source-object extension before the final builder and browser proof.",
-      "- When relations are obvious, declare them explicitly in `spec.relations[]` instead of relying only on flat FK fields. Prefer entity UI hints such as `ui.relationFields` over direct edits on generated CRUD-kit components.",
-      "- Prefer `seed.data` for explicit business demo rows. Do not patch `init_schema` manually after generation when `seed.data` can express the dataset in the spec.",
-      "- Once the CRUD guides already documented the contract, do not grep the local workspace to rediscover the shapes of `relations[]`, `ui.relationFields`, or `seed.data`.",
-      "- Generated CRUD facade sequences are hidden requestables that require an authenticated context. The generated UI now initializes that session once through a `Login` page that calls `auth_login(username,password)` and then redirects to the visible home page; the business pages should only bootstrap the CRUD data they need.",
-      "- Do not start a second refinement pass on screens, layout, labels, or field-level UX unless the user explicitly asked for it.",
-      "- Once the CRUD fast path is chosen, do not call `rag-query` unless the built-in guides and CRUD tools are no longer sufficient.",
-      "- Prefer best-case-first generated code. Trust the standard error bubble for normal failures instead of adding defensive wrappers by default.",
-      "",
-      "## Project naming",
-      "",
-      "- Use exactly the project name requested by the user when it is technically valid.",
-      "- If no project is selected and the user explicitly asks to create a new project or application without giving a technical name, derive one concise valid name from the requested product or function, check `project-list` for collisions, then proceed without asking the user to select a project.",
-      "- Do not invent prefixes, suffixes, or dates.",
-      "- If the requested name collides with an existing project, surface the collision explicitly instead of renaming it.",
-      "",
-      "## Viewer rule",
-      "",
-      "- In dev, `mobile-builder-open` serves the live app from the viewer root. Prefer `viewerHomeUrl`, or fall back to `viewerBaseUrl`.",
-      "- For frontend work, call `mobile-builder-open` with `wait=false` as soon as the UI project is known, continue other work while it starts, then call `mobile-builder-open(stateOnly=true, wait=true)` or a normal waited call before browser smoke or final proof.",
-      "- Do not issue a state-only call before the first asynchronous launch. If the launch reports a cold Node/npm/Angular build, use one waited state call with `timeoutSec:180` after useful mutations instead of repeated 30-second polls.",
-      "- If `mobile-builder-open` returns `browserDebugUrl`, `browserDevToolsJsonUrl`, or `browserDevToolsWebSocketUrl`, attach the Playwright MCP browser tools to that visible Studio JxBrowser endpoint and verify the actual feature there.",
-      "- If a state-only call returns `status:\"stopped\"`, do not poll it again: immediately call `mobile-builder-open(stateOnly=false, wait=false)` once, continue other work while it starts, then poll readiness.",
-      "- Use Playwright MCP only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`.",
-      "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Do not create, open, close, select, or navigate tabs/pages; reuse the current page.",
-      "- In managed Codex sessions, browser automation is exposed through the Playwright MCP server configured in `codex-home/config.toml`. Use the MCP browser tools; do not run ad hoc shell scripts with `require('playwright')` or raw WebSocket CDP snippets.",
-      "- Known-good fast check on this JxBrowser target: `playwright.browser_tabs({action:\"list\"})`, then `playwright.browser_find({text:\"<visible text>\"})`; use `playwright.browser_evaluate({function:\"...\"})` only when DOM state or timing must be measured. Do not probe unsupported browser features before this minimal check.",
-      "- An `about:blank` target means the loader is not ready. If the builder status is `building`, poll `mobile-builder-open(stateOnly=true, wait=true)`; if it is `stopped`, launch it asynchronously as described above.",
-      "- If Playwright/browser-control MCP tools are missing, disabled, on `about:blank`, stale, or not attached to the returned Studio JxBrowser endpoint, stop the browser proof and tell the user that the managed Playwright MCP configuration must be refreshed. Do not work around it with Node scripts, raw CDP, or a new browser.",
-      "- Do not open `DisplayObjects/mobile/...` against the live HMR viewer.",
-      "- In prod, the application URL is `.../DisplayObjects/mobile/home`.",
-      "- If `mobile-builder-open` reports `compile_error`, treat that as a generator or source-object issue. Do not patch generated runtime sources.",
-      "- If builder diagnostics are insufficient, make one focused `log-view({project:\"<targetProject>\",level:\"error\",limit:40,timeoutMs:0})` call. Do not issue separate error and warning scans.",
-      "",
-      "## Optional UI reveal mode",
-      "",
-      "- If the integrated assistant or host context says Convertigo reveal mode is enabled, pass `reveal:true` only on supported mutation/viewer tools that should visibly move Studio while you work: `databaseobject-tree-apply`, `mobile-builder-open`, `nocode-form-create`, `nocode-form-edit`, and `nocode-form-update`.",
-      "- Do not add `reveal:true` to every read-only call. Use it for object creation/patches, mobile builder opening/polling when focusing the builder is useful, and no-code form mutations that should switch the visible No Code editor.",
-      "- For `mobile-builder-open`, use `wait:false` for reveal/focus polls; reserve long `wait:true` calls for readiness proof and omit `reveal` unless the user specifically needs UI focus.",
-      "- Treat a `result.reveal.status` of `skipped`, `unsupported`, or `intent` as a UI hint result, not as a project mutation failure.",
-      "",
-      "## MCP-only boundary",
-      "",
-      "- Convertigo project descriptors are MCP-owned. Never read or edit `c8oProject.yaml`, `_c8oProject/**/*.yaml`, or `project.xml` as an authoring fallback. If a required MCP operation still fails after one targeted retry, stop and report the blocker without mutating project files.",
-      "- Never edit or repair `_private/ionic`, `DisplayObjects`, `dist`, or other generated artifacts.",
-      "- Generated artifacts are diagnostic-only surfaces. Fix the Convertigo source objects or the MCP generator instead.",
-      "- Do not run `npm run build` or other manual frontend builds outside MCP to close a task.",
-      "",
-      "## Seed and visible data",
-      "",
-      "- Prefer realistic seed data by default.",
-      "- Prefer semantic preview fields such as `name`, `title`, `city`, `email`, or `comment` over `id` when a visible choice exists.",
-      "",
-      "## Current public references",
-      ""
-    ].concat(convertigoGeneralistReferenceLines()).concat([
+      "- Convertigo MCP is the only authoring surface: every inspection and every mutation goes through Convertigo MCP tools.",
+      "- Never read or edit `c8oProject.yaml`, `_c8oProject/**/*.yaml`, or `project.xml` as an authoring fallback.",
+      "- Never edit or repair generated artifacts such as `_private/ionic`, `DisplayObjects`, or `dist`; fix the Convertigo source objects instead.",
+      "- Discover the real tool names and guides from the live MCP catalog: `tools/list`, `resources/list`, `prompts/list`.",
       "",
       "## Local MCP endpoint",
       "",
-      "- Expected local MCP entry: `" + trim(mcpEndpoint) + "`",
-      "- If Codex is not yet configured for Convertigo, run the local Studio sequence `_setupCodex` from the lib_ConvertigoMCP project.",
+      "- Expected MCP endpoint: `" + trim(mcpEndpoint) + "`",
       ""
-    ]).join("\n");
+    ].join("\n");
+  }
+
+  function buildConvertigoGeneralistSkill(mcpEndpoint) {
+    return buildManagedFallbackSkill(
+      "convertigo-generalist",
+      "Reduced fallback for general Convertigo work through the Convertigo MCP server. The full skill could not be produced; rerun the Studio setup sequence.",
+      "Convertigo Generalist (reduced fallback)",
+      mcpEndpoint,
+      "_setupCodex"
+    );
   }
 
   function buildConvertigoNoCodeSkill(mcpEndpoint) {
-    return [
-      "---",
-      "name: convertigo-nocode",
-      "description: Work with Convertigo No-Code Studio / C8Oforms through Convertigo MCP. Use for forms, no-code apps, pages, fields, data sources, roles, publication, and C8Oforms administration.",
-      "---",
-      "",
-      "# Convertigo NoCode",
-      "",
-      "Use this skill when the Assistant is embedded in C8Oforms or any Convertigo No-Code Studio surface.",
-      "",
-      "## Skill freshness",
-      "",
-      "- Skill guidance version: `" + MCP_GUIDANCE_VERSION + "`.",
-      "- During bootstrap, compare this value with `MCP guidance version` in `convertigo://capabilities`. If the MCP value differs or is missing, rerun the Studio Codex setup for the current MCP endpoint before using no-code mutation tools.",
-      "- When the caller surface supports MCP request metadata, send `params._meta.convertigoGuidanceVersion` with this skill guidance version on the first guarded Convertigo `tools/call`; raw HTTP clients may use the `X-Convertigo-Guidance-Version` header. An `_meta.convertigoGuidanceWarning` mismatch requires setup refresh before no-code mutation. A missing-version warning is advisory when this skill version already matches `convertigo://capabilities`: continue the current task and let the managed host refresh its transport configuration.",
-      "",
-      "## Mandatory workflow",
-      "",
-      "1. Read `convertigo://capabilities` directly to verify guidance freshness. Skip catalog and prompt lists when this skill already names the required no-code tools.",
-      "2. Treat the selected no-code context as the source of truth. In C8Oforms, target the `C8Oforms` project unless the user explicitly names another no-code project.",
-      "3. Use Convertigo MCP tools to inspect, edit, save, reload, and validate. Do not edit generated folders such as `_private/ionic`, `DisplayObjects`, `dist`, or build outputs.",
-      "4. Prefer one contract read, one coherent mutation, and one compile/validation pass. Repeat only to repair a concrete failed criterion.",
-      "5. Keep explanations no-code oriented: applications, forms, pages, fields, data sources, roles, permissions, publication, and user-facing behavior.",
-      "6. Reply to the user in their language. Keep progress updates short, factual, and user-safe.",
-      "",
-      "## Convertigo MCP entry",
-      "",
-      "- Expected MCP endpoint: `" + trim(mcpEndpoint) + "`",
-      "- Prefer MCP tools over filesystem edits for Convertigo objects.",
-      "- Use the synchronized MCP knowledge pack in `skills/convertigo-mcp/` only for additional tool/resource details.",
-      "",
-      "## Optional UI reveal mode",
-      "",
-      "- If the integrated assistant or host context says Convertigo reveal mode is enabled, pass `reveal:true` only on supported no-code mutation tools that should visibly move No Code Studio while you work: `nocode-form-create`, `nocode-form-edit`, and `nocode-form-update`.",
-      "- Do not add `reveal:true` to read-only calls such as contract, compile, validate, catalog, or log tools.",
-      "- Treat a `result.reveal.status` of `skipped`, `unsupported`, or `intent` as a UI hint result, not as a no-code mutation failure.",
-      "",
-      "## Tool discovery fallback",
-      "",
-      "- The NoCode tools can appear as `nocode-form-contract-get`, `nocode-form-edit`, `nocode-form-update`, `nocode-form-validate`, and `nocode-form-compile`.",
-      "- Some providers expose tool names with underscores, such as `nocode_form_contract_get` or `mcp__convertigo.nocode_form_update`; treat these as the same NoCode tools.",
-      "- If `tool_search` returns no NoCode tools on the first try, retry with exact queries for `Convertigo NoCode form contract get edit update validate compile C8Oforms` and `nocode-form-contract-get nocode-form-edit nocode-form-update` before declaring the tools unavailable.",
-      "- If a current NoCode form id or URL is provided by the host application, use it as the default target for form edits unless the user explicitly names another form."
-    ].join("\n");
+    return buildManagedFallbackSkill(
+      "convertigo-nocode",
+      "Reduced fallback for Convertigo No-Code Studio / C8Oforms work through the Convertigo MCP server. The full skill could not be produced; rerun the Studio setup sequence.",
+      "Convertigo NoCode (reduced fallback)",
+      mcpEndpoint,
+      "_setupCodex"
+    );
   }
 
   function buildConvertigoStudioRouterSkill(legacyOnly) {

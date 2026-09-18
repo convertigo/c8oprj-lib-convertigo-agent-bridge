@@ -2495,7 +2495,7 @@
     }
     var managedPreflight = {
       setupStatus: managedPreflightCurrent ? "current" : "unverified",
-      guidanceVersion: MCP_GUIDANCE_VERSION,
+      guidanceVersion: mcpProjectGuidanceVersion(),
       skillBundle: entry.managedSkillBundle || null,
       mcpEndpoint: trim(runtimeOptions.mcpEndpoint),
       configStatus: managedBootstrap && managedBootstrap.generated && managedBootstrap.generated.indexOf("config.toml") >= 0
