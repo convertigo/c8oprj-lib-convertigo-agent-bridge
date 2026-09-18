@@ -74,7 +74,11 @@
         var expectedPlaywright = vibePlaywrightServer(options);
         var expectedPlaywrightEndpoint = expectedPlaywright === null ? "" : resolvePlaywrightMcpCdpEndpoint(options);
         var expectedPlaywrightCommand = expectedPlaywright === null ? "" : trim(expectedPlaywright.command);
+        // A home written before the `mistral-direct` provider existed only declares `mistral`:
+        // rewrite it once so the managed GLM presets get the generic backend, then reuse it.
+        var expectedProviderNames = expectedVibeProviderNames(profile);
         if (setup.config.selected.valid
+            && trim(setup.config.selected.providerNames) === expectedProviderNames
             && trim(setup.config.selected.endpoint) === vibeMcpTransportEndpoint(setup.mcpEndpoint, options)
             && trim(setup.config.selected.bearerTokenEnv) === expectedBearerEnv
             && Number(setup.config.selected.viewerDebugPort || 0) === (expectedBearerEnv.length ? expectedViewerDebugPort : 0)

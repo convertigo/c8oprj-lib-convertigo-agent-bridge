@@ -650,9 +650,10 @@ assert.equal(vibeProvider.defaultModel, "zai-glm-5-2");
 assert.equal(vibeProvider.models.length, 2);
 assert.equal(vibeProvider.models[1].label, "Z.ai GLM 5.2");
 assert.equal(vibeProvider.models[1].configuredName, "zai-glm-5-2");
-// zai-glm-5-2 is a managed GLM preset: behind Vibe's Mistral backend `off` sends no
-// reasoning_effort and `low` sends "none", both refused by the model.
-assert.deepEqual(vibeProvider.models[1].reasoningLevels.map((level) => level.id), ["medium", "high", "max"]);
+// zai-glm-5-2 is a managed GLM preset: it sits on the generic `mistral-direct` provider, which
+// forwards the level verbatim, so the model's real levels are offered. Only `off` is dropped,
+// because it would send no reasoning_effort at all.
+assert.deepEqual(vibeProvider.models[1].reasoningLevels.map((level) => level.id), ["low", "medium", "high", "max"]);
 assert.equal(vibeProvider.models[1].defaultReasoning, "high");
 // A model Vibe knows natively keeps the full offer.
 assert.deepEqual(vibeProvider.models[0].reasoningLevels.map((level) => level.id), ["off", "low", "medium", "high", "max"]);
@@ -674,8 +675,32 @@ const unchangedVibeConfig = migrateManagedVibeModelPresets(vibeConfigWithPreset)
 assert.deepEqual(unchangedVibeConfig.removed, []);
 assert.equal(unchangedVibeConfig.added, true);
 assert.match(unchangedVibeConfig.text, /alias = "glm-5-3"/);
+assert.match(unchangedVibeConfig.text, /name = "zai-glm-5-3"\nprovider = "mistral-direct"/,
+  "a pushed GLM preset lands on the generic provider, never on the native mistral one");
 assert.doesNotMatch(unchangedVibeConfig.text, /glm-5-2/, "GLM 5.2 is no longer pushed to new homes");
 assert.equal(migrateManagedVibeModelPresets(unchangedVibeConfig.text).text, unchangedVibeConfig.text);
+
+// An existing home still has its GLM blocks on the native `mistral` provider: move them once.
+const migratedGlmProvider = migrateManagedVibeModelPresets([
+  'active_model = "glm-5-3"',
+  "",
+  "[[models]]",
+  'name = "zai-glm-5-3"',
+  'provider = "mistral"',
+  'alias = "glm-5-3"',
+  "input_price = 1.4",
+  "output_price = 4.4",
+  'thinking = "high"',
+  "supports_images = false",
+  "",
+  "[[mcp_servers]]",
+  'name = "Convertigo"'
+].join("\n"));
+assert.equal(migratedGlmProvider.migratedProvider, true);
+assert.match(migratedGlmProvider.text, /name = "zai-glm-5-3"\nprovider = "mistral-direct"/);
+assert.equal(migrateManagedVibeModelPresets(migratedGlmProvider.text).text, migratedGlmProvider.text,
+  "the provider migration is idempotent");
+assert.equal(migrateManagedVibeModelPresets(migratedGlmProvider.text).migratedProvider, false);
 
 const migratedVibeConfig = migrateManagedVibeModelPresets([
   'active_model = "zai-glm-5-2"',

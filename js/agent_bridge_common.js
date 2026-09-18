@@ -285,11 +285,12 @@
 
   // The Vibe session option `thinking`, weakest first. It is NOT the provider reasoning_effort.
   var VIBE_THINKING_LEVELS = ["off", "low", "medium", "high", "max"];
-  // Vibe's native Mistral backend (`backend = "mistral"`, used by the Vibe profile for the GLM
-  // presets) rewrites its thinking level before calling the API: `low` becomes the provider value
-  // "none", which GLM models refuse, and `off` sends no reasoning_effort at all. The generic
-  // OpenAI-style backend (`backend = "generic"`, used by the Convertigo gateway profile) forwards
-  // the level verbatim and drops it on `off`.
+  // Vibe's native Mistral backend (`backend = "mistral"`) rewrites its thinking level before
+  // calling the API: the official `mistralai` SDK types reasoning_effort as Literal["none","high"],
+  // so `low` becomes the provider value "none", which GLM models refuse, and `medium`/`high`/`max`
+  // all collapse onto "high". The generic OpenAI-style backend (`backend = "generic"`, used by the
+  // Convertigo gateway profile and, since the `mistral-direct` provider, by the managed GLM presets
+  // of the Vibe profile) forwards the level verbatim and drops it on `off`.
   var VIBE_MISTRAL_THINKING_EFFORT = { off: "", low: "none", medium: "high", high: "high", max: "high" };
   var VIBE_DEFAULT_THINKING = "high";
 
@@ -345,6 +346,17 @@
     preferred = trim(preferred).toLowerCase();
     if (!preferred.length || preferred === "off" || preferred === "none") { preferred = VIBE_DEFAULT_THINKING; }
     return vibeThinkingFor(preferred, levels);
+  }
+
+  // Whether the reasoning_effort of this model is forwarded verbatim. True for every model of the
+  // Convertigo gateway profile, and, on the Vibe profile, for the managed GLM presets: they are
+  // declared on the `mistral-direct` provider (`backend = "generic"`) instead of Vibe's native
+  // Mistral backend, so they really take the levels the model advertises. Anything else on the
+  // Vibe profile still goes through `backend = "mistral"` and its two-value mapping.
+  function vibeModelUsesGenericBackend(alias, convertigoMode) {
+    if (convertigoMode === true) { return true; }
+    var preset = managedVibeGlmPreset(alias);
+    return preset !== null && preset.genericBackend === true;
   }
 
   function convertigoGatewayModelNames(options, vibeHome) {
@@ -551,6 +563,24 @@
       return base ? trim(base[1]).replace(/\/+$/, "") : "";
     }
     return "";
+  }
+
+  // The sorted `[[providers]]` names of a config.toml, so vibeStart notices a home written before
+  // a provider block was added (the `mistral-direct` one) and rewrites it exactly once.
+  function parseVibeProviderNames(text) {
+    var pattern = /\[\[providers\]\]([\s\S]*?)(?=\n\[\[|\n\[|$)/g;
+    var match, names = [];
+    while ((match = pattern.exec(String(text || ""))) !== null) {
+      var name = ("\n" + match[1]).match(/\nname\s*=\s*["']([^"']+)["']/);
+      if (name) { names.push(trim(name[1])); }
+    }
+    return names.sort().join(",");
+  }
+
+  // What parseVibeProviderNames must report for a config.toml this version would write.
+  function expectedVibeProviderNames(profile) {
+    if (profile === "convertigo") { return "convertigo"; }
+    return ["mistral", MANAGED_VIBE_GLM_PROVIDER].sort().join(",");
   }
 
   function parseVibeGatewayModels(text) {
@@ -6498,6 +6528,7 @@
       endpoint: "",
       gatewayUrl: "",
       gatewayModels: "",
+      providerNames: "",
       revealMode: false,
       noLog: false,
       valid: false
@@ -6529,6 +6560,7 @@
     }
     info.gatewayUrl = parseVibeGatewayUrl(text);
     info.gatewayModels = parseVibeGatewayModels(text);
+    info.providerNames = parseVibeProviderNames(text);
     info.playwrightEndpoint = "";
     info.playwrightCommand = "";
     var playwrightPattern = /\[\[mcp_servers\]\]([\s\S]*?)(?=\n\[\[mcp_servers\]\]|$)/g;
@@ -6559,9 +6591,17 @@
   // are the reasoning_effort values Mistral accepts for the model.
   // `push: false` keeps a model known (its levels, its spec when a conversation still asks for
   // it) without declaring it in new homes. Existing config.toml files are left as they are.
+  // The GLM presets are served through an additional provider rather than the native `mistral`
+  // one, so Vibe forwards their reasoning_effort verbatim. The name must NOT be "mistral": Vibe
+  // gives that exact name legacy treatment (`_is_legacy_mistral_provider_without_backend`,
+  // `supports_browser_sign_in`) and `generic.py` adds `stream_options.stream_tool_calls` for it.
+  // `mistral-direct` says what it is (Mistral's own OpenAI-compatible endpoint, same key) without
+  // borrowing any of that. The dropped `stream_tool_calls` was checked against the live endpoint:
+  // tool calls stream identically with and without it.
+  var MANAGED_VIBE_GLM_PROVIDER = "mistral-direct";
   var MANAGED_VIBE_GLM_PRESETS = [
-    { name: "zai-glm-5-3", alias: "glm-5-3", efforts: ["low", "high", "max"] },
-    { name: "zai-glm-5-2", alias: "glm-5-2", efforts: ["low", "medium", "high", "max"], push: false }
+    { name: "zai-glm-5-3", alias: "glm-5-3", efforts: ["low", "high", "max"], provider: MANAGED_VIBE_GLM_PROVIDER, genericBackend: true },
+    { name: "zai-glm-5-2", alias: "glm-5-2", efforts: ["low", "medium", "high", "max"], provider: MANAGED_VIBE_GLM_PROVIDER, genericBackend: true, push: false }
   ];
 
   function managedVibeGlmPreset(value) {
@@ -6573,7 +6613,7 @@
   }
 
   function managedVibeGlmPresetBlock(preset) {
-    return '[[models]]\nname = "' + preset.name + '"\nprovider = "mistral"\nalias = "' + preset.alias + '"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\nsupports_images = ' + (VIBE_GLM_SUPPORTS_IMAGES ? 'true' : 'false') + '\n';
+    return '[[models]]\nname = "' + preset.name + '"\nprovider = "' + preset.provider + '"\nalias = "' + preset.alias + '"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\nsupports_images = ' + (VIBE_GLM_SUPPORTS_IMAGES ? 'true' : 'false') + '\n';
   }
 
   function vibeModelSpec(value) {
@@ -6614,6 +6654,7 @@
         name: glmPreset.name,
         alias: glmPreset.alias,
         efforts: glmPreset.efforts,
+        provider: glmPreset.provider,
         thinking: "high",
         temperature: "1.0",
         inputPrice: "1.4",
@@ -6649,7 +6690,10 @@
         if (name === candidate.name || alias === candidate.alias || alias === candidate.name) { presentPresets[candidate.name] = true; }
       }
       // A GLM entry with its own provider or alias belongs to the user: leave the file alone.
-      if (/^zai-glm-/i.test(name) && (parseTomlValue(block, "provider") !== "mistral" || (managedVibeGlmPreset(alias) === null && alias !== name))) {
+      // "mistral" is the provider managed GLM blocks used before the `mistral-direct` move, so it
+      // still counts as ours; it is migrated below.
+      var blockProvider = parseTomlValue(block, "provider");
+      if (/^zai-glm-/i.test(name) && ((blockProvider !== "mistral" && blockProvider !== MANAGED_VIBE_GLM_PROVIDER) || (managedVibeGlmPreset(alias) === null && alias !== name))) {
         userManagedGlm = true;
       }
       var managed = parseTomlValue(block, "name") === "zai-glm-5-2"
@@ -6668,6 +6712,16 @@
     result = result.replace(/((?:^|\n)\[\[models\]\]\s*\nname\s*=\s*["']zai-glm-[0-9.-]+["'][\s\S]*?)(supports_images\s*=\s*(?:true|false))/g, function (match, head, current) {
       return current === glmImagesLine ? match : head + glmImagesLine;
     });
+    // Managed GLM blocks used to sit on the native `mistral` provider, whose backend collapses
+    // every thinking level onto "high" (and turns "low" into the refused "none"). Move them onto
+    // the generic `mistral-direct` provider so the level reaches the model untouched.
+    var migratedProvider = false;
+    if (!userManagedGlm) {
+      result = result.replace(/((?:^|\n)\[\[models\]\]\s*\nname\s*=\s*["']zai-glm-[0-9.-]+["']\s*\nprovider\s*=\s*["'])mistral(["'])/g, function (match, head, tail) {
+        migratedProvider = true;
+        return head + MANAGED_VIBE_GLM_PROVIDER + tail;
+      });
+    }
     var migratedActiveModel = false;
     if (removed.length && /^\s*active_model\s*=\s*["']zai-glm-5-2["']/m.test(result)) {
       result = result.replace(/^(\s*active_model\s*=\s*["'])zai-glm-5-2(["'])/m, "$1glm-5-2$2");
@@ -6688,6 +6742,7 @@
       removed: removed,
       added: addedPresets.length > 0,
       addedPresets: addedPresets,
+      migratedProvider: migratedProvider,
       migratedActiveModel: migratedActiveModel
     };
   }
@@ -6706,6 +6761,7 @@
       path: filePath(configFile),
       removed: patched.removed,
       added: patched.added,
+      migratedProvider: patched.migratedProvider,
       migratedActiveModel: patched.migratedActiveModel
     };
   }
@@ -6763,6 +6819,21 @@
       'region = ""',
       '',
       '[providers.extra_headers]',
+      '',
+      // Same endpoint and same MISTRAL_API_KEY as the provider above, but through Vibe's generic
+      // OpenAI-style backend, which forwards reasoning_effort verbatim instead of squeezing it
+      // into the mistralai SDK's Literal["none", "high"]. The managed GLM presets point here so
+      // "low", "high" and "max" really are three distinct levels; Vibe's own models (and the
+      // browser sign-in) stay on the native `mistral` provider above.
+      '[[providers]]',
+      'name = "' + MANAGED_VIBE_GLM_PROVIDER + '"',
+      'api_base = "https://api.mistral.ai/v1"',
+      'api_key_env_var = "MISTRAL_API_KEY"',
+      'api_style = "openai"',
+      'backend = "generic"',
+      'reasoning_field_name = "reasoning_content"',
+      '',
+      '[providers.extra_headers]',
       ''
     ];
     for (var specIndex = 0; specIndex < specs.length; specIndex++) {
@@ -6773,7 +6844,7 @@
       lines.push(
         '[[models]]',
         'name = "' + tomlString(modelSpec.name) + '"',
-        'provider = "' + (gateway ? "convertigo" : "mistral") + '"',
+        'provider = "' + (gateway ? "convertigo" : trim(modelSpec.provider) || "mistral") + '"',
         'alias = "' + tomlString(modelSpec.alias) + '"',
         'temperature = ' + modelSpec.temperature,
         'input_price = ' + modelSpec.inputPrice,
@@ -7745,10 +7816,11 @@
       var modelLevels = reasoningLevels, modelDefaultReasoning = defaultReasoning;
       var vibePreset = convertigoMode ? null : managedVibeGlmPreset(model.id);
       if (Object.prototype.hasOwnProperty.call(gatewayEfforts, model.id) || vibePreset !== null) {
-        // Only the thinking levels whose provider reasoning_effort this model really accepts:
-        // "off" (and, on the Vibe profile, "low") are dropped for a model that requires an effort.
+        // Only the thinking levels whose provider reasoning_effort this model really accepts;
+        // "off" is dropped for a model that requires an effort. The managed GLM presets run on a
+        // generic provider on both profiles, so they offer their real levels in both.
         var accepted = vibePreset !== null ? vibePreset.efforts : gatewayEfforts[model.id];
-        var usable = vibeThinkingLevelsFor(accepted, convertigoMode);
+        var usable = vibeThinkingLevelsFor(accepted, vibeModelUsesGenericBackend(model.id, convertigoMode));
         modelLevels = reasoningLevels.filter(function (level) {
           return usable.indexOf(String(level.id).toLowerCase()) >= 0;
         });
@@ -7860,9 +7932,9 @@
     var convertigoSession = isConvertigoGatewayProfile(options) || (entry.providerSettings && normalizeProvider(entry.providerSettings.id) === "convertigo");
     if (thinkingOption) {
       // The thinking level is a session value while the reasoning_effort it produces depends on
-      // the model and on the backend behind the profile: re-align it whenever the model or the
-      // level changes, and never leave it on a level the model refuses (GLM 5.3 rejects the
-      // "none" that the Vibe profile sends for "low", and "off" leaves it with no effort at all).
+      // the model and on the backend behind it: re-align it whenever the model or the level
+      // changes, and never leave it on a level the model refuses ("off" leaves it with no effort
+      // at all, and a model still on the native Mistral backend sends "none" for "low").
       var activeModelOption = findAcpConfigOption(configOptions, "model");
       var activeAlias = trim(activeModelOption && (activeModelOption.currentValue || activeModelOption.current_value)) || requestedModel;
       var currentThinking = trim(thinkingOption.currentValue || thinkingOption.current_value);
@@ -7873,7 +7945,7 @@
         var presetForSession = managedVibeGlmPreset(activeAlias);
         acceptedEfforts = presetForSession === null ? null : presetForSession.efforts;
       }
-      var usableThinking = vibeThinkingLevelsFor(acceptedEfforts, convertigoSession);
+      var usableThinking = vibeThinkingLevelsFor(acceptedEfforts, vibeModelUsesGenericBackend(activeAlias, convertigoSession));
       if (usableThinking !== null && usableThinking.length) {
         var askedThinking = requestedReasoning || currentThinking;
         // An explicit ask, an empty ask on a session already off a usable level, or no ask at all:
@@ -7957,12 +8029,13 @@
     }
     if (!gatewayProfile) {
       // A GLM preset declared in config.toml only carries one `thinking` value: expose the levels
-      // the model really takes behind Vibe's Mistral backend, and a default it accepts.
+      // the model really takes behind the `mistral-direct` generic provider, and a default it
+      // accepts.
       for (var presetModelIndex = 0; presetModelIndex < models.length; presetModelIndex++) {
         var presetModel = models[presetModelIndex];
         var declaredPreset = managedVibeGlmPreset(presetModel.id);
         if (declaredPreset === null) { continue; }
-        var presetLevels = vibeThinkingLevelsFor(declaredPreset.efforts, false);
+        var presetLevels = vibeThinkingLevelsFor(declaredPreset.efforts, vibeModelUsesGenericBackend(presetModel.id, false));
         presetModel.defaultReasoning = vibeDefaultThinkingFor(presetLevels, presetModel.defaultReasoning);
         presetModel.reasoningLevels = presetLevels.map(function (level) {
           return { id: level, label: level, description: "Accepted by this Vibe model" };

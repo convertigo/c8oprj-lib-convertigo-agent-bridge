@@ -453,16 +453,28 @@ console.log("Vibe image attachment contract OK");
   assert.equal(vibeThinkingEffort("off", false), "");
 
   const glm53 = ["low", "high", "max"], glm52 = ["low", "medium", "high", "max"];
-  assert.deepEqual(vibeThinkingLevelsFor(glm53, true), ["low", "high", "max"], "gateway: off is never offered");
-  assert.deepEqual(vibeThinkingLevelsFor(glm53, false), ["medium", "high", "max"], "Vibe profile: low would send reasoning_effort none");
+  assert.deepEqual(vibeThinkingLevelsFor(glm53, true), ["low", "high", "max"], "generic: off is never offered");
+  assert.deepEqual(vibeThinkingLevelsFor(glm52, true), ["low", "medium", "high", "max"]);
+  assert.deepEqual(vibeThinkingLevelsFor(glm53, false), ["medium", "high", "max"], "native backend: low would send reasoning_effort none");
   assert.deepEqual(vibeThinkingLevelsFor(glm52, false), ["medium", "high", "max"]);
   assert.deepEqual(vibeThinkingLevelsFor([], false), ["off"], "a model that takes no effort only gets off");
   assert.equal(vibeThinkingLevelsFor(null, false), null, "an unprobed model keeps whatever Vibe offers");
 
+  // Which backend a model really runs on: the managed GLM presets are declared on the generic
+  // `mistral-direct` provider even on the Vibe profile, so they get their real levels there too.
+  assert.equal(vibeModelUsesGenericBackend("glm-5-3", false), true);
+  assert.equal(vibeModelUsesGenericBackend("zai-glm-5-2", false), true);
+  assert.equal(vibeModelUsesGenericBackend("glm-5-3", true), true);
+  assert.equal(vibeModelUsesGenericBackend("vibe-thinking", false), false, "a Vibe-native model stays on backend = mistral");
+  assert.equal(vibeModelUsesGenericBackend("mistral-medium-3.5", false), false);
+  assert.equal(vibeModelUsesGenericBackend("devstral-small", true), true, "every gateway model is generic");
+
   // Whatever the caller asks, the applied level is one the model accepts.
-  const usable = vibeThinkingLevelsFor(glm53, false);
-  assert.equal(vibeThinkingFor("off", usable), "medium", "off is clamped to the weakest accepted level");
-  assert.equal(vibeThinkingFor("low", usable), "medium");
+  const usable = vibeThinkingLevelsFor(glm53, true);
+  assert.deepEqual(usable, ["low", "high", "max"]);
+  assert.equal(vibeThinkingFor("off", usable), "low", "off is clamped to the weakest accepted level");
+  assert.equal(vibeThinkingFor("low", usable), "low");
+  assert.equal(vibeThinkingFor("medium", usable), "high", "a level the model does not take goes up");
   assert.equal(vibeThinkingFor("high", usable), "high");
   assert.equal(vibeThinkingFor("max", usable), "max");
   assert.equal(vibeThinkingFor("banana", usable), "high", "an unknown value falls back on the default");
@@ -471,8 +483,9 @@ console.log("Vibe image attachment contract OK");
   assert.equal(vibeThinkingFor("high", []), "", "a model without reasoning gets no level");
   assert.equal(vibeDefaultThinkingFor(usable, ""), "high");
   assert.equal(vibeDefaultThinkingFor(usable, "off"), "high", "a session left on off still pre-selects a real level");
-  assert.equal(vibeDefaultThinkingFor(usable, "low"), "medium");
-  assert.equal(vibeDefaultThinkingFor(vibeThinkingLevelsFor(glm53, true), "medium"), "high");
+  assert.equal(vibeDefaultThinkingFor(usable, "low"), "low", "low is a real level again, no longer clamped up");
+  assert.equal(vibeDefaultThinkingFor(vibeThinkingLevelsFor(glm53, false), "low"), "medium",
+    "a model still on the native backend keeps the old clamp");
 
   // The Vibe profile offer: every model carries a default the model accepts.
   const acpVibe = [
@@ -480,17 +493,61 @@ console.log("Vibe image attachment contract OK");
     { id: "thinking", currentValue: "low", options: ["off", "low", "medium", "high", "max"].map(v => ({ value: v, name: v })) }];
   const vibeOffer = normalizeVibeAcpProviderSettings(acpVibe, { id: "vibe", source: {}, supports: {} });
   const vibeById = Object.fromEntries(vibeOffer.models.map(m => [m.id, m]));
-  assert.deepEqual(vibeById["glm-5-3"].reasoningLevels.map(l => l.id), ["medium", "high", "max"]);
-  assert.equal(vibeById["glm-5-3"].defaultReasoning, "medium", "the session level low is clamped, never kept");
-  assert.deepEqual(vibeById["glm-5-2"].reasoningLevels.map(l => l.id), ["medium", "high", "max"]);
+  // Same three real levels as the gateway profile: the GLM presets no longer go through the
+  // native Mistral backend and its two-value reasoning_effort.
+  assert.deepEqual(vibeById["glm-5-3"].reasoningLevels.map(l => l.id), ["low", "high", "max"]);
+  assert.equal(vibeById["glm-5-3"].defaultReasoning, "low", "the session level low is now accepted, so it is kept");
+  assert.deepEqual(vibeById["glm-5-2"].reasoningLevels.map(l => l.id), ["low", "medium", "high", "max"]);
   vibeOffer.models.forEach((model) => {
     const offered = model.reasoningLevels.map(l => l.id);
     assert.ok(!offered.length || offered.includes(model.defaultReasoning), model.id + " pre-selects an offered level");
   });
 
-  // configureVibeSession aligns both profiles through the same clamp.
-  assert.match(commonSource, /var usableThinking = vibeThinkingLevelsFor\(acceptedEfforts, convertigoSession\);/);
+  // configureVibeSession aligns both profiles through the same clamp, on the backend the active
+  // model really runs on rather than on the profile.
+  assert.match(commonSource, /var usableThinking = vibeThinkingLevelsFor\(acceptedEfforts, vibeModelUsesGenericBackend\(activeAlias, convertigoSession\)\);/);
   assert.match(commonSource, /vibeDefaultThinkingFor\(usableThinking, currentThinking\)/);
+}
+
+// The Vibe profile config declares a second provider so the GLM presets get the generic backend.
+{
+  const originalWrite = writeTextFile, originalEnsure = ensureDirectory;
+  let written = "";
+  writeTextFile = (_file, text) => { written = String(text); };
+  ensureDirectory = () => {};
+  try {
+    writeLocalVibeConfig("/managed/vibe-home", "http://localhost:18080/convertigo/api/mcp", "glm-5-3", {});
+    assert.equal((written.match(/^\[\[providers\]\]$/gm) || []).length, 2, "the native provider is kept next to the new one");
+    // Vibe's own models and the browser sign-in stay on the untouched native provider.
+    assert.match(written, /^\[\[providers\]\]\nname = "mistral"\n[\s\S]*?^backend = "mistral"$/m);
+    assert.match(written, /^browser_auth_base_url = "https:\/\/console\.mistral\.ai"$/m);
+    // The additional provider: same endpoint, same key, generic backend.
+    assert.match(written, /^\[\[providers\]\]\nname = "mistral-direct"\napi_base = "https:\/\/api\.mistral\.ai\/v1"\napi_key_env_var = "MISTRAL_API_KEY"\napi_style = "openai"\nbackend = "generic"\nreasoning_field_name = "reasoning_content"$/m);
+    assert.doesNotMatch(written, /name = "mistral-direct"[\s\S]*?browser_auth/, "the sign-in stays on the native provider only");
+    // The GLM preset points at it; nothing else does.
+    assert.match(written, /name = "zai-glm-5-3"\nprovider = "mistral-direct"\nalias = "glm-5-3"/);
+    assert.equal(parseVibeProviderNames(written), "mistral,mistral-direct");
+    assert.equal(parseVibeProviderNames(written), expectedVibeProviderNames("vibe"));
+
+    // A Vibe-native model keeps the native provider, and the extra provider is still declared.
+    writeLocalVibeConfig("/managed/vibe-home", "http://localhost:18080/convertigo/api/mcp", "mistral-medium-3.5", {});
+    assert.match(written, /name = "mistral-vibe-cli-latest"\nprovider = "mistral"\nalias = "mistral-medium-3\.5"/);
+    assert.equal(parseVibeProviderNames(written), "mistral,mistral-direct");
+
+    // The gateway profile is untouched: one provider, named convertigo.
+    writeLocalVibeConfig("/managed/vibe-home", "http://localhost:18080/convertigo/api/mcp", "glm-5-3",
+      { vibeProfile: "convertigo", gatewayModelIds: ["mistral/zai-glm-5-3"] });
+    assert.equal(parseVibeProviderNames(written), "convertigo");
+    assert.equal(parseVibeProviderNames(written), expectedVibeProviderNames("convertigo"));
+  } finally {
+    writeTextFile = originalWrite;
+    ensureDirectory = originalEnsure;
+  }
+  // vibeStart must rewrite a home whose provider list predates the mistral-direct block.
+  assert.match(vibeSourceText, /var expectedProviderNames = expectedVibeProviderNames\(profile\);/);
+  assert.match(vibeSourceText, /trim\(setup\.config\.selected\.providerNames\) === expectedProviderNames/);
+  assert.equal(parseVibeProviderNames('[[providers]]\nname = "mistral"\n'), "mistral",
+    "a pre-existing home reports only the native provider, so it is rewritten once");
 }
 
 // A cached ACP catalog is re-aligned on the live gateway offer.
@@ -521,7 +578,10 @@ console.log("Vibe image attachment contract OK");
   const existing = 'active_model = "glm-5-2"\n\n[[providers]]\nname = "mistral"\n\n[[models]]\nname = "zai-glm-5-2"\nprovider = "mistral"\nalias = "glm-5-2"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\nsupports_images = false\n';
   const upgraded = migrateManagedVibeModelPresets(existing);
   assert.deepEqual(upgraded.addedPresets, ["glm-5-3"]);
-  assert.match(upgraded.text, /name = "zai-glm-5-3"\nprovider = "mistral"\nalias = "glm-5-3"/);
+  assert.match(upgraded.text, /name = "zai-glm-5-3"\nprovider = "mistral-direct"\nalias = "glm-5-3"/);
+  assert.match(upgraded.text, /name = "zai-glm-5-2"\nprovider = "mistral-direct"\nalias = "glm-5-2"/,
+    "the GLM block already there is moved off the native provider too");
+  assert.equal(upgraded.migratedProvider, true);
   assert.match(upgraded.text, /^active_model = "glm-5-2"$/m, "the active model is not changed behind the user's back");
   const again = migrateManagedVibeModelPresets(upgraded.text);
   assert.equal(again.added, false);
@@ -532,16 +592,17 @@ console.log("Vibe image attachment contract OK");
   assert.doesNotMatch(fresh.text, /zai-glm-5-2/);
   assert.equal(vibeModelSpec("glm-5-2").name, "zai-glm-5-2", "GLM 5.2 stays resolvable for conversations that still use it");
 
-  // NOT the same per-model thinking levels as through the gateway: this profile runs Vibe's
-  // native Mistral backend, which turns the thinking level "low" into reasoning_effort "none".
+  // The same per-model thinking levels as through the gateway: the GLM presets of this profile
+  // now run on the generic `mistral-direct` provider, which forwards reasoning_effort verbatim.
   const acp = [
     { id: "model", currentValue: "glm-5-3", options: [{ value: "glm-5-3", name: "glm-5-3" }, { value: "glm-5-2", name: "glm-5-2" }, { value: "mistral-medium-3.5", name: "mistral-medium-3.5" }] },
     { id: "thinking", currentValue: "medium", options: ["off", "low", "medium", "high", "max"].map(v => ({ value: v, name: v })) }];
   const vibe = normalizeVibeAcpProviderSettings(acp, { id: "vibe" });
   const byId = Object.fromEntries(vibe.models.map(m => [m.id, m]));
-  assert.deepEqual(byId["glm-5-3"].reasoningLevels.map(l => l.id), ["medium", "high", "max"]);
-  assert.equal(byId["glm-5-3"].defaultReasoning, "medium", "the session level is kept when the model accepts it");
-  assert.deepEqual(byId["glm-5-2"].reasoningLevels.map(l => l.id), ["medium", "high", "max"]);
+  assert.deepEqual(byId["glm-5-3"].reasoningLevels.map(l => l.id), ["low", "high", "max"]);
+  assert.equal(byId["glm-5-3"].defaultReasoning, "high", "GLM 5.3 has no medium: the session level goes up to high");
+  assert.deepEqual(byId["glm-5-2"].reasoningLevels.map(l => l.id), ["low", "medium", "high", "max"]);
+  assert.equal(byId["glm-5-2"].defaultReasoning, "medium", "the session level is kept when the model accepts it");
   assert.deepEqual(byId["mistral-medium-3.5"].reasoningLevels.map(l => l.id), ["off", "low", "medium", "high", "max"], "other Vibe models are untouched");
   assert.equal(byId["mistral-medium-3.5"].defaultReasoning, "medium");
 }
