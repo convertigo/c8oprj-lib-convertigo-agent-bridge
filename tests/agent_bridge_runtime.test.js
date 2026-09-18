@@ -650,8 +650,12 @@ assert.equal(vibeProvider.defaultModel, "zai-glm-5-2");
 assert.equal(vibeProvider.models.length, 2);
 assert.equal(vibeProvider.models[1].label, "Z.ai GLM 5.2");
 assert.equal(vibeProvider.models[1].configuredName, "zai-glm-5-2");
-assert.deepEqual(vibeProvider.models[1].reasoningLevels.map((level) => level.id), ["off", "low", "medium", "high", "max"]);
+// zai-glm-5-2 is a managed GLM preset: behind Vibe's Mistral backend `off` sends no
+// reasoning_effort and `low` sends "none", both refused by the model.
+assert.deepEqual(vibeProvider.models[1].reasoningLevels.map((level) => level.id), ["medium", "high", "max"]);
 assert.equal(vibeProvider.models[1].defaultReasoning, "high");
+// A model Vibe knows natively keeps the full offer.
+assert.deepEqual(vibeProvider.models[0].reasoningLevels.map((level) => level.id), ["off", "low", "medium", "high", "max"]);
 assert.equal(vibeProvider.reasoningMode, "runtime_selectable");
 assert.equal(vibeProvider.supports.reasoning, true);
 

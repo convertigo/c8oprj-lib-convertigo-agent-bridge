@@ -434,11 +434,63 @@ console.log("Vibe image attachment contract OK");
     { id: "thinking", currentValue: "medium", options: ["off", "low", "medium", "high", "max"].map(v => ({ value: v, name: v })) }];
   const normalized = normalizeVibeAcpProviderSettings(acp, { id: "convertigo", gateway: { models: ["glm-5-3", "glm-5-2"], efforts: { "glm-5-3": ["low", "high", "max"], "glm-5-2": ["low", "medium", "high", "max"] } } });
   const byId = Object.fromEntries(normalized.models.map(m => [m.id, m]));
-  assert.deepEqual(byId["glm-5-3"].reasoningLevels.map(l => l.id), ["off", "low", "high", "max"], "medium is not offered for GLM 5.3");
+  assert.deepEqual(byId["glm-5-3"].reasoningLevels.map(l => l.id), ["low", "high", "max"], "medium and off are not offered for GLM 5.3");
   assert.equal(byId["glm-5-3"].defaultReasoning, "high");
-  assert.deepEqual(byId["glm-5-2"].reasoningLevels.map(l => l.id), ["off", "low", "medium", "high", "max"]);
+  assert.deepEqual(byId["glm-5-2"].reasoningLevels.map(l => l.id), ["low", "medium", "high", "max"], "off is not offered: the model requires an effort");
   assert.equal(byId["glm-5-2"].defaultReasoning, "medium");
-  assert.match(commonSource, /var alignedReasoning = gatewayEffortFor\(requestedReasoning \|\| currentThinking, gatewayEffortsForAlias\(options, activeAlias\)\)/);
+  assert.doesNotMatch(commonSource, /return id === "off" \|\| id === "none" \|\| accepted\.indexOf\(id\) >= 0;/, "the off/none escape hatch is gone");
+}
+
+// The Vibe session option `thinking` is not the provider reasoning_effort.
+{
+  // Vibe's generic backend (Convertigo gateway profile) forwards the level and drops it on off.
+  assert.equal(vibeThinkingEffort("low", true), "low");
+  assert.equal(vibeThinkingEffort("off", true), "");
+  // Vibe's native Mistral backend (Vibe profile) rewrites it: low becomes "none", which GLM refuses.
+  assert.equal(vibeThinkingEffort("low", false), "none");
+  assert.equal(vibeThinkingEffort("medium", false), "high");
+  assert.equal(vibeThinkingEffort("max", false), "high");
+  assert.equal(vibeThinkingEffort("off", false), "");
+
+  const glm53 = ["low", "high", "max"], glm52 = ["low", "medium", "high", "max"];
+  assert.deepEqual(vibeThinkingLevelsFor(glm53, true), ["low", "high", "max"], "gateway: off is never offered");
+  assert.deepEqual(vibeThinkingLevelsFor(glm53, false), ["medium", "high", "max"], "Vibe profile: low would send reasoning_effort none");
+  assert.deepEqual(vibeThinkingLevelsFor(glm52, false), ["medium", "high", "max"]);
+  assert.deepEqual(vibeThinkingLevelsFor([], false), ["off"], "a model that takes no effort only gets off");
+  assert.equal(vibeThinkingLevelsFor(null, false), null, "an unprobed model keeps whatever Vibe offers");
+
+  // Whatever the caller asks, the applied level is one the model accepts.
+  const usable = vibeThinkingLevelsFor(glm53, false);
+  assert.equal(vibeThinkingFor("off", usable), "medium", "off is clamped to the weakest accepted level");
+  assert.equal(vibeThinkingFor("low", usable), "medium");
+  assert.equal(vibeThinkingFor("high", usable), "high");
+  assert.equal(vibeThinkingFor("max", usable), "max");
+  assert.equal(vibeThinkingFor("banana", usable), "high", "an unknown value falls back on the default");
+  assert.equal(vibeThinkingFor("", usable), "high");
+  assert.equal(vibeThinkingFor("max", ["low"]), "low", "the closest weaker level when nothing stronger exists");
+  assert.equal(vibeThinkingFor("high", []), "", "a model without reasoning gets no level");
+  assert.equal(vibeDefaultThinkingFor(usable, ""), "high");
+  assert.equal(vibeDefaultThinkingFor(usable, "off"), "high", "a session left on off still pre-selects a real level");
+  assert.equal(vibeDefaultThinkingFor(usable, "low"), "medium");
+  assert.equal(vibeDefaultThinkingFor(vibeThinkingLevelsFor(glm53, true), "medium"), "high");
+
+  // The Vibe profile offer: every model carries a default the model accepts.
+  const acpVibe = [
+    { id: "model", currentValue: "glm-5-3", options: [{ value: "glm-5-3", name: "glm-5-3" }, { value: "glm-5-2", name: "glm-5-2" }] },
+    { id: "thinking", currentValue: "low", options: ["off", "low", "medium", "high", "max"].map(v => ({ value: v, name: v })) }];
+  const vibeOffer = normalizeVibeAcpProviderSettings(acpVibe, { id: "vibe", source: {}, supports: {} });
+  const vibeById = Object.fromEntries(vibeOffer.models.map(m => [m.id, m]));
+  assert.deepEqual(vibeById["glm-5-3"].reasoningLevels.map(l => l.id), ["medium", "high", "max"]);
+  assert.equal(vibeById["glm-5-3"].defaultReasoning, "medium", "the session level low is clamped, never kept");
+  assert.deepEqual(vibeById["glm-5-2"].reasoningLevels.map(l => l.id), ["medium", "high", "max"]);
+  vibeOffer.models.forEach((model) => {
+    const offered = model.reasoningLevels.map(l => l.id);
+    assert.ok(!offered.length || offered.includes(model.defaultReasoning), model.id + " pre-selects an offered level");
+  });
+
+  // configureVibeSession aligns both profiles through the same clamp.
+  assert.match(commonSource, /var usableThinking = vibeThinkingLevelsFor\(acceptedEfforts, convertigoSession\);/);
+  assert.match(commonSource, /vibeDefaultThinkingFor\(usableThinking, currentThinking\)/);
 }
 
 // A cached ACP catalog is re-aligned on the live gateway offer.
@@ -452,7 +504,8 @@ console.log("Vibe image attachment contract OK");
   assert.deepEqual(aligned.models.map(m => m.id), ["glm-5-3", "glm-5-2"], "the new model appears, the built-in one goes");
   assert.deepEqual(aligned.models[0].reasoningLevels.map(l => l.id), ["low", "high", "max"]);
   assert.equal(aligned.models[0].defaultReasoning, "high");
-  assert.deepEqual(aligned.models[1].reasoningLevels.map(l => l.id), ["off", "low", "medium", "high", "max"]);
+  assert.deepEqual(aligned.models[1].reasoningLevels.map(l => l.id), ["low", "medium", "high", "max"], "off is dropped from a cached catalog too");
+  assert.equal(aligned.models[1].defaultReasoning, "medium");
   assert.equal(aligned.defaultModel, "glm-5-3");
   assert.equal(applyGatewayOfferToProvider({ id: "vibe", models: [{ id: "x" }] }).models.length, 1, "other providers are untouched");
 }
@@ -479,14 +532,16 @@ console.log("Vibe image attachment contract OK");
   assert.doesNotMatch(fresh.text, /zai-glm-5-2/);
   assert.equal(vibeModelSpec("glm-5-2").name, "zai-glm-5-2", "GLM 5.2 stays resolvable for conversations that still use it");
 
-  // Same per-model thinking levels as through the gateway.
+  // NOT the same per-model thinking levels as through the gateway: this profile runs Vibe's
+  // native Mistral backend, which turns the thinking level "low" into reasoning_effort "none".
   const acp = [
     { id: "model", currentValue: "glm-5-3", options: [{ value: "glm-5-3", name: "glm-5-3" }, { value: "glm-5-2", name: "glm-5-2" }, { value: "mistral-medium-3.5", name: "mistral-medium-3.5" }] },
     { id: "thinking", currentValue: "medium", options: ["off", "low", "medium", "high", "max"].map(v => ({ value: v, name: v })) }];
   const vibe = normalizeVibeAcpProviderSettings(acp, { id: "vibe" });
   const byId = Object.fromEntries(vibe.models.map(m => [m.id, m]));
-  assert.deepEqual(byId["glm-5-3"].reasoningLevels.map(l => l.id), ["off", "low", "high", "max"]);
-  assert.equal(byId["glm-5-3"].defaultReasoning, "high");
+  assert.deepEqual(byId["glm-5-3"].reasoningLevels.map(l => l.id), ["medium", "high", "max"]);
+  assert.equal(byId["glm-5-3"].defaultReasoning, "medium", "the session level is kept when the model accepts it");
+  assert.deepEqual(byId["glm-5-2"].reasoningLevels.map(l => l.id), ["medium", "high", "max"]);
   assert.deepEqual(byId["mistral-medium-3.5"].reasoningLevels.map(l => l.id), ["off", "low", "medium", "high", "max"], "other Vibe models are untouched");
   assert.equal(byId["mistral-medium-3.5"].defaultReasoning, "medium");
 }

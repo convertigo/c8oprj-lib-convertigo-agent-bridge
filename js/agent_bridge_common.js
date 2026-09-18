@@ -283,6 +283,70 @@
     return supported[supported.length - 1];
   }
 
+  // The Vibe session option `thinking`, weakest first. It is NOT the provider reasoning_effort.
+  var VIBE_THINKING_LEVELS = ["off", "low", "medium", "high", "max"];
+  // Vibe's native Mistral backend (`backend = "mistral"`, used by the Vibe profile for the GLM
+  // presets) rewrites its thinking level before calling the API: `low` becomes the provider value
+  // "none", which GLM models refuse, and `off` sends no reasoning_effort at all. The generic
+  // OpenAI-style backend (`backend = "generic"`, used by the Convertigo gateway profile) forwards
+  // the level verbatim and drops it on `off`.
+  var VIBE_MISTRAL_THINKING_EFFORT = { off: "", low: "none", medium: "high", high: "high", max: "high" };
+  var VIBE_DEFAULT_THINKING = "high";
+
+  // The reasoning_effort a Vibe session with this thinking level really sends to the provider.
+  // "" means: no reasoning_effort at all.
+  function vibeThinkingEffort(level, genericBackend) {
+    level = trim(level).toLowerCase();
+    if (!level.length || level === "off" || level === "none") { return ""; }
+    if (genericBackend) { return level; }
+    return Object.prototype.hasOwnProperty.call(VIBE_MISTRAL_THINKING_EFFORT, level) ? VIBE_MISTRAL_THINKING_EFFORT[level] : "";
+  }
+
+  // The thinking levels a session may take for a model whose provider accepts `accepted`
+  // (null: unknown, []: the model takes no reasoning_effort at all). A level whose provider value
+  // the model refuses is never offered: `off` only survives for a model that needs no effort.
+  function vibeThinkingLevelsFor(accepted, genericBackend) {
+    if (accepted === null || typeof accepted === "undefined") { return null; }
+    var levels = [];
+    for (var i = 0; i < VIBE_THINKING_LEVELS.length; i++) {
+      var level = VIBE_THINKING_LEVELS[i];
+      var effort = vibeThinkingEffort(level, genericBackend);
+      if (!effort.length) {
+        if (!accepted.length) { levels.push(level); }
+      } else if (accepted.indexOf(effort) >= 0 && levels.indexOf(level) < 0) {
+        levels.push(level);
+      }
+    }
+    return levels;
+  }
+
+  // Clamp any request (including "off", empty or unknown) onto a level the model really takes,
+  // preferring the closest stronger one, then the closest weaker one.
+  function vibeThinkingFor(requested, levels) {
+    requested = trim(requested).toLowerCase();
+    if (levels === null || typeof levels === "undefined") { return requested; }
+    if (!levels.length) { return ""; }
+    // An unknown or empty ask is treated as the default level.
+    if (VIBE_THINKING_LEVELS.indexOf(requested) < 0) { requested = VIBE_DEFAULT_THINKING; }
+    if (levels.indexOf(requested) >= 0) { return requested; }
+    var rank = VIBE_THINKING_LEVELS.indexOf(requested);
+    for (var up = rank + 1; up < VIBE_THINKING_LEVELS.length; up++) {
+      if (levels.indexOf(VIBE_THINKING_LEVELS[up]) >= 0) { return VIBE_THINKING_LEVELS[up]; }
+    }
+    for (var down = rank - 1; down >= 0; down--) {
+      if (levels.indexOf(VIBE_THINKING_LEVELS[down]) >= 0) { return VIBE_THINKING_LEVELS[down]; }
+    }
+    return levels[0];
+  }
+
+  // The level a model starts on when nothing was chosen: the configured preference when the model
+  // takes it, the closest accepted one otherwise.
+  function vibeDefaultThinkingFor(levels, preferred) {
+    preferred = trim(preferred).toLowerCase();
+    if (!preferred.length || preferred === "off" || preferred === "none") { preferred = VIBE_DEFAULT_THINKING; }
+    return vibeThinkingFor(preferred, levels);
+  }
+
   function convertigoGatewayModelNames(options, vibeHome) {
     options = options || {};
     // An explicit model, or an explicit list, pins the offer and skips the gateway.
@@ -5043,18 +5107,19 @@
       var alias = aliases[a];
       var model = known[alias] || { id: alias, label: alias, configuredName: alias, provider: "convertigo", defaultReasoning: "", reasoningLevels: [], serviceTiers: [], speedTiers: [] };
       if (Object.prototype.hasOwnProperty.call(efforts, alias)) {
-        var accepted = efforts[alias];
+        // The gateway profile runs Vibe's generic backend, which forwards the thinking level as
+        // reasoning_effort: a level the model refuses (including "off") is never offered.
+        var usableLevels = vibeThinkingLevelsFor(efforts[alias], true);
         var offeredLevels = (model.reasoningLevels || []).filter(function (level) {
-          var id = String(level.id).toLowerCase();
-          return id === "off" || id === "none" || accepted.indexOf(id) >= 0;
+          return usableLevels.indexOf(String(level.id).toLowerCase()) >= 0;
         });
-        for (var l = 0; l < accepted.length; l++) {
+        for (var l = 0; l < usableLevels.length; l++) {
           var present = false;
-          for (var o = 0; o < offeredLevels.length; o++) { if (String(offeredLevels[o].id).toLowerCase() === accepted[l]) { present = true; } }
-          if (!present) { offeredLevels.push({ id: accepted[l], label: accepted[l], description: "Accepted by this gateway model" }); }
+          for (var o = 0; o < offeredLevels.length; o++) { if (String(offeredLevels[o].id).toLowerCase() === usableLevels[l]) { present = true; } }
+          if (!present) { offeredLevels.push({ id: usableLevels[l], label: usableLevels[l], description: "Accepted by this gateway model" }); }
         }
         model.reasoningLevels = offeredLevels;
-        model.defaultReasoning = gatewayEffortFor(model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING, accepted);
+        model.defaultReasoning = vibeDefaultThinkingFor(usableLevels, model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING);
       }
       model.provider = "convertigo";
       models.push(model);
@@ -7673,19 +7738,21 @@
     var reasoningLevels = normalizeAcpSelectOptions(thinkingOption);
     var defaultReasoning = trim(thinkingOption && (thinkingOption.currentValue || thinkingOption.current_value));
     var gatewayEfforts = convertigoMode && provider.gateway && provider.gateway.efforts ? provider.gateway.efforts : {};
+    var preferredDefaultReasoning = convertigoMode ? CONVERTIGO_LLM_GATEWAY_THINKING : VIBE_DEFAULT_THINKING;
     var models = [];
     for (var i = 0; i < modelChoices.length; i++) {
       var model = modelChoices[i];
       var modelLevels = reasoningLevels, modelDefaultReasoning = defaultReasoning;
       var vibePreset = convertigoMode ? null : managedVibeGlmPreset(model.id);
       if (Object.prototype.hasOwnProperty.call(gatewayEfforts, model.id) || vibePreset !== null) {
-        // Only the levels this model accepts, plus the "off" choice Vibe offers.
+        // Only the thinking levels whose provider reasoning_effort this model really accepts:
+        // "off" (and, on the Vibe profile, "low") are dropped for a model that requires an effort.
         var accepted = vibePreset !== null ? vibePreset.efforts : gatewayEfforts[model.id];
+        var usable = vibeThinkingLevelsFor(accepted, convertigoMode);
         modelLevels = reasoningLevels.filter(function (level) {
-          var id = String(level.id).toLowerCase();
-          return id === "off" || id === "none" || accepted.indexOf(id) >= 0;
+          return usable.indexOf(String(level.id).toLowerCase()) >= 0;
         });
-        modelDefaultReasoning = gatewayEffortFor(defaultReasoning, accepted) || defaultReasoning;
+        modelDefaultReasoning = vibeDefaultThinkingFor(usable, defaultReasoning || preferredDefaultReasoning) || defaultReasoning;
       }
       models.push({
         id: model.id,
@@ -7791,33 +7858,34 @@
     }
     var thinkingOption = findAcpConfigOption(configOptions, "thinking");
     var convertigoSession = isConvertigoGatewayProfile(options) || (entry.providerSettings && normalizeProvider(entry.providerSettings.id) === "convertigo");
-    if (convertigoSession && thinkingOption) {
-      // The thinking level is a session value while its accepted values depend on the model:
-      // re-align it whenever the model or the level changes (medium is refused by GLM 5.3).
+    if (thinkingOption) {
+      // The thinking level is a session value while the reasoning_effort it produces depends on
+      // the model and on the backend behind the profile: re-align it whenever the model or the
+      // level changes, and never leave it on a level the model refuses (GLM 5.3 rejects the
+      // "none" that the Vibe profile sends for "low", and "off" leaves it with no effort at all).
       var activeModelOption = findAcpConfigOption(configOptions, "model");
       var activeAlias = trim(activeModelOption && (activeModelOption.currentValue || activeModelOption.current_value)) || requestedModel;
       var currentThinking = trim(thinkingOption.currentValue || thinkingOption.current_value);
-      var alignedReasoning = gatewayEffortFor(requestedReasoning || currentThinking, gatewayEffortsForAlias(options, activeAlias));
-      if (alignedReasoning.length && alignedReasoning !== (requestedReasoning || currentThinking)) {
-        pushEvent(entry, "warning", {
-          phase: "session/config",
-          message: "Thinking level " + (requestedReasoning || currentThinking) + " is not accepted by " + activeAlias + "; using " + alignedReasoning + "."
-        });
+      var acceptedEfforts = null;
+      if (convertigoSession) {
+        acceptedEfforts = gatewayEffortsForAlias(options, activeAlias);
+      } else {
+        var presetForSession = managedVibeGlmPreset(activeAlias);
+        acceptedEfforts = presetForSession === null ? null : presetForSession.efforts;
       }
-      if (alignedReasoning.length) { requestedReasoning = alignedReasoning; }
-    } else if (thinkingOption) {
-      var presetModelOption = findAcpConfigOption(configOptions, "model");
-      var presetForSession = managedVibeGlmPreset(trim(presetModelOption && (presetModelOption.currentValue || presetModelOption.current_value)) || requestedModel);
-      if (presetForSession !== null) {
-        var presetThinking = requestedReasoning || trim(thinkingOption.currentValue || thinkingOption.current_value);
-        var alignedPresetThinking = gatewayEffortFor(presetThinking, presetForSession.efforts);
-        if (alignedPresetThinking.length && alignedPresetThinking !== presetThinking) {
+      var usableThinking = vibeThinkingLevelsFor(acceptedEfforts, convertigoSession);
+      if (usableThinking !== null && usableThinking.length) {
+        var askedThinking = requestedReasoning || currentThinking;
+        // An explicit ask, an empty ask on a session already off a usable level, or no ask at all:
+        // in every case the session ends up on an accepted level.
+        var alignedThinking = askedThinking.length ? vibeThinkingFor(askedThinking, usableThinking) : vibeDefaultThinkingFor(usableThinking, currentThinking);
+        if (alignedThinking.length && alignedThinking !== askedThinking) {
           pushEvent(entry, "warning", {
             phase: "session/config",
-            message: "Thinking level " + presetThinking + " is not accepted by " + presetForSession.alias + "; using " + alignedPresetThinking + "."
+            message: "Thinking level " + (askedThinking || "(default)") + " is not accepted by " + activeAlias + "; using " + alignedThinking + "."
           });
-          requestedReasoning = alignedPresetThinking;
         }
+        if (alignedThinking.length) { requestedReasoning = alignedThinking; }
       }
     }
     if (requestedReasoning.length && acpConfigOptionHasValue(thinkingOption, requestedReasoning) && requestedReasoning !== trim(thinkingOption.currentValue || thinkingOption.current_value)) {
@@ -7884,6 +7952,20 @@
           }] : []),
           serviceTiers: [],
           speedTiers: []
+        });
+      }
+    }
+    if (!gatewayProfile) {
+      // A GLM preset declared in config.toml only carries one `thinking` value: expose the levels
+      // the model really takes behind Vibe's Mistral backend, and a default it accepts.
+      for (var presetModelIndex = 0; presetModelIndex < models.length; presetModelIndex++) {
+        var presetModel = models[presetModelIndex];
+        var declaredPreset = managedVibeGlmPreset(presetModel.id);
+        if (declaredPreset === null) { continue; }
+        var presetLevels = vibeThinkingLevelsFor(declaredPreset.efforts, false);
+        presetModel.defaultReasoning = vibeDefaultThinkingFor(presetLevels, presetModel.defaultReasoning);
+        presetModel.reasoningLevels = presetLevels.map(function (level) {
+          return { id: level, label: level, description: "Accepted by this Vibe model" };
         });
       }
     }
