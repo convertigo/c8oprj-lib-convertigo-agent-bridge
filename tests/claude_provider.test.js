@@ -460,7 +460,7 @@ console.log("Vibe image attachment contract OK");
   assert.deepEqual(vibeThinkingLevelsFor(glm52, true), ["low", "medium", "high", "max"]);
   assert.deepEqual(vibeThinkingLevelsFor(glm53, false), ["medium", "high", "max"], "native backend: low would send reasoning_effort none");
   assert.deepEqual(vibeThinkingLevelsFor(glm52, false), ["medium", "high", "max"]);
-  assert.deepEqual(vibeThinkingLevelsFor([], false), ["off"], "a model that takes no effort only gets off");
+  assert.deepEqual(vibeThinkingLevelsFor([], false), [], "a model that takes no effort gets no level at all: off is never offered");
   assert.equal(vibeThinkingLevelsFor(null, false), null, "an unprobed model keeps whatever Vibe offers");
 
   // Which backend a model really runs on: the managed GLM presets are declared on the generic
@@ -606,7 +606,7 @@ console.log("Vibe image attachment contract OK");
   assert.equal(byId["glm-5-3"].defaultReasoning, "high", "GLM 5.3 has no medium: the session level goes up to high");
   assert.deepEqual(byId["glm-5-2"].reasoningLevels.map(l => l.id), ["low", "medium", "high", "max"]);
   assert.equal(byId["glm-5-2"].defaultReasoning, "medium", "the session level is kept when the model accepts it");
-  assert.deepEqual(byId["mistral-medium-3.5"].reasoningLevels.map(l => l.id), ["off", "low", "medium", "high", "max"], "other Vibe models are untouched");
+  assert.deepEqual(byId["mistral-medium-3.5"].reasoningLevels.map(l => l.id), ["low", "medium", "high", "max"], "a Vibe-native model keeps its offer, minus off");
   assert.equal(byId["mistral-medium-3.5"].defaultReasoning, "medium");
 }
 
@@ -664,4 +664,134 @@ console.log("Vibe image attachment contract OK");
   assert.match(vibeSource, /acpRequest\(entry, "session\/load", \{\s*sessionId: previousSessionId/);
   assert.match(vibeSource, /finally \{\s*entry\.replayingSession = false;/);
   assert.match(commonSource, /if \(entry\.replayingSession === true\) \{[\s\S]*?return;\s*\}\s*normalizeSessionUpdate/);
+}
+
+// The managed Vibe config.toml is reused when nothing changed.
+// The Vibe runtime re-serializes config.toml on every session start, with bare header keys and
+// its own table layout, and lib_ConvertigoMCP._setupVibe rewrites the Convertigo MCP url right
+// after the Bridge wrote it. Both used to make the reuse check fail at every start, rewriting a
+// byte-identical file and pruning the MCP descriptor cache for nothing.
+{
+  const bridgeWritten = [
+    '[[mcp_servers]]', 'name = "Convertigo"', 'transport = "http"',
+    'url = "http://localhost:18082/convertigo/api/mcp?jsonOnly=false&descriptorVersion=v1"',
+    '', '[mcp_servers.auth]', 'type = "static"', 'api_key_env = "CONVERTIGO_MCP_TOKEN"',
+    '', '[mcp_servers.auth.headers]',
+    '"X-Convertigo-No-Log" = "true"', '"X-Convertigo-Reveal-Mode" = "true"',
+    '"X-Convertigo-Viewer-Debug-Port" = "18083"', ''
+  ].join("\n");
+  // The very same settings, after the Vibe runtime rewrote the file: bare keys.
+  const vibeRewritten = bridgeWritten.replace(/"(X-Convertigo-[^"]+)"(\s*=)/g, "$1$2");
+  const originalReadTextFile = readTextFile;
+  const originalFilePath = filePath;
+  filePath = () => "/home/.vibe-home/config.toml";
+  const inspect = (text) => {
+    readTextFile = () => text;
+    return inspectVibeConfig({ exists: () => true });
+  };
+  const fromBridge = inspect(bridgeWritten);
+  const fromVibe = inspect(vibeRewritten);
+  readTextFile = originalReadTextFile;
+  filePath = originalFilePath;
+  assert.equal(fromBridge.valid, true);
+  assert.equal(fromVibe.valid, true, "the runtime's own layout is still a valid Convertigo entry");
+  for (const field of ["noLog", "revealMode", "viewerDebugPort", "endpoint", "bearerTokenEnv"]) {
+    assert.deepEqual(fromVibe[field], fromBridge[field],
+      "the reuse check must read the same " + field + " whoever serialized the file");
+  }
+  assert.equal(fromVibe.noLog, true, "a bare header key is still a header");
+  assert.equal(fromVibe.revealMode, true);
+  assert.equal(fromVibe.viewerDebugPort, 18083);
+
+  // _setupVibe owns the query string of the url, so only its base is comparable.
+  assert.equal(mcpEndpointBaseUrl("http://h/convertigo/api/mcp?jsonOnly=true"), "http://h/convertigo/api/mcp");
+  assert.equal(mcpEndpointBaseUrl("http://h/convertigo/api/mcp"), "http://h/convertigo/api/mcp");
+
+  // What the Bridge meant to write is recorded beside the file, so two identical starts compare
+  // equal while any real change moves the intent.
+  const base = { endpoint: "http://h/api/mcp?jsonOnly=false", bearerTokenEnv: "CONVERTIGO_MCP_TOKEN",
+    gatewayModels: "", gatewayUrl: "", noLog: true, playwrightCommand: "", playwrightEndpoint: "",
+    providerNames: "mistral,mistral-direct", revealMode: false, viewerDebugPort: 0 };
+  const intent = vibeConfigIntent(base);
+  assert.equal(vibeConfigIntent(base), intent, "the same options always produce the same intent");
+  assert.match(intent, /^bearerTokenEnv=CONVERTIGO_MCP_TOKEN$/m);
+  for (const [field, value] of [["revealMode", true], ["noLog", false], ["endpoint", "http://other/api/mcp"],
+    ["viewerDebugPort", 18083], ["playwrightEndpoint", "http://127.0.0.1:9222"], ["gatewayUrl", "https://llm"],
+    ["gatewayModels", "glm-5-3"], ["providerNames", "mistral"], ["bearerTokenEnv", "OTHER"]]) {
+    const changed = Object.assign({}, base);
+    changed[field] = value;
+    assert.notEqual(vibeConfigIntent(changed), intent, "changing " + field + " must trigger a rewrite");
+  }
+  // Only a change to the MCP server entry invalidates the descriptor cache Vibe keyed on it.
+  const mcpOf = (value) => vibeConfigIntentSubset(vibeConfigIntent(value), VIBE_CONFIG_MCP_INTENT_KEYS);
+  assert.equal(mcpOf(Object.assign({}, base, { gatewayModels: "glm-5-3", providerNames: "mistral" })), mcpOf(base),
+    "a model or provider change leaves the cached tool catalog usable");
+  assert.notEqual(mcpOf(Object.assign({}, base, { revealMode: true })), mcpOf(base));
+
+  // The reuse check compares booleans on both sides: `"".length && true` is the number 0.
+  assert.match(vibeSource, /var expectedRevealMode = !!\(expectedBearerEnv\.length/);
+  assert.match(vibeSource, /var expectedNoLog = !!\(expectedBearerEnv\.length/);
+  assert.match(vibeSource, /recordedIntent === expectedIntent/);
+  assert.match(vibeSource, /mcpEndpointBaseUrl\(setup\.config\.selected\.endpoint\) === mcpEndpointBaseUrl\(expectedEndpoint\)/);
+  assert.match(vibeSource, /writeVibeConfigIntent\(setup\.vibeHome, expectedIntent\)/);
+  // active_model is deliberately not part of the intent: agent_vibe_start passes an empty model
+  // on purpose and sets the session model over ACP, so start and setup would fight over the file.
+  assert.match(vibeSource, /model: "",/);
+  assert.doesNotMatch(vibeSource, /var expectedIntent = vibeConfigIntent\(\{[^}]*activeModel/);
+}
+
+// An agent always needs thinking: `off` is never offered, by any provider or backend.
+{
+  const acp = [
+    { id: "model", currentValue: "mistral-medium-3.5", options: ["mistral-medium-3.5", "vibe-thinking", "local", "glm-5-3"].map(v => ({ value: v, name: v })) },
+    { id: "thinking", currentValue: "off", options: ["off", "low", "medium", "high", "max"].map(v => ({ value: v, name: v })) }];
+  const offer = normalizeVibeAcpProviderSettings(acp, { id: "vibe", source: {}, supports: {} });
+  for (const model of offer.models) {
+    assert.ok(model.reasoningLevels.every(l => l.id !== "off" && l.id !== "none"),
+      model.id + " must not offer off");
+    assert.ok(model.reasoningLevels.some(l => l.id === model.defaultReasoning),
+      model.id + " must default to a level it offers, not to " + model.defaultReasoning);
+  }
+  assert.deepEqual(offer.models[0].reasoningLevels.map(l => l.id), ["low", "medium", "high", "max"]);
+  assert.equal(offer.models[0].defaultReasoning, "high", "a catalog sitting on off pre-selects a real level");
+
+  // A catalog restored from the persistent cache, written before this rule existed, is repaired.
+  const cached = { id: "vibe", models: [
+    { id: "vibe-thinking", defaultReasoning: "off", reasoningLevels: ["off", "low", "high"].map(id => ({ id, label: id })) },
+    { id: "no-reasoning", defaultReasoning: "", reasoningLevels: [] }] };
+  enforceThinkingReasoningLevels(cached);
+  assert.deepEqual(cached.models[0].reasoningLevels.map(l => l.id), ["low", "high"]);
+  assert.equal(cached.models[0].defaultReasoning, "low", "off falls back to the weakest offered level");
+  assert.deepEqual(cached.models[1].reasoningLevels, [], "a model without reasoning keeps none");
+  assert.equal(cached.models[1].defaultReasoning, "", "and is not given one");
+
+  assert.equal(reasoningLevelDisablesThinking("off"), true);
+  assert.equal(reasoningLevelDisablesThinking("None"), true);
+  assert.equal(reasoningLevelDisablesThinking(""), true);
+  assert.equal(reasoningLevelDisablesThinking("minimal"), false, "minimal is the weakest thinking, not its absence");
+  assert.equal(reasoningLevelDisablesThinking("low"), false);
+
+  // Codex: whatever the CLI catalog advertises, an off/none level is dropped and minimal kept.
+  const codexModels = normalizeCodexModelCatalog({ models: [{ slug: "gpt-x",
+    supported_reasoning_levels: [{ id: "none" }, { id: "minimal" }, { id: "low" }, { id: "high" }],
+    default_reasoning_level: "none" }] });
+  assert.deepEqual(codexModels[0].reasoningLevels.map(l => l.id), ["minimal", "low", "high"]);
+  assert.equal(codexModels[0].defaultReasoning, "minimal", "a model defaulting to none starts on the weakest real level");
+  // Claude exposes no off-equivalent level at all.
+  assert.ok(claudeModelCatalog().every(m => m.reasoningLevels.every(l => !reasoningLevelDisablesThinking(l.id))));
+
+  // A session that arrives on off is clamped up, native backend included.
+  const originalAcpRequest = acpRequest;
+  const originalPushEvent = pushEvent;
+  const originalUpdate = updateVibeProviderSettings;
+  const applied = [];
+  acpRequest = (_entry, method, params) => { applied.push([method, params.configId, params.value]); return { configOptions: acp }; };
+  pushEvent = () => {};
+  updateVibeProviderSettings = () => null;
+  configureVibeSession({ sessionId: "s-1", configOptions: acp, providerSettings: { id: "vibe" } }, {}, 1000);
+  acpRequest = originalAcpRequest;
+  pushEvent = originalPushEvent;
+  updateVibeProviderSettings = originalUpdate;
+  assert.deepEqual(applied, [["session/set_config_option", "thinking", "low"]],
+    "a native Vibe session left on off is moved to the weakest remaining level");
 }

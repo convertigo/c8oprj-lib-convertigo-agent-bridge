@@ -303,18 +303,42 @@
     return Object.prototype.hasOwnProperty.call(VIBE_MISTRAL_THINKING_EFFORT, level) ? VIBE_MISTRAL_THINKING_EFFORT[level] : "";
   }
 
+  // An agent always needs thinking: a level that turns reasoning off is never offered, whatever
+  // the provider or the backend. `off` (and the `none` spelling) stays in VIBE_THINKING_LEVELS
+  // only as a rank, so a session that arrives on it is clamped up to the weakest offered level.
+  function reasoningLevelDisablesThinking(level) {
+    var id = trim(level).toLowerCase();
+    return !id.length || id === "off" || id === "none";
+  }
+
+  // Drops the "off"/"none" entries of an offered {id,label,description} level list.
+  function offeredReasoningLevels(levels) {
+    var kept = [];
+    for (var i = 0; levels && i < levels.length; i++) {
+      if (!reasoningLevelDisablesThinking(levels[i] && levels[i].id)) { kept.push(levels[i]); }
+    }
+    return kept;
+  }
+
+  function reasoningLevelIds(levels) {
+    var ids = [];
+    for (var i = 0; levels && i < levels.length; i++) {
+      ids.push(trim(levels[i] && levels[i].id).toLowerCase());
+    }
+    return ids;
+  }
+
   // The thinking levels a session may take for a model whose provider accepts `accepted`
   // (null: unknown, []: the model takes no reasoning_effort at all). A level whose provider value
-  // the model refuses is never offered: `off` only survives for a model that needs no effort.
+  // the model refuses is never offered, and neither is a level that sends no effort at all.
   function vibeThinkingLevelsFor(accepted, genericBackend) {
     if (accepted === null || typeof accepted === "undefined") { return null; }
     var levels = [];
     for (var i = 0; i < VIBE_THINKING_LEVELS.length; i++) {
       var level = VIBE_THINKING_LEVELS[i];
+      if (reasoningLevelDisablesThinking(level)) { continue; }
       var effort = vibeThinkingEffort(level, genericBackend);
-      if (!effort.length) {
-        if (!accepted.length) { levels.push(level); }
-      } else if (accepted.indexOf(effort) >= 0 && levels.indexOf(level) < 0) {
+      if (effort.length && accepted.indexOf(effort) >= 0 && levels.indexOf(level) < 0) {
         levels.push(level);
       }
     }
@@ -344,8 +368,12 @@
   // takes it, the closest accepted one otherwise.
   function vibeDefaultThinkingFor(levels, preferred) {
     preferred = trim(preferred).toLowerCase();
-    if (!preferred.length || preferred === "off" || preferred === "none") { preferred = VIBE_DEFAULT_THINKING; }
-    return vibeThinkingFor(preferred, levels);
+    if (reasoningLevelDisablesThinking(preferred)) { preferred = VIBE_DEFAULT_THINKING; }
+    var resolved = vibeThinkingFor(preferred, levels);
+    // An empty level list means the model takes no reasoning_effort at all: nothing to send.
+    if (levels && !levels.length) { return resolved; }
+    // `levels` may be null (unknown) or carry a stale "off": never hand one back.
+    return reasoningLevelDisablesThinking(resolved) ? VIBE_DEFAULT_THINKING : resolved;
   }
 
   // Whether the reasoning_effort of this model is forwarded verbatim. True for every model of the
@@ -5151,11 +5179,36 @@
         model.reasoningLevels = offeredLevels;
         model.defaultReasoning = vibeDefaultThinkingFor(usableLevels, model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING);
       }
+      // A model the gateway declares no efforts for keeps the levels of the cached catalog:
+      // sweep `off` out of those too, and off the default.
+      model.reasoningLevels = offeredReasoningLevels(model.reasoningLevels);
+      if (model.reasoningLevels.length) {
+        model.defaultReasoning = vibeDefaultThinkingFor(
+          reasoningLevelIds(model.reasoningLevels),
+          model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING
+        );
+      }
       model.provider = "convertigo";
       models.push(model);
     }
     provider.models = models;
     if (aliases.indexOf(trim(provider.defaultModel)) < 0) { provider.defaultModel = models[0].id; }
+    return provider;
+  }
+
+  // Last guard on the way out, for every provider and every backend: an agent always needs
+  // thinking, so no model ever offers a level that turns it off. It also repairs a catalog
+  // restored from the persistent cache, which may have been written before this rule existed.
+  function enforceThinkingReasoningLevels(provider) {
+    var models = (provider && provider.models) || [];
+    for (var i = 0; i < models.length; i++) {
+      var model = models[i] || {};
+      var levels = offeredReasoningLevels(model.reasoningLevels);
+      model.reasoningLevels = levels;
+      if (levels.length && trim(model.defaultReasoning).length && reasoningLevelDisablesThinking(model.defaultReasoning)) {
+        model.defaultReasoning = levels[0].id;
+      }
+    }
     return provider;
   }
 
@@ -5175,7 +5228,7 @@
     provider.source = provider.source || {};
     provider.source.settingsCached = true;
     provider.source.settingsCachedAt = provider.source.modelCatalogRefreshRequired ? 0 : Number(cached.cachedAt || 0);
-    return applyGatewayOfferToProvider(provider);
+    return enforceThinkingReasoningLevels(applyGatewayOfferToProvider(provider));
   }
 
   function requireCachedProviderConfiguration(provider) {
@@ -7401,7 +7454,10 @@
     for (var i = 0; i < levels.length; i++) {
       var item = levels[i] || {};
       var effort = normalizeCodexReasoningEffort(item.effort || item.id || item.name);
-      if (!effort.length || seen[effort]) {
+      // An agent always needs thinking: whatever the CLI catalog advertises, a level that turns
+      // reasoning off is never offered. `minimal` is kept: it is the weakest thinking level of
+      // the GPT-5 family, not the absence of thinking.
+      if (!effort.length || seen[effort] || reasoningLevelDisablesThinking(effort)) {
         continue;
       }
       seen[effort] = true;
@@ -7445,6 +7501,10 @@
       }
       var reasoning = normalizeCodexReasoningLevels(item.supported_reasoning_levels || item.supportedReasoningLevels);
       var defaultReasoning = normalizeCodexReasoningEffort(item.default_reasoning_level || item.defaultReasoningLevel);
+      // A model whose catalog default is an off/none level starts on the weakest offered one.
+      if (defaultReasoning.length && reasoningLevelDisablesThinking(defaultReasoning) && reasoning.length) {
+        defaultReasoning = reasoning[0].id;
+      }
       models.push({
         id: id,
         label: String(item.display_name || item.displayName || id),
@@ -7897,7 +7957,9 @@
     if (!modelChoices.length) {
       return provider;
     }
-    var reasoningLevels = normalizeAcpSelectOptions(thinkingOption);
+    // Vibe advertises `off` for its native models: an agent always needs thinking, so it never
+    // reaches the offer, whatever the model or the backend behind it.
+    var reasoningLevels = offeredReasoningLevels(normalizeAcpSelectOptions(thinkingOption));
     var defaultReasoning = trim(thinkingOption && (thinkingOption.currentValue || thinkingOption.current_value));
     var gatewayEfforts = convertigoMode && provider.gateway && provider.gateway.efforts ? provider.gateway.efforts : {};
     var preferredDefaultReasoning = convertigoMode ? CONVERTIGO_LLM_GATEWAY_THINKING : VIBE_DEFAULT_THINKING;
@@ -7916,6 +7978,13 @@
           return usable.indexOf(String(level.id).toLowerCase()) >= 0;
         });
         modelDefaultReasoning = vibeDefaultThinkingFor(usable, defaultReasoning || preferredDefaultReasoning) || defaultReasoning;
+      } else if (modelLevels.length) {
+        // Native model: the accepted efforts are unknown, but the session default must still be
+        // one of the offered levels, never the `off` the ACP catalog may currently sit on.
+        modelDefaultReasoning = vibeDefaultThinkingFor(
+          reasoningLevelIds(modelLevels),
+          defaultReasoning || preferredDefaultReasoning
+        );
       }
       models.push({
         id: model.id,
@@ -8037,6 +8106,11 @@
         acceptedEfforts = presetForSession === null ? null : presetForSession.efforts;
       }
       var usableThinking = vibeThinkingLevelsFor(acceptedEfforts, vibeModelUsesGenericBackend(activeAlias, convertigoSession));
+      if (usableThinking === null) {
+        // A native Vibe model: the efforts it accepts are unknown, but `off` is still refused, so
+        // a session that arrives on it is clamped up to the weakest level Vibe offers.
+        usableThinking = reasoningLevelIds(offeredReasoningLevels(normalizeAcpSelectOptions(thinkingOption)));
+      }
       if (usableThinking !== null && usableThinking.length) {
         var askedThinking = requestedReasoning || currentThinking;
         // An explicit ask, an empty ask on a session already off a usable level, or no ask at all:
@@ -8131,6 +8205,20 @@
         presetModel.reasoningLevels = presetLevels.map(function (level) {
           return { id: level, label: level, description: "Accepted by this Vibe model" };
         });
+      }
+    }
+    // Whatever the profile and whatever config.toml or the gateway declared: `off` is never
+    // offered, and no model is left defaulting to it.
+    for (var offerIndex = 0; offerIndex < models.length; offerIndex++) {
+      var offeredModel = models[offerIndex];
+      offeredModel.reasoningLevels = offeredReasoningLevels(offeredModel.reasoningLevels);
+      if (offeredModel.reasoningLevels.length) {
+        offeredModel.defaultReasoning = vibeDefaultThinkingFor(
+          reasoningLevelIds(offeredModel.reasoningLevels),
+          offeredModel.defaultReasoning
+        );
+      } else if (reasoningLevelDisablesThinking(offeredModel.defaultReasoning)) {
+        offeredModel.defaultReasoning = "";
       }
     }
     var gatewayAliases = [], gatewayEfforts = {};

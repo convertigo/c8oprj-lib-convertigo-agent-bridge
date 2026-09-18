@@ -660,8 +660,10 @@ assert.equal(vibeProvider.models[1].configuredName, "zai-glm-5-2");
 // because it would send no reasoning_effort at all.
 assert.deepEqual(vibeProvider.models[1].reasoningLevels.map((level) => level.id), ["low", "medium", "high", "max"]);
 assert.equal(vibeProvider.models[1].defaultReasoning, "high");
-// A model Vibe knows natively keeps the full offer.
-assert.deepEqual(vibeProvider.models[0].reasoningLevels.map((level) => level.id), ["off", "low", "medium", "high", "max"]);
+// A model Vibe knows natively keeps its offer, minus `off`: an agent always needs thinking, so
+// no model of any provider or backend ever offers a level that turns reasoning off.
+assert.deepEqual(vibeProvider.models[0].reasoningLevels.map((level) => level.id), ["low", "medium", "high", "max"]);
+assert.equal(vibeProvider.models[0].defaultReasoning, "high");
 assert.equal(vibeProvider.reasoningMode, "runtime_selectable");
 assert.equal(vibeProvider.supports.reasoning, true);
 

@@ -42,6 +42,7 @@ const cacheSandbox = {
   readPersistentProviderSettingsCache: () => ({ models: [{ id: 'old' }], cachedAt: 1000, defaults: {} }),
   providerCacheKey: () => 'vibe:test',
   applyGatewayOfferToProvider: provider => provider,
+  enforceThinkingReasoningLevels: provider => provider,
   trim: value => String(value || '').trim(),
   now: () => 1500
 };
