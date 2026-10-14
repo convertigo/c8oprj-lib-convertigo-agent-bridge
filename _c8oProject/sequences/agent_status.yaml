@@ -1,10 +1,8 @@
 comment: Return the status of one agent process or the current registry.
 ↓Run [steps.SimpleStep-1781600000501]: 
   expression: |
-    'include("js/vibe_agent_bridge.js");
-    result = C8O.agentBridge.status({
-      handle: typeof handle === "undefined" ? "" : handle
-    });'
+    include("js/vibe_agent_bridge.js");
+    result=C8O.agentBridge.status({handle:typeof handle === "undefined"?"":handle});
 ↓result [steps.JsonToXmlStep-1781600000502]: 
   jsonObject: 
     - xmlizable: 

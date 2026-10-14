@@ -1,0 +1,31 @@
+accessibility: Private
+comment: Private wrapper quota snapshots; invoked by authenticated Assistant owner/provider-checked facade. Never exposed through public diagnostics or public event buffers; no runtime spawn.
+includeResponseElement: false
+responseTimeout: 120
+↓Read [steps.SimpleStep-1791881328455]: 
+  expression: |
+    var studio=com.twinsoft.convertigo.engine.Engine.isStudioMode();
+    var admin=com.twinsoft.convertigo.engine.Engine.authenticatedSessionManager.hasRole(context.httpSession,com.twinsoft.convertigo.engine.AuthenticatedSessionManager.Role.WEB_ADMIN);
+    var authenticated=String(context.getAuthenticatedUser()||"").length>0;
+    if(!(studio&&admin)&&!(!studio&&authenticated)){throw new com.twinsoft.convertigo.engine.EngineException("Authenticated quota caller required (Studio WEB_ADMIN)");}
+    include("js/vibe_agent_bridge.js");
+    var response=C8O.agentBridge.quota({handle:String(handle||"")});
+↓Response [steps.JsonToXmlStep-1791881328457]: 
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: response
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: response
+↓handle [variables.RequestableVariable-1791881328449]: 
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15

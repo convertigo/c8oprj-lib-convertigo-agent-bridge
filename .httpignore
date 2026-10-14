@@ -22,3 +22,10 @@ gradle/
 gradle/**
 build.gradle
 settings.gradle
+
+# Local verification, tests and authoring notes.
+/docs/**
+/tests/**
+/AGENTS.md
+/build/**
+/.project

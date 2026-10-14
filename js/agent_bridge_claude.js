@@ -2582,6 +2582,9 @@
       pushEvent(entry, "claude/event", { method: "system/" + subtype, params: message, provider: "claude" });
       return;
     }
+    if (type === "rate_limit_event") {
+      recordClaudeQuota(entry, message.rate_limit_info || message.rateLimitInfo || {}); return;
+    }
     if (type === "stream_event") {
       claudeHandleStreamEvent(entry, message.event || {});
       return;

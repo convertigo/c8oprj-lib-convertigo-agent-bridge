@@ -1078,6 +1078,7 @@
       capabilities: null
     }, timeoutMs);
     writeJson(entry, { method: "initialized" });
+    sendCodexAppServerRequest(entry, "account/rateLimits/read", null);
 
     var threadResponse;
     if (entry.sessionId.length || entry.codexThreadId.length) {
@@ -1400,6 +1401,10 @@
         pending.response = message;
         pending.done = true;
         pending.completedAt = now();
+        if (pending.method === "account/rateLimits/read") {
+          if (!message.error) { recordCodexQuota(entry, message.result || {}); }
+          return; // Unsupported/unavailable account quota is not a failed agent turn.
+        }
         if (message.error) {
           entry.lastError = JSON.stringify(message.error);
           pushEvent(entry, "turn/error", {
@@ -1431,6 +1436,9 @@
     if (typeof message.id !== "undefined") {
       handleCodexAppServerRequest(entry, message);
       return;
+    }
+    if (method === "account/rateLimits/updated") {
+      recordCodexQuota(entry, params); return;
     }
     if (method === "thread/started") {
       var thread = params.thread || {};

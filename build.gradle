@@ -7,7 +7,7 @@ buildscript {
 		mavenCentral()
 	}
 	dependencies {
-		classpath 'com.convertigo:gradle-plugin:8.4.0-SNAPSHOT'
+		classpath 'com.convertigo:gradle-plugin:8.4.6'
 	}
 }
 

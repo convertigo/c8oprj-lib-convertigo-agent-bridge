@@ -364,3 +364,23 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   do not invent a custom GitHub Actions build path.
 - Tags are expected to match the Convertigo project version when producing `.car`
   releases.
+
+## Quota snapshots
+
+- Private `agent_quota(handle)` reads account rate limits from an existing
+  Codex app-server, without starting a runtime. The authenticated Assistant
+  facade chooses the server-only handle after checking owner/provider. Quota
+  failures are nonfatal; no quota is added to public status or event buffers.
+  The private sequence also checks Studio WEB_ADMIN or server authentication:
+  Studio mode can execute Private requestables over HTTP, so Private alone is
+  not the authentication boundary.
+- `account/rateLimits/updated` (Codex), `rate_limit_event` (Claude) and ACP
+  `usage_update` (Vibe) update aggregate snapshots in server memory, read only
+  through the private quota sequence.
+  Only Codex/Claude reported limit windows represent account quotas; ACP context
+  tokens/cost are separate and do not imply a credit balance.
+- Snapshots contain only provider, source, window percentages/reset times,
+  timestamps and optional context/cost aggregates. Never pass credentials or
+  raw protocol messages as a quota snapshot. Missing values are not zero usage.
+- Run `node tests/agent_quota.test.js`, `node tests/claude_provider.test.js` and
+  `node tests/agent_bridge_runtime.test.js` after changing this contract.

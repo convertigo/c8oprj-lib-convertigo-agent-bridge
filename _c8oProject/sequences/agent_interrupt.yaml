@@ -1,5 +1,4 @@
 comment: Stop the running turn of an agent and keep its process, so the conversation context survives. Works for every provider; answers unsupported when the protocol has no interrupt adapter.
-responseTimeout: 60
 ↓Run [steps.SimpleStep-1789800000001]: 
   expression: |
     'include("js/vibe_agent_bridge.js");

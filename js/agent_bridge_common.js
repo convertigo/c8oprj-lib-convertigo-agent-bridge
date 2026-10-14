@@ -8979,6 +8979,61 @@
     };
   }
 
+  // Public quota snapshots contain only limits, timestamps and aggregate usage.
+  function quotaNumber(value) {
+    if (value === null || typeof value === "undefined" || value === "") { return null; }
+    var n = Number(value); return isFinite(n) && n >= 0 ? n : null;
+  }
+  function quotaWindow(id, used, reset, duration, status) {
+    used = quotaNumber(used); reset = quotaNumber(reset);
+    return { id: String(id || "account"), usedPercent: used === null ? null : Math.min(100, used),
+      remainingPercent: used === null ? null : Math.max(0, 100 - used),
+      resetsAt: reset, windowDurationMins: quotaNumber(duration), status: String(status || "") };
+  }
+  function updateWrapperQuota(entry, incoming) {
+    incoming.provider = String(entry.provider || incoming.provider || "");
+    incoming.source = "wrapper"; incoming.updatedAt = now();
+    if (incoming.kind === "context" && entry.quota && entry.quota.kind === "limits") {
+      entry.quota.context = incoming.context; entry.quota.updatedAt = incoming.updatedAt;
+    } else { entry.quota = incoming; }
+    entry.lastAccess = incoming.updatedAt; // Quota is exposed only by the private quota requestable.
+  }
+  function recordCodexQuota(entry, payload) {
+    payload = payload || {}; var byId = payload.rateLimitsByLimitId; var snapshots = [];
+    if (byId && typeof byId === "object") {
+      for (var id in byId) { if (Object.prototype.hasOwnProperty.call(byId, id) && byId[id]) { snapshots.push({id:id, value:byId[id]}); } }
+    }
+    if (!snapshots.length && payload.rateLimits) { snapshots.push({id:payload.rateLimits.limitId || "account", value:payload.rateLimits}); }
+    var windows = [];
+    for (var i = 0; i < snapshots.length; i++) {
+      var snapshot = snapshots[i].value;
+      for (var j = 0; j < 2; j++) {
+        var name = j === 0 ? "primary" : "secondary", w = snapshot[name];
+        if (w) { windows.push(quotaWindow(snapshots[i].id + ":" + name, w.usedPercent, w.resetsAt, w.windowDurationMins, snapshot.rateLimitReachedType || "")); }
+      }
+    }
+    updateWrapperQuota(entry, {available:windows.length > 0, kind:"limits", windows:windows});
+  }
+  function recordClaudeQuota(entry, info) {
+    info = info || {}; var fraction = quotaNumber(info.utilization);
+    var id = String(info.rateLimitType || info.rate_limit_type || "account"), status = String(info.status || "");
+    var window = quotaWindow(id, fraction === null ? null : fraction * 100,
+      info.resetsAt == null ? info.resets_at : info.resetsAt, null, status);
+    var windows = entry.quota && entry.quota.kind === "limits" ? entry.quota.windows.slice(0) : [];
+    var replaced = false;
+    for (var i = 0; i < windows.length; i++) { if (windows[i].id === id) { windows[i] = window; replaced = true; } }
+    if (!replaced) { windows.push(window); }
+    updateWrapperQuota(entry, {available:!!status || fraction !== null, kind:"limits", windows:windows});
+  }
+  function recordVibeUsage(entry, update) {
+    update = update || {};
+    updateWrapperQuota(entry, {available:false, kind:"context", windows:[], context:{
+      usedTokens:quotaNumber(update.used), limitTokens:quotaNumber(update.size),
+      costAmount:update.cost ? quotaNumber(update.cost.amount) : null,
+      costCurrency:update.cost && /^[A-Z]{3}$/.test(String(update.cost.currency)) ? String(update.cost.currency) : ""
+    }});
+  }
+
   function pushEvent(entry, type, data) {
     var event = {
       index: entry.nextIndex++,
@@ -9661,6 +9716,7 @@
       return;
     }
     if (kind === "usage_update") {
+      recordVibeUsage(entry, update);
       pushEvent(entry, "usage/update", eventData);
       return;
     }
@@ -10237,4 +10293,15 @@
       kept: kept,
       timestamp: current
     };
+  };
+
+  C8O.agentBridge.quota = function(options) {
+    options = options || {};
+    var entry = getRegistry().get(resolveHandle(options.handle));
+    if (entry === null || typeof entry === "undefined") { return {ok:true,status:"unavailable",quota:null}; }
+    if (entry.provider === "codex" && entry.protocol === "codex-app-server" && processAlive(entry.process)) {
+      try { codexAppServerRequest(entry, "account/rateLimits/read", null, 5000); }
+      catch (_quotaUnavailable) { /* Quota availability must not fail the active turn. */ }
+    }
+    return {ok:true,status:entry.quota ? "ok" : "unavailable",quota:entry.quota || null};
   };
