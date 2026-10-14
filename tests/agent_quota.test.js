@@ -41,3 +41,27 @@ const common=fs.readFileSync('js/agent_bridge_common.js','utf8');
 const statusSource=common.slice(common.indexOf('  function statusOf(entry)'),common.indexOf('  C8O.agentBridge.events ='));
 assert.ok(!/quota\s*:/.test(statusSource),'public runtime diagnostics must not expose quota snapshots');
 console.log('Quota snapshots stay outside public diagnostics and event buffers');
+
+// Modern Claude get_usage values are percentages, not event fractions. Keep
+// model-scoped limits and convert the ISO reset to the common epoch contract.
+const usageEntry={provider:'claude'};
+recordClaudeUsage(usageEntry,{rate_limits_available:true,rate_limits:{
+ five_hour:{utilization:24,resets_at:'2026-10-14T20:50:00Z'},
+ seven_day:{utilization:64,resets_at:'2026-10-17T09:00:00Z'},
+ model_scoped:[{display_name:'Fable',utilization:4,resets_at:'2026-10-17T09:00:00Z'}],
+ credentials:'must not escape',extra_usage:{is_enabled:false}
+}});
+assert.deepEqual(usageEntry.quota.windows.map(w=>w.usedPercent),[24,64,4]);
+assert.deepEqual(usageEntry.quota.windows.map(w=>w.windowDurationMins),[300,10080,10080]);
+assert.equal(usageEntry.quota.windows[0].resetsAt,Date.parse('2026-10-14T20:50:00Z')/1000);
+assert.ok(!JSON.stringify(usageEntry.quota).includes('credentials'));
+recordClaudeUsage(usageEntry,{rate_limits_available:false,rate_limits:null});
+assert.equal(usageEntry.quota.available,false);assert.deepEqual(usageEntry.quota.windows,[]);
+
+// Account metadata replies (including account identity) never enter progress.
+const metadataPending={method:'get_usage',done:false};
+const metadataEntry={provider:'claude',pending:{get(){return metadataPending;}}};
+handleClaudeStreamLine(metadataEntry,JSON.stringify({type:'control_response',response:{subtype:'success',request_id:'usage',response:{account:{token:'secret'},rate_limits_available:true,rate_limits:{seven_day:{utilization:64}}}}}),'stdout');
+assert.equal(metadataPending.done,true);assert.equal(metadataEntry.quota.windows[0].usedPercent,64);
+assert.ok(!JSON.stringify(recorded).includes('secret'));
+console.log('Claude control usage: units, scoped models, missing limits and private replies passed');

@@ -5082,7 +5082,7 @@
   function providerSettingsCacheKey(providerId, profilePath) {
     var provider = normalizeProvider(providerId);
     var profile = trim(profilePath);
-    return provider === "vibe" && profile.length ? provider + ":" + hashShort(canonicalFilePath(new File(profile))) : provider;
+    return (provider === "vibe" || provider === "claude") && profile.length ? provider + ":" + hashShort(canonicalFilePath(new File(profile))) : provider;
   }
 
   function providerCacheKey(provider) {
@@ -5095,7 +5095,7 @@
       var persistent = readPersistentRuntimeUpdateCache(workspaceRoot);
       var key = trim(cacheKey) || normalizeProvider(providerId);
       var cached = persistent.value.providers[key];
-      if ((!cached || !cached.models || !cached.models.length) && key !== normalizeProvider(providerId) && normalizeProvider(providerId) !== "vibe") {
+      if ((!cached || !cached.models || !cached.models.length) && key !== normalizeProvider(providerId) && ["vibe","claude"].indexOf(normalizeProvider(providerId)) < 0) {
         cached = persistent.value.providers[normalizeProvider(providerId)];
       }
       if (cached && cached.models && cached.models.length) {
@@ -9025,6 +9025,110 @@
     if (!replaced) { windows.push(window); }
     updateWrapperQuota(entry, {available:!!status || fraction !== null, kind:"limits", windows:windows});
   }
+  function recordClaudeUsage(entry, body) {
+    body = body || {};
+    var limits = body.rate_limits, windows = [];
+    if (body.rate_limits_available === true && limits) {
+      var names = ["five_hour", "seven_day", "seven_day_oauth_apps", "seven_day_opus", "seven_day_sonnet"];
+      var append = function(id, value, duration) {
+        if (!value) { return; }
+        var reset = value.resets_at ? Date.parse(String(value.resets_at)) / 1000 : null;
+        windows.push(quotaWindow(id, value.utilization, isFinite(reset) ? reset : null, duration, ""));
+      };
+      for (var i = 0; i < names.length; i++) { append(names[i], limits[names[i]], i === 0 ? 300 : 10080); }
+      var scoped = limits.model_scoped || [];
+      for (var j = 0; j < scoped.length; j++) {
+        var label = trim(scoped[j] && scoped[j].display_name);
+        if (label.length) { append("seven_day_" + label, scoped[j], 10080); }
+      }
+    }
+    // get_usage utilization is already a percentage; rate_limit_event uses a fraction.
+    updateWrapperQuota(entry, {available:windows.length > 0,kind:"limits",windows:windows});
+  }
+
+  // Short-lived metadata-only CLI process: initialize + usage, never a user
+  // message, thread/new, session/new or inference. Credentials remain in the
+  // managed home/environment; only normalized model/quota fields leave here.
+  function readWrapperMetadata(provider, options, setup, includeUsage) {
+    options = options || {};
+    var home = provider === "claude" ? setup.claudeHome : setup.codexHome;
+    var command = provider === "claude" ? setup.claude : setup.codex;
+    var key = "wrapper-metadata:" + provider + ":" + String(home || "") + ":" + String(command.version || "");
+    if (provider === "claude") {
+      var authStamp = claudeCredentialsState(new File(home,CLAUDE_CREDENTIALS_FILE));
+      key += ":" + authStamp.updatedAt + ":" + authStamp.expiresAt;
+    }
+    var cache = getRuntimeUpdateCache(), cached = cache.get(key);
+    var maxAge = includeUsage ? 30000 : DEFAULT_RUNTIME_UPDATE_CACHE_MS;
+    var refresh = boolValue(options.refreshModelCatalog || options.refreshProviderSettings || options.refreshUpdateCheck,false);
+    if (!refresh && cached && now() - Number(cached.at) < maxAge) { return cached; }
+    var result = {ok:false,models:cached && cached.models || [],quota:null,at:now()};
+    var process = null, reader = null, writer = null;
+    try {
+      var args = provider === "claude"
+        ? [command.path,"-p","--input-format","stream-json","--output-format","stream-json","--verbose","--strict-mcp-config","--mcp-config",'{"mcpServers":{}}',"--no-session-persistence"]
+        : [command.path,"app-server","--listen","stdio://"];
+      var pb = new ProcessBuilder(toJavaList(args));
+      pb.directory(new File(setup.workspaceRoot));
+      applyEngineProxyEnvironment(pb.environment(), agentProxyTargetUrl(provider, {}));
+      envObjectToMap(pb.environment(), provider === "claude" ? claudeRuntimeEnv(options,home) : codexRuntimeEnv(options,home));
+      pb.redirectError(Packages.java.lang.ProcessBuilder.Redirect.DISCARD);
+      process = pb.start();
+      writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
+      reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+      var send = function(message) { writer.write(JSON.stringify(message));writer.newLine();writer.flush(); };
+      send(provider === "claude" ? {type:"control_request",request_id:"metadata-init",request:{subtype:"initialize"}}
+        : {id:1,method:"initialize",params:{clientInfo:{name:"ConvertigoQuota",version:"1"},capabilities:null}});
+      var deadline = now() + intValue(options.settingsTimeoutMs,20000,1000,60000);
+      while (now() < deadline && processAlive(process)) {
+        if (!reader.ready()) { Thread.sleep(25);continue; }
+        var line = reader.readLine();if (line === null) { break; }
+        var message = parseJsonSafe(line,null);if (!message) { continue; }
+        if (provider === "claude" && message.type === "control_response") {
+          var response = message.response || {};
+          if (response.subtype !== "success") { break; }
+          if (String(response.request_id) === "metadata-init") {
+            result.models = normalizeClaudeModelCatalog((response.response || {}).models || []);
+            if (!includeUsage) { result.ok = result.models.length > 0;break; }
+            send({type:"control_request",request_id:"metadata-usage",request:{subtype:"get_usage",skip_behaviors:true}});
+          } else if (String(response.request_id) === "metadata-usage") {
+            var claudeEntry = {provider:"claude"};recordClaudeUsage(claudeEntry,response.response || {});
+            result.quota = claudeEntry.quota;result.ok = true;break;
+          }
+        } else if (provider === "codex" && Number(message.id) === 1) {
+          if (message.error) { break; }
+          send({method:"initialized"});send({id:2,method:"account/rateLimits/read"});
+        } else if (provider === "codex" && Number(message.id) === 2) {
+          if (message.error) { break; }
+          var codexEntry = {provider:"codex"};recordCodexQuota(codexEntry,message.result || {});
+          result.quota = codexEntry.quota;result.ok = true;break;
+        }
+      }
+    } catch (_metadataUnavailable) { /* Optional metadata must not fail settings or a turn. */ }
+    finally {
+      try { if (process !== null && processAlive(process)) { process.destroyForcibly();process.waitFor(2,TimeUnit.SECONDS); } } catch (_metadataStop) {}
+      try { if (writer !== null) { writer.close(); } } catch (_metadataWriter) {}
+      try { if (reader !== null) { reader.close(); } } catch (_metadataReader) {}
+    }
+    // A model-only probe must not suppress the first usage read for 30 seconds.
+    if (!includeUsage) { result.at = now() - 30001; }
+    cache.put(key,result);return result;
+  }
+
+  function readWrapperAccountQuota(options) {
+    var provider = normalizeProvider(options.provider);
+    if (provider !== "claude" && provider !== "codex") { return null; }
+    // The private facade supplies the authenticated identity, never caller paths.
+    var scoped = {userId:trim(options.userId),homeScope:"user",runtimePresenceOnly:true};
+    if (!scoped.userId.length) { return null; }
+    var setup = provider === "claude" ? detectClaudeRuntimePresence(scoped) : detectCodexRuntimePresence(scoped);
+    var runtime = provider === "claude" ? setup.claude : setup.codex;
+    if (!runtime.found) { return null; }
+    var home = provider === "claude" ? setup.claudeHome : setup.codexHome;
+    var auth = provider === "claude" ? inspectClaudeAuthentication(home) : inspectCodexAuthentication(home);
+    if (auth.configured !== true) { return null; }
+    return readWrapperMetadata(provider,scoped,setup,true).quota;
+  }
   function recordVibeUsage(entry, update) {
     update = update || {};
     updateWrapperQuota(entry, {available:false, kind:"context", windows:[], context:{
@@ -10298,10 +10402,20 @@
   C8O.agentBridge.quota = function(options) {
     options = options || {};
     var entry = getRegistry().get(resolveHandle(options.handle));
-    if (entry === null || typeof entry === "undefined") { return {ok:true,status:"unavailable",quota:null}; }
+    if (entry === null || typeof entry === "undefined" || !processAlive(entry.process)) {
+      var accountQuota = readWrapperAccountQuota(options);
+      var retained = accountQuota || (entry && entry.quota) || null;
+      return {ok:true,status:retained ? "ok" : "unavailable",quota:retained};
+    }
     if (entry.provider === "codex" && entry.protocol === "codex-app-server" && processAlive(entry.process)) {
       try { codexAppServerRequest(entry, "account/rateLimits/read", null, 5000); }
       catch (_quotaUnavailable) { /* Quota availability must not fail the active turn. */ }
+    }
+    if (entry.provider === "claude" && entry.protocol === "claude-stream-json") {
+      try {
+        if (!entry.claudeControlInitialized) { claudeControlRequest(entry,"initialize",{},10000);entry.claudeControlInitialized = true; }
+        claudeControlRequest(entry,"get_usage",{skip_behaviors:true},10000);
+      } catch (_claudeQuotaUnavailable) { /* Older CLIs keep their event snapshot. */ }
     }
     return {ok:true,status:entry.quota ? "ok" : "unavailable",quota:entry.quota || null};
   };

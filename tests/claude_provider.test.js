@@ -94,6 +94,16 @@ const catalog = claudeModelCatalog();
 assert.equal(catalog[0].id, "fable");
 assert.ok(catalog.some((model) => model.id === "opus"), "the Opus alias must stay available");
 assert.deepEqual(catalog[0].reasoningLevels.map((level) => level.id), ["low", "medium", "high", "xhigh", "max"]);
+const discovered=normalizeClaudeModelCatalog([
+ {value:'opus',resolvedModel:'claude-opus-5-5',displayName:'Opus 5.5',description:'For complex work',supportsEffort:true,supportedEffortLevels:['low','high','max']},
+ {value:'fable',resolvedModel:'claude-fable-5-1',displayName:'Fable 5.1',description:'For your toughest challenges',supportsEffort:true},
+ {value:'claude-haiku-4-5',displayName:'Haiku 4.5',supportsEffort:false},
+ {value:'opus',displayName:'duplicate'}
+]);
+assert.deepEqual(discovered.map(m=>m.label),['Opus 5.5','Fable 5.1','Haiku 4.5']);
+assert.deepEqual(discovered[0].reasoningLevels.map(l=>l.id),['low','high','max']);
+assert.deepEqual(discovered[2].reasoningLevels,[]);
+assert.ok(catalog.every(m=>! /\d/.test(m.label)), 'fallback aliases must not advertise stale versions');
 
 // Stream-json mapping on a fake entry.
 function fakeEntry() {

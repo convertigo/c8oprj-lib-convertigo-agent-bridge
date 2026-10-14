@@ -9,7 +9,7 @@ responseTimeout: 120
     var authenticated=String(context.getAuthenticatedUser()||"").length>0;
     if(!(studio&&admin)&&!(!studio&&authenticated)){throw new com.twinsoft.convertigo.engine.EngineException("Authenticated quota caller required (Studio WEB_ADMIN)");}
     include("js/vibe_agent_bridge.js");
-    var response=C8O.agentBridge.quota({handle:String(handle||"")});
+    var response=C8O.agentBridge.quota({handle:String(handle||""),provider:String(provider||""),userId:studio?"studio":String(context.getAuthenticatedUser()||"")});
 ↓Response [steps.JsonToXmlStep-1791881328457]: 
   jsonObject: 
     - xmlizable: 
@@ -24,6 +24,12 @@ responseTimeout: 120
         - ↑mode: PLAIN
         - →→: response
 ↓handle [variables.RequestableVariable-1791881328449]: 
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15
+↓provider [variables.RequestableVariable-1792004329883]: 
   value: 
     - ↑ciphered: true
     - ↑traceable: false

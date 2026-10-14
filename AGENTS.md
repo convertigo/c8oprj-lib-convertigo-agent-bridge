@@ -367,8 +367,10 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 
 ## Quota snapshots
 
-- Private `agent_quota(handle)` reads account rate limits from an existing
-  Codex app-server, without starting a runtime. The authenticated Assistant
+- Private `agent_quota(handle, provider)` reads account rate limits from an existing
+  Codex app-server or Claude stream-json process. Without a live process, an explicit
+  authenticated quota read may run a short metadata-only CLI probe in the user
+  home (30-second cache), without creating a conversation or sending a prompt. The authenticated Assistant
   facade chooses the server-only handle after checking owner/provider. Quota
   failures are nonfatal; no quota is added to public status or event buffers.
   The private sequence also checks Studio WEB_ADMIN or server authentication:
@@ -384,3 +386,14 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   raw protocol messages as a quota snapshot. Missing values are not zero usage.
 - Run `node tests/agent_quota.test.js`, `node tests/claude_provider.test.js` and
   `node tests/agent_bridge_runtime.test.js` after changing this contract.
+
+## CLI metadata discovery
+
+- Claude model labels, resolved versions and effort levels come from the installed authenticated CLI stream-json `initialize` reply. Generic family aliases are compatibility fallback only. Catalog caches are scoped to the Claude home; presence-only startup never runs the CLI.
+- Claude quota refresh uses `get_usage` with `skip_behaviors:true`, including before the first prompt. Those percentages are already 0–100; `rate_limit_event` utilization is a 0–1 fraction. Normalize ISO resets to epoch seconds and include model-scoped weekly windows. Raw control replies (account identity included) never enter public events.
+- Codex metadata probes use only initialize and `account/rateLimits/read`, with no thread creation. Vibe ACP still supplies context usage rather than account credit.
+- Release commits marked `[skip deploy]` publish CARs through CI without deployment, on both branch and tag pushes. Other deployment behavior is unchanged.
+
+- A newer workstation Keychain OAuth expiry takes precedence over an older managed credential file when synchronizing conversation homes. A copied file’s modification time alone must not make an expired session win over a later sign-in.
+
+- Modern Claude Code uses a home-hashed Keychain service on macOS. `CLAUDE_SECURESTORAGE_CONFIG_DIR` points conversation processes at their user’s auth home while `CLAUDE_CONFIG_DIR` keeps MCP/viewer settings isolated. Read the scoped Keychain service before legacy global credentials; never overwrite a new sign-in with an expired snapshot.

@@ -15,14 +15,13 @@
   var CLAUDE_INSTRUCTIONS_FILE = "CLAUDE.md";
   var CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
   var CLAUDE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
-  // Claude Code has no model listing command: the catalog is the set of CLI
-  // aliases. The alias itself is passed to --model, so the CLI resolves the
-  // latest model of each family for the signed-in account.
+  // Compatibility fallback only. The stream-json initialize control reply owns
+  // account-specific model names, resolved versions and effort capabilities.
   var CLAUDE_MODEL_CATALOG = [
-    { id: "fable", label: "Claude Fable 5", description: "Most intelligent model, for complex authoring and review work.", defaultReasoning: "", priority: 1 },
-    { id: "opus", label: "Claude Opus 5", description: "Very capable model for complex authoring work.", defaultReasoning: "", priority: 2 },
-    { id: "sonnet", label: "Claude Sonnet 5", description: "Balanced speed and capability.", defaultReasoning: "", priority: 3 },
-    { id: "haiku", label: "Claude Haiku 4.5", description: "Fastest model for simple tasks.", defaultReasoning: "", priority: 4 }
+    { id: "fable", label: "Claude Fable", description: "", defaultReasoning: "", priority: 1 },
+    { id: "opus", label: "Claude Opus", description: "", defaultReasoning: "", priority: 2 },
+    { id: "sonnet", label: "Claude Sonnet", description: "", defaultReasoning: "", priority: 3 },
+    { id: "haiku", label: "Claude Haiku", description: "", defaultReasoning: "", priority: 4 }
   ];
 
   function claudeInstallDir(options, workspaceRoot) {
@@ -50,6 +49,12 @@
   function effectiveClaudeHomePath(homePath) {
     var home = trim(homePath);
     return home.length ? home : defaultClaudeHomePath();
+  }
+
+  function claudeSecureStorageHome(homePath) {
+    var home = trim(homePath).replace(/\\/g,"/");
+    var scoped = home.match(/^(.*\/users\/[^/]+)\/conversations\/[^/]+\/claude-home\/?$/);
+    return scoped ? scoped[1] + "/claude-home" : home;
   }
 
   function isConversationScopedClaudeHome(value) {
@@ -108,6 +113,9 @@
     }
     if (trim(homePath).length) {
       env.CLAUDE_CONFIG_DIR = trim(homePath);
+      // Viewer/MCP config stays conversation-scoped; OAuth refresh belongs to
+      // the authenticated user, including the macOS scoped Keychain service.
+      env.CLAUDE_SECURESTORAGE_CONFIG_DIR = claudeSecureStorageHome(homePath);
     }
     env.DISABLE_AUTOUPDATER = "1";
     env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE = "1";
@@ -512,18 +520,24 @@
     }
   }
 
-  function readKeychainClaudeCredentials() {
+  function readKeychainClaudeCredentials(homePath) {
     if (!isMacOs()) {
       return "";
     }
     try {
-      var probe = runCommand(["/usr/bin/security", "find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w"], { timeoutMs: 8000 });
-      if (!probe.ok) {
-        return "";
+      var services = [CLAUDE_KEYCHAIN_SERVICE];
+      var secureHome = claudeSecureStorageHome(homePath);
+      if (secureHome.length) {
+        var normalized = String(Packages.java.text.Normalizer.normalize(secureHome,Packages.java.text.Normalizer.Form.NFC));
+        services.unshift(CLAUDE_KEYCHAIN_SERVICE + "-" + hashShort(normalized).substring(0,8));
       }
-      var text = trim(probe.stdout);
-      var parsed = parseJsonSafe(text, null);
-      return parsed && typeof parsed === "object" ? text : "";
+      for (var i = 0; i < services.length; i++) {
+        var probe = runCommand(["/usr/bin/security", "find-generic-password", "-s", services[i], "-w"], { timeoutMs: 8000 });
+        if (!probe.ok) { continue; }
+        var text = trim(probe.stdout), parsed = parseJsonSafe(text,null);
+        if (parsed && typeof parsed === "object") { return text; }
+      }
+      return "";
     } catch (_ignoreKeychain) {
       return "";
     }
@@ -593,6 +607,16 @@
     var target = new File(homeDir, CLAUDE_CREDENTIALS_FILE);
     var targetState = claudeCredentialsState(target);
     var source = newestUsableClaudeCredentialsFile(sourceDirs);
+    // A stale managed user copy must not mask a later workstation sign-in.
+    // Compare expiry before timestamps: copying a file changes its mtime but
+    // does not make its OAuth session newer.
+    var keychain = trim(readKeychainClaudeCredentials(filePath(homeDir)));
+    var keychainParsed = parseJsonSafe(keychain,{}), keychainOauth = keychainParsed.claudeAiOauth || keychainParsed.oauth || {};
+    var keychainExpiry = Number(keychainOauth.expiresAt || keychainOauth.expires_at || 0);
+    if (source !== null && keychainExpiry > Number(claudeCredentialsState(source).expiresAt || 0) && keychainExpiry > Number(targetState.expiresAt || 0)) {
+      writeClaudeCredentialsFile(homeDir,keychain);
+      report.copied.push(CLAUDE_CREDENTIALS_FILE);report.authenticationSource = "keychain";report.authenticationImported = true;return;
+    }
     if (source !== null) {
       syncAgentUserFile(source.getParentFile(), homeDir, CLAUDE_CREDENTIALS_FILE, report, targetState.exists && targetState.expired);
       report.authenticationSource = filePath(source.getParentFile());
@@ -603,7 +627,6 @@
     // credentials live in the Keychain and the managed copy is only a snapshot. Re-read the
     // Keychain and refresh the copy as soon as it differs, otherwise a rotated or revoked
     // session is kept for ever and the agent keeps declaring itself authenticated.
-    var keychain = trim(readKeychainClaudeCredentials());
     if (keychain.length) {
       var current = "";
       try {
@@ -672,7 +695,7 @@
       }
       return info;
     }
-    if (readKeychainClaudeCredentials().length) {
+    if (readKeychainClaudeCredentials(homePath).length) {
       return authenticationInfo(true, "keychain", "");
     }
     return firstExpired !== null ? firstExpired : authenticationInfo(false, "", "claude_login");
@@ -1645,6 +1668,30 @@
     return models;
   }
 
+  function normalizeClaudeModelCatalog(items) {
+    var result = [], seen = {};
+    for (var i = 0; i < (items || []).length; i++) {
+      var item = items[i] || {}, id = trim(item.value || item.id);
+      if (!id.length || seen[id]) { continue; }
+      seen[id] = true;
+      var description = trim(item.description), resolved = trim(item.resolvedModel);
+      var title = description.split(/\s*[·|]\s*/)[0];
+      if (!title.length || !/^((Claude )?(Fable|Opus|Sonnet|Haiku))\b/i.test(title)) {
+        title = trim(item.displayName || item.label) || resolved || id;
+      }
+      if (id === "default") { title = trim(item.displayName) + (description.length ? " · " + title : ""); }
+      var levels = item.supportedEffortLevels || (item.supportsEffort ? CLAUDE_EFFORT_LEVELS : []), reasoning = [];
+      for (var j = 0; j < levels.length; j++) {
+        if (CLAUDE_EFFORT_LEVELS.indexOf(String(levels[j])) >= 0) {
+          reasoning.push({ id:String(levels[j]), label:codexReasoningLabel(String(levels[j])) || String(levels[j]), description:"" });
+        }
+      }
+      result.push({id:id,label:title,description:description,resolvedModel:resolved,
+        defaultReasoning:"",reasoningLevels:reasoning,serviceTiers:[],speedTiers:[],priority:i + 1});
+    }
+    return result;
+  }
+
   function claudeSettings(options) {
     options = optionsWithRequestFallbacks(options);
     var capabilityProfile = publicAgentCapabilityProfile(options);
@@ -1660,10 +1707,20 @@
         setup = detectClaudeRuntime(options);
       } catch (_ignoreClaudeHomePrepare) {}
     }
-    var models = claudeModelCatalog();
+    var models = [], discovery = null;
+    if (!presenceOnly && setup.claude.found && inspectClaudeAuthentication(setup.claudeHome).configured === true) {
+      discovery = readWrapperMetadata("claude", options, setup, false);
+      models = discovery.models || [];
+    }
+    // Presence-only startup never invokes a CLI. Hydrate the last CLI catalog.
+    if (!models.length) {
+      var cached = readPersistentProviderSettingsCache(setup.workspaceRoot, "claude",providerSettingsCacheKey("claude",setup.claudeHome));
+      models = cached && cached.models || (presenceOnly ? [] : claudeModelCatalog());
+    }
     var profileSupported = capabilityProfile.supportedProviders.indexOf("claude") >= 0;
     return {
       id: "claude",
+      settingsCacheKey: providerSettingsCacheKey("claude",setup.claudeHome),
       label: "Claude",
       status: profileSupported ? (setup.claude.found ? "ready" : "missing") : "unsupported_profile",
       ready: profileSupported && setup.claude.found === true,
@@ -1675,11 +1732,11 @@
       bootstrap: bootstrap,
       skills: skills,
       source: {
-        type: "catalog",
+        type: presenceOnly ? "presence" : (discovery && discovery.models.length ? "cli" : "catalog"),
         command: String(setup.claude.path || ""),
         ok: true,
         exitCode: 0,
-        error: "",
+        error: discovery && !discovery.ok ? "Claude model discovery unavailable" : "",
         stderr: ""
       },
       defaultModel: models.length ? models[0].id : "",
@@ -2540,6 +2597,16 @@
       return;
     }
     var type = String(message.type || "");
+    if (type === "control_response") {
+      var reply = message.response || {};
+      var pending = entry.pending && entry.pending.get(String(reply.request_id));
+      if (pending) {
+        if (reply.subtype === "success" && pending.method === "get_usage") { recordClaudeUsage(entry,reply.response || {}); }
+        pending.error = reply.subtype === "success" ? "" : "Control request unavailable";
+        pending.done = true;
+      }
+      return; // Account metadata must never enter public event buffers.
+    }
     if (message.session_id && !trim(entry.sessionId).length) {
       entry.sessionId = String(message.session_id);
       pushEvent(entry, "session/update", { sessionId: entry.sessionId, provider: "claude" });
@@ -2606,4 +2673,17 @@
       return;
     }
     pushEvent(entry, "claude/event", { method: type, params: message, provider: "claude" });
+  }
+
+  function claudeControlRequest(entry, subtype, params, timeoutMs) {
+    var id = "metadata-" + String(UUID.randomUUID()), pending = {method:subtype,done:false,error:""};
+    entry.pending.put(id,pending);
+    try {
+      var request = {subtype:subtype};
+      for (var key in params) { if (Object.prototype.hasOwnProperty.call(params,key)) { request[key] = params[key]; } }
+      writeJson(entry,{type:"control_request",request_id:id,request:request});
+      var deadline = now() + timeoutMs;
+      while (!pending.done && now() < deadline && processAlive(entry.process)) { Thread.sleep(25); }
+      if (!pending.done || pending.error.length) { throw new Error("Claude control request unavailable"); }
+    } finally { entry.pending.remove(id); }
   }

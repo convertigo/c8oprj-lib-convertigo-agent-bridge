@@ -123,7 +123,7 @@ function syncWith(options) {
   readTextFile = () => String(options.currentCopy || "");
   const report = { copied: [], reused: [], generated: [] };
   try {
-    syncClaudeCredentials([], {}, report);
+    syncClaudeCredentials([], {getCanonicalPath:()=>"/managed/claude-home"}, report);
   } finally {
     newestUsableClaudeCredentialsFile = originalNewest;
     claudeCredentialsState = originalState;
@@ -198,6 +198,25 @@ assert.deepEqual(noKeychain.written, []);
 const noKeychainExpired = syncWith({ targetState: { exists: true, expired: true, stale: false, expiresAt: 1, updatedAt: 1, hasRefreshToken: false, method: "oauth" }, currentCopy: "{}", keychain: "" });
 assert.deepEqual(noKeychainExpired.report.reused, []);
 assert.deepEqual(noKeychainExpired.written, []);
+
+// An older managed file must not hide a newer workstation OAuth sign-in.
+{
+ const originalNewest=newestUsableClaudeCredentialsFile, originalState=claudeCredentialsState;
+ const originalKeychain=readKeychainClaudeCredentials, originalWrite=writeClaudeCredentialsFile;
+ const candidate={};let written='';
+ newestUsableClaudeCredentialsFile=()=>candidate;
+ claudeCredentialsState=(file)=>({exists:true,stale:true,expired:false,expiresAt:FIXED_NOW-1000});
+ readKeychainClaudeCredentials=()=>JSON.stringify({claudeAiOauth:{accessToken:'fresh-session',expiresAt:FIXED_NOW+3600000}});
+ writeClaudeCredentialsFile=(_dir,text)=>{written=text;};
+ try {
+  const report={copied:[],reused:[]};syncClaudeCredentials([],{getCanonicalPath:()=>"/managed/claude-home"},report);
+  assert.equal(report.authenticationSource,'keychain');assert.equal(report.authenticationImported,true);
+  assert.match(written,/fresh-session/);
+ } finally {
+  newestUsableClaudeCredentialsFile=originalNewest;claudeCredentialsState=originalState;
+  readKeychainClaudeCredentials=originalKeychain;writeClaudeCredentialsFile=originalWrite;
+ }
+}
 
 console.log("Claude Keychain re-read OK");
 
@@ -489,3 +508,6 @@ console.log("Claude doctor authentication OK");
 }
 
 console.log("Claude authentication error mapping OK");
+
+assert.equal(claudeSecureStorageHome("/ws/agents/claude/homes/users/studio/conversations/conversation-a/claude-home"),"/ws/agents/claude/homes/users/studio/claude-home");
+assert.equal(claudeSecureStorageHome("/custom/home"),"/custom/home");
