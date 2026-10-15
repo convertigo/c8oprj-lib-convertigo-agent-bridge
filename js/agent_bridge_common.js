@@ -2554,7 +2554,7 @@
     if (token.length) {
       env[mcpBearerTokenEnv(options)] = token;
     }
-    return env;
+    return typeof applyTigoMcpEnvironment === "function" ? applyTigoMcpEnvironment(env, options) : env;
   }
 
   function noCodeMcpBearerTokenFromFile(options) {
@@ -3174,9 +3174,11 @@
     if (withPlaywright.status !== "unchanged" && status === "unchanged") {
       status = "updated";
     }
+    var tigoText = typeof patchTigoCodexConfig === "function" ? patchTigoCodexConfig(withPlaywright.text, options) : withPlaywright.text;
+    if (tigoText !== withPlaywright.text) { status = "updated"; }
     return {
       status: status,
-      text: withPlaywright.text
+      text: tigoText
     };
   }
 
@@ -10232,7 +10234,7 @@
       name: "Convertigo",
       url: vibeMcpTransportEndpoint(mcpEndpoint, options),
       headers: headers
-    }];
+    }].concat(typeof tigoVibeServers === "function" ? tigoVibeServers(options) : []);
   }
 
   function statusOf(entry) {

@@ -3,6 +3,7 @@ comment: Send a prompt to Codex CLI through codex exec --json. Poll agent_events
   expression: |
     'include("js/vibe_agent_bridge.js");
     result = C8O.agentBridge.codexPrompt({
+      tigoResourcesHandle: typeof tigoResourcesHandle === "undefined" ? "" : tigoResourcesHandle,
       handle: typeof handle === "undefined" ? "" : handle,
       prompt: typeof prompt === "undefined" ? "" : prompt,
       conversationId: typeof conversationId === "undefined" ? "" : conversationId,
@@ -102,3 +103,10 @@ comment: Send a prompt to Codex CLI through codex exec --json. Poll agent_events
 ↓projectId [variables.RequestableVariable-1785339072218]: 
   comment: Current Convertigo project identifier.
   description: Current Convertigo project identifier.
+↓tigoResourcesHandle [variables.RequestableVariable-1792084008462]: 
+  comment: Opaque server-only Tigo MCP context handle; never contains credentials.
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15

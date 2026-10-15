@@ -4,6 +4,7 @@ responseTimeout: 300
   expression: |
     'include("js/vibe_agent_bridge.js");
     result = C8O.agentBridge.claudePrompt({
+      tigoResourcesHandle: typeof tigoResourcesHandle === "undefined" ? "" : tigoResourcesHandle,
       handle: typeof handle === "undefined" ? "" : handle,
       prompt: typeof prompt === "undefined" ? "" : prompt,
       conversationId: typeof conversationId === "undefined" ? "" : conversationId,
@@ -72,3 +73,10 @@ responseTimeout: 300
   comment: Opaque server-side handle of the NoCode MCP token.
 ↓noCodeMcpTokenHandle [variables.RequestableVariable-1789369797976]: 
   comment: Alias of nocodeMcpTokenHandle.
+↓tigoResourcesHandle [variables.RequestableVariable-1792084008495]: 
+  comment: Opaque server-only Tigo MCP context handle; never contains credentials.
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15

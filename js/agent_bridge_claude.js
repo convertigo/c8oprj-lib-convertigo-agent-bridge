@@ -159,7 +159,7 @@
     if (playwright !== null) {
       servers.playwright = playwright;
     }
-    return { mcpServers: servers };
+    return { mcpServers: typeof addTigoClaudeServers === "function" ? addTigoClaudeServers(servers,options) : servers };
   }
 
   function claudePlaywrightEnabled(options) {

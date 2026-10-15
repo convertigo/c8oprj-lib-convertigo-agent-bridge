@@ -434,3 +434,20 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   contents, registry command output, credentials or per-user keys as diagnostics.
 - See `docs/windows-runtime.md`. Native Windows verification remains necessary;
   a passing Java filesystem check does not certify Python/npm support.
+
+## Tigo 1.5 custom resources
+
+- Bridge 0.4.23 accepts `tigoResourcesHandle` on provider start/prompt sequences.
+  `js/agent_bridge_resources.js` resolves it only from private shared memory;
+  reject missing/expired handles. Never accept inline connection credentials.
+- Preserve the mandatory managed Convertigo MCP/skills. Additional connections
+  are named `tigo_<hash>`, scoped to conversation homes and replaced only when an
+  explicit broker context is supplied. Do not remove unrelated user servers.
+- Codex TOML uses `env_http_headers` and `env_vars`; Claude JSON uses `${ENV}`
+  references. Vibe ACP HTTP headers exist only transiently in session memory;
+  ACP stdio entries have no `type` property and use name/value `env` arrays.
+- Apply custom secret environment values only to the intended provider process.
+  Configuration files and public protocol replies must not contain raw values.
+- Run `node --test tests/tigo_resources.test.js` together with runtime/provider
+  tests when changing this contract. Assistant 1.5.0 owns library UI/storage and
+  determines when a configuration change requires process restart and resume.

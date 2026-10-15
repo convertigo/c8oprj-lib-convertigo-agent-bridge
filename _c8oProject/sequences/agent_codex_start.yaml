@@ -3,6 +3,7 @@ comment: Prepare a Codex CLI conversation entry. The Codex process is launched b
   expression: |
     'include("js/vibe_agent_bridge.js");
     result = C8O.agentBridge.codexStart({
+      tigoResourcesHandle: typeof tigoResourcesHandle === "undefined" ? "" : tigoResourcesHandle,
       handle: typeof handle === "undefined" ? "" : handle,
       workspaceRoot: typeof workspaceRoot === "undefined" ? "" : workspaceRoot,
       installDir: typeof installDir === "undefined" ? "" : installDir,
@@ -232,3 +233,10 @@ comment: Prepare a Codex CLI conversation entry. The Codex process is launched b
 ↓playwrightMcpEndpoint [variables.RequestableVariable-1782731001553]: 
   comment: Optional alias for the Playwright MCP CDP endpoint.
   description: Optional alias for the Playwright MCP CDP endpoint.
+↓tigoResourcesHandle [variables.RequestableVariable-1792084008442]: 
+  comment: Opaque server-only Tigo MCP context handle; never contains credentials.
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15

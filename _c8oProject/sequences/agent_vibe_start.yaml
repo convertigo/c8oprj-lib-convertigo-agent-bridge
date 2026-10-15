@@ -3,6 +3,7 @@ comment: Start a long-running vibe-acp process and create an ACP session.
   expression: |
     'include("js/vibe_agent_bridge.js");
     result = C8O.agentBridge.vibeStart({
+      tigoResourcesHandle: typeof tigoResourcesHandle === "undefined" ? "" : tigoResourcesHandle,
       handle: typeof handle === "undefined" ? "" : handle,
       workspaceRoot: typeof workspaceRoot === "undefined" ? "" : workspaceRoot,
       installDir: typeof installDir === "undefined" ? "" : installDir,
@@ -182,3 +183,10 @@ comment: Start a long-running vibe-acp process and create an ACP session.
 ↓sessionId [variables.RequestableVariable-1789800000011]: 
   comment: Previous ACP session id of this conversation. When the harness supports it the session is reloaded, so the context survives a process restart.
   description: Previous ACP session id of this conversation. When the harness supports it the session is reloaded, so the context survives a process restart.
+↓tigoResourcesHandle [variables.RequestableVariable-1792084008512]: 
+  comment: Opaque server-only Tigo MCP context handle; never contains credentials.
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15
