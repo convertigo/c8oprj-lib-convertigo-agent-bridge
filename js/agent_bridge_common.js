@@ -6493,45 +6493,148 @@
     return null;
   }
 
-  function firstExistingCommand(candidates, extraPath) {
-    var search = [];
-    var seen = {};
-    var add = function (value) {
-      var candidate = trim(value);
-      if (candidate.length && !seen[candidate]) {
-        seen[candidate] = true;
-        search.push(candidate);
+  var runtimePathIssues = [];
+  var runtimePathIssueKeys = {};
+  var WINDOWS_LONG_PATHS_DOC_URL = "https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation";
+
+  function invalidWindowsCommandPath(value) {
+    if (!isWindows()) { return false; }
+    var path = String(value).replace(/^\\\\\?\\/, "");
+    return /[\x00-\x1f"<>|?*]/.test(path) || /:/.test(path.replace(/^[A-Za-z]:/, ""));
+  }
+
+  function recordRuntimePathIssue(source, index, value, code) {
+    if (!isWindows() || runtimePathIssues.length >= 12) { return; }
+    var key = source + ":" + index + ":" + String(value) + ":" + code;
+    if (runtimePathIssueKeys[key]) { return; }
+    runtimePathIssueKeys[key] = true;
+    // Never expose PATH contents: report only the location, length and failure category.
+    runtimePathIssues.push({ source: source, index: index, pathLength: String(value).length, code: code });
+  }
+
+  function parseWindowsLongPathsEnabled(result) {
+    if (!result || result.ok !== true) { return null; }
+    var match = String(result.stdout || "").match(/LongPathsEnabled\s+REG_DWORD\s+(0x[0-9a-f]+|\d+)/i);
+    return match ? parseInt(match[1], 0) === 1 : null;
+  }
+
+  function probeWindowsLongPaths(workspaceRoot) {
+    var cleanup = [], shortReady = false, testedLength = 0;
+    try {
+      var root = new File(workspaceRoot, "agents").toPath();
+      Files.createDirectories(root);
+      var scratch = Files.createTempDirectory(root, "windows-path-check-");
+      cleanup.push(scratch);
+      var shortFile = scratch.resolve("short.tmp");
+      cleanup.push(shortFile);
+      Files.createFile(shortFile);
+      shortReady = true;
+      var current = scratch;
+      for (var i = 0; String(current.resolve("long.tmp")).length < 280 && i < 12; i++) {
+        current = current.resolve("segment012345678901234567890123456789");
+        cleanup.push(current);
       }
+      var longFile = current.resolve("long.tmp");
+      cleanup.push(longFile);
+      testedLength = String(longFile).length;
+      Files.createDirectories(current);
+      Files.createFile(longFile);
+      return { status: "supported", testedLength: testedLength };
+    } catch (_windowsLongPathProbeFailed) {
+      return { status: shortReady ? "failed" : "unknown", testedLength: testedLength };
+    } finally {
+      for (var j = cleanup.length - 1; j >= 0; j--) {
+        try { Files.deleteIfExists(cleanup[j]); } catch (_ignoreDiagnosticCleanup) {}
+      }
+    }
+  }
+
+  function windowsRuntimeDiagnostics(options, workspaceRoot) {
+    if (!isWindows()) { return null; }
+    options = options || {};
+    var result = null, cache = null, cacheKey = "windows-path-diagnostics:" + hashShort(workspaceRoot);
+    try {
+      cache = getRuntimeUpdateCache();
+      var raw = cache.get(cacheKey);
+      var cached = raw == null ? null : JSON.parse(String(raw));
+      if (cached && now() - cached.checkedAt < 300000 && !boolValue(options.refreshUpdateCheck, false)) { result = cached; }
+    } catch (_ignoreWindowsDiagnosticsCache) {}
+    if (result === null && !boolValue(options.runtimePresenceOnly, false)) {
+      var registryEnabled = null;
+      try {
+        var reg = new File(String(System.getenv("SystemRoot") || "C:\\Windows"), "System32/reg.exe");
+        registryEnabled = parseWindowsLongPathsEnabled(runCommand([String(reg.getAbsolutePath()), "query", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem", "/v", "LongPathsEnabled"], { timeoutMs: 3000 }));
+      } catch (_ignoreWindowsRegistryCheck) {}
+      var probe = probeWindowsLongPaths(workspaceRoot);
+      result = { registryEnabled: registryEnabled, fileSystemProbe: probe.status, testedLength: probe.testedLength, checkedAt: now() };
+      try { if (cache !== null) { cache.put(cacheKey, JSON.stringify(result)); } } catch (_ignoreWindowsDiagnosticsCacheWrite) {}
+    }
+    result = result || { registryEnabled: null, fileSystemProbe: "not_checked", testedLength: 0, checkedAt: 0 };
+    return {
+      platform: "windows",
+      longPaths: result,
+      pathIssues: runtimePathIssues.slice(0),
+      documentationUrl: WINDOWS_LONG_PATHS_DOC_URL
+    };
+  }
+
+  function firstExistingCommand(candidates, extraPath) {
+    var seen = {};
+    var normalize = function (value) {
+      var path = trim(value);
+      // Quotes delimit Windows PATH entries; they are not part of the filename.
+      if (isWindows() && path.length >= 2 && path.charAt(0) === '"' && path.charAt(path.length - 1) === '"') {
+        path = path.substring(1, path.length - 1);
+      }
+      return path;
+    };
+    var find = function (value, source, index) {
+      if (!value.length || seen[value]) {
+        return null;
+      }
+      seen[value] = true;
+      if (invalidWindowsCommandPath(value)) {
+        recordRuntimePathIssue(source, index, value, "invalid_path");
+        return null;
+      }
+      try {
+        var file = existingCommandFile(value);
+        if (file !== null) {
+          return { found: true, path: filePath(file), version: "", attempts: [] };
+        }
+      } catch (_ignoreUnusableCommandPath) {
+        // An invalid/inaccessible PATH entry must not break every provider's settings.
+        recordRuntimePathIssue(source, index, value, "canonicalization_failed");
+      }
+      return null;
     };
     candidates = candidates || [];
     for (var i = 0; i < candidates.length; i++) {
-      var candidate = trim(candidates[i]);
+      var candidate = normalize(candidates[i]);
       if (!candidate.length) {
         continue;
       }
       if (candidate.indexOf("/") >= 0 || candidate.indexOf("\\") >= 0 || new File(candidate).isAbsolute()) {
-        add(candidate);
+        var direct = find(candidate, "candidate", i + 1);
+        if (direct !== null) {
+          return direct;
+        }
         continue;
       }
       var pathValue = trim(extraPath);
+      var extraCount = pathValue.length ? pathValue.split(String(File.pathSeparator)).length : 0;
       var systemPath = String(System.getenv("PATH") || "");
       pathValue = pathValue.length ? pathValue + String(File.pathSeparator) + systemPath : systemPath;
       var directories = pathValue.split(String(File.pathSeparator));
       for (var p = 0; p < directories.length; p++) {
-        if (trim(directories[p]).length) {
-          add(childPath(directories[p], candidate));
+        var directory = normalize(directories[p]);
+        if (directory.length) {
+          // Search lazily: a usable managed runtime needs no global PATH scan.
+          var found = find(String(new File(directory, candidate).getPath()), p < extraCount ? "extra_path" : "path", p < extraCount ? p + 1 : p - extraCount + 1);
+          if (found !== null) {
+            return found;
+          }
         }
-      }
-    }
-    for (var j = 0; j < search.length; j++) {
-      var file = existingCommandFile(search[j]);
-      if (file !== null) {
-        return {
-          found: true,
-          path: filePath(file),
-          version: "",
-          attempts: []
-        };
       }
     }
     return {
@@ -8847,6 +8950,7 @@
       defaults: defaults,
       preferences: preferences,
       providers: providers,
+      diagnostics: windowsRuntimeDiagnostics(options, settingsWorkspaceRoot),
       storageCleanup: {
         status: storageCleanup.status,
         removedCount: storageCleanup.removed.length,

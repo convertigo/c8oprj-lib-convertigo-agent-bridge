@@ -16,6 +16,12 @@ same context.
 
 ## Runtime Scope
 
+- For the public Assistant hosted at `assistant.convertigo.com`, backend-apps
+  needs only `lib_ConvertigoAssistant`: do not deploy this Bridge or
+  `lib_ConvertigoMCP` there. Both belong to the developer's local Studio stack.
+  Publishing the three-project Studio bundle does not authorize deploying all
+  three projects on backend-apps. A separate server/NoCode agent execution host
+  has its own full-stack requirements.
 - Default Studio workspace root is usually
   `/Users/nicolas/dev/convertigo/runtime-ConvertigoStudioHotfix/.metadata/.plugins/com.twinsoft.convertigo.studio`.
 - Runtime agent files must live under `<workspaceRoot>/agents`, not under the
@@ -54,6 +60,15 @@ same context.
 - Refresh model capabilities from the installed CLI after setup. A runtime
   update affects new agent processes/conversations; an already running process
   may keep its previous model catalog until it is restarted.
+- Runtime presence checks must stop at the first usable executable. On Windows,
+  remove surrounding double quotes from PATH entries and explicit command paths;
+  skip candidates that cannot be inspected or canonicalized. One malformed PATH
+  entry must never abort all provider settings. Run
+  `node --test tests/windows_runtime_paths.test.js` after changing discovery.
+  These tests model Windows filesystem failures; they do not replace native
+  Windows installation validation. After enabling Windows long paths, restart
+  Studio (a Windows reboot may also be needed). An older bundle is not a proven
+  workaround: this discovery code predates the 0.4.x releases.
 
 ## Claude Code Integration
 
@@ -408,3 +423,14 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - A newer workstation Keychain OAuth expiry takes precedence over an older managed credential file when synchronizing conversation homes. A copied file’s modification time alone must not make an expired session win over a later sign-in.
 
 - Modern Claude Code uses a home-hashed Keychain service on macOS. `CLAUDE_SECURESTORAGE_CONFIG_DIR` points conversation processes at their user’s auth home while `CLAUDE_CONFIG_DIR` keeps MCP/viewer settings isolated. Read the scoped Keychain service before legacy global credentials; never overwrite a new sign-in with an expired snapshot.
+
+## Windows installation diagnostics
+
+- Full Windows settings checks read `LongPathsEnabled` and probe a temporary
+  >260-character file path in `agents`, then clean it up. Short write failures
+  are inconclusive; never label them as disabled long paths. Presence-only
+  startup reuses the five-minute cache and does not spawn diagnostic commands.
+- Expose only PATH entry position, length and category. Never publish PATH
+  contents, registry command output, credentials or per-user keys as diagnostics.
+- See `docs/windows-runtime.md`. Native Windows verification remains necessary;
+  a passing Java filesystem check does not certify Python/npm support.
