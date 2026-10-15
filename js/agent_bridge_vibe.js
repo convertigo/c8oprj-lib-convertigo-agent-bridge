@@ -87,6 +87,7 @@
         // out: agent_vibe_start passes an empty model on purpose and sets the session model over
         // ACP, so recording it would make start and setup fight over the file.
         var expectedIntent = vibeConfigIntent({
+          modelConfigRevision: "mistral-reasoning-cache-v1",
           bearerTokenEnv: expectedBearerEnv,
           endpoint: expectedEndpoint,
           gatewayModels: expectedGatewayModels,

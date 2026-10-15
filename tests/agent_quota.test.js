@@ -22,6 +22,8 @@ const vibe={provider:'vibe'};
 recordVibeUsage(vibe,{used:123,size:1000,cost:{amount:1.2,currency:'USD'}});
 assert.equal(vibe.quota.available,false,'context consumption is not an account credit balance');
 assert.equal(vibe.quota.context.usedTokens,123);assert.equal(vibe.quota.context.costAmount,1.2);
+assert.equal(vibe.quota.context.limitKind,'compaction');
+assert.equal(vibe.quota.context.costKind,'session_estimate','ACP token cost never establishes the account billing mode');
 recordVibeUsage(vibe,{used:null,size:null});assert.equal(vibe.quota.context.usedTokens,null);
 const pending={method:'account/rateLimits/read',done:false};
 const entry={provider:'codex',lastError:'unchanged',pending:{get(){return pending;}}};

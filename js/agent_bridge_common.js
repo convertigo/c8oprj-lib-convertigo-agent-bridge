@@ -456,6 +456,7 @@
         temperature: "1.0",
         inputPrice: "1.4",
         outputPrice: "4.4",
+        cachedInputPrice: "0.14",
         builtIn: false,
         supportsImages: VIBE_GLM_SUPPORTS_IMAGES
       });
@@ -6775,7 +6776,7 @@
   }
 
   function managedVibeGlmPresetBlock(preset) {
-    return '[[models]]\nname = "' + preset.name + '"\nprovider = "' + preset.provider + '"\nalias = "' + preset.alias + '"\ninput_price = 1.4\noutput_price = 4.4\nthinking = "high"\nsupports_images = ' + (VIBE_GLM_SUPPORTS_IMAGES ? 'true' : 'false') + '\n';
+    return '[[models]]\nname = "' + preset.name + '"\nprovider = "' + preset.provider + '"\nalias = "' + preset.alias + '"\ninput_price = 1.4\noutput_price = 4.4\ncached_input_price = 0.14\nthinking = "high"\nsupports_images = ' + (VIBE_GLM_SUPPORTS_IMAGES ? 'true' : 'false') + '\n';
   }
 
   function vibeModelSpec(value) {
@@ -6794,6 +6795,7 @@
         temperature: "1.0",
         inputPrice: "1.5",
         outputPrice: "7.5",
+        cachedInputPrice: "0.15",
         supportsImages: true
       };
     }
@@ -6806,6 +6808,7 @@
         temperature: "1.0",
         inputPrice: "1.5",
         outputPrice: "7.5",
+        cachedInputPrice: "0.15",
         supportsImages: true
       };
     }
@@ -6821,6 +6824,7 @@
         temperature: "1.0",
         inputPrice: "1.4",
         outputPrice: "4.4",
+        cachedInputPrice: "0.14",
         builtIn: false,
         supportsImages: VIBE_GLM_SUPPORTS_IMAGES
       };
@@ -6884,6 +6888,22 @@
         return head + MANAGED_VIBE_GLM_PROVIDER + tail;
       });
     }
+    // Mistral returns structured thinking/text blocks. The generic OpenAI adapter
+    // stringifies thinking dictionaries; Vibe's reasoning adapter parses both
+    // channels and still forwards low/high/max without the native SDK mapping.
+    result = result.replace(/(^|\n)\[\[providers\]\]([\s\S]*?)(?=\n\[\[|\n\[|$)/g, function(match, prefix, block) {
+      if (parseTomlValue(block, "name") !== MANAGED_VIBE_GLM_PROVIDER
+          || parseTomlValue(block, "api_base") !== "https://api.mistral.ai/v1"
+          || parseTomlValue(block, "backend") !== "generic") { return match; }
+      return match.replace(/(api_style\s*=\s*["'])openai(["'])/, "$1reasoning$2");
+    });
+    result = result.replace(/(^|\n)\[\[models\]\]([\s\S]*?)(?=\n\[\[|\n\[|$)/g, function(match, prefix, block) {
+      var preset = managedVibeGlmPreset(parseTomlValue(block, "name"));
+      if (preset === null || parseTomlValue(block, "provider") !== MANAGED_VIBE_GLM_PROVIDER
+          || parseTomlValue(block, "alias") !== preset.alias
+          || parseTomlValue(block, "cached_input_price").length) { return match; }
+      return match.replace(/(output_price\s*=\s*4\.4[^\S\n]*)(\n|$)/, "$1\ncached_input_price = 0.14$2");
+    });
     var migratedActiveModel = false;
     if (removed.length && /^\s*active_model\s*=\s*["']zai-glm-5-2["']/m.test(result)) {
       result = result.replace(/^(\s*active_model\s*=\s*["'])zai-glm-5-2(["'])/m, "$1glm-5-2$2");
@@ -6991,7 +7011,7 @@
       'name = "' + MANAGED_VIBE_GLM_PROVIDER + '"',
       'api_base = "https://api.mistral.ai/v1"',
       'api_key_env_var = "MISTRAL_API_KEY"',
-      'api_style = "openai"',
+      'api_style = "reasoning"',
       'backend = "generic"',
       'reasoning_field_name = "reasoning_content"',
       '',
@@ -7011,6 +7031,7 @@
         'temperature = ' + modelSpec.temperature,
         'input_price = ' + modelSpec.inputPrice,
         'output_price = ' + modelSpec.outputPrice,
+        modelSpec.cachedInputPrice ? 'cached_input_price = ' + modelSpec.cachedInputPrice : '',
         modelSpec.thinking.length ? 'thinking = "' + tomlString(modelSpec.thinking) + '"' : '',
         'supports_images = ' + (modelSpec.supportsImages === true ? 'true' : 'false'),
         'auto_compact_threshold = 200000',
@@ -9133,6 +9154,7 @@
     update = update || {};
     updateWrapperQuota(entry, {available:false, kind:"context", windows:[], context:{
       usedTokens:quotaNumber(update.used), limitTokens:quotaNumber(update.size),
+      limitKind:"compaction", costKind:"session_estimate",
       costAmount:update.cost ? quotaNumber(update.cost.amount) : null,
       costCurrency:update.cost && /^[A-Z]{3}$/.test(String(update.cost.currency)) ? String(update.cost.currency) : ""
     }});

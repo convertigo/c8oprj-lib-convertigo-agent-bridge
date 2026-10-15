@@ -752,6 +752,13 @@ assert.match(migratedGlmProvider.text, /name = "zai-glm-5-3"\nprovider = "mistra
 assert.equal(migrateManagedVibeModelPresets(migratedGlmProvider.text).text, migratedGlmProvider.text,
   "the provider migration is idempotent");
 assert.equal(migrateManagedVibeModelPresets(migratedGlmProvider.text).migratedProvider, false);
+assert.match(migratedGlmProvider.text, /output_price = 4\.4\ncached_input_price = 0\.14/);
+const mistralOpenAiConfig = '[[providers]]\nname = "mistral-direct"\napi_base = "https://api.mistral.ai/v1"\napi_style = "openai"\nbackend = "generic"\n\n' + migratedGlmProvider.text;
+const mistralReasoningConfig = migrateManagedVibeModelPresets(mistralOpenAiConfig).text;
+assert.match(mistralReasoningConfig, /api_style = "reasoning"/,'Mistral thinking blocks require the reasoning adapter');
+assert.equal(migrateManagedVibeModelPresets(mistralReasoningConfig).text,mistralReasoningConfig);
+assert.match(migrateManagedVibeModelPresets(mistralOpenAiConfig.replace('cached_input_price = 0.14','cached_input_price = 0.07')).text,/cached_input_price = 0\.07/,'an explicit custom cache price is preserved');
+assert.equal(vibeModelSpec('glm-5-3').cachedInputPrice,'0.14');
 
 const migratedVibeConfig = migrateManagedVibeModelPresets([
   'active_model = "zai-glm-5-2"',

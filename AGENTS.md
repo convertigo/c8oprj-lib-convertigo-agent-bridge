@@ -295,6 +295,14 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 
 ## Vibe Integration
 
+- Managed Mistral GLM presets use `mistral-direct` with `backend = "generic"`
+  and `api_style = "reasoning"`. The OpenAI adapter stringifies Mistral's
+  thinking blocks into the answer; the reasoning adapter preserves separate
+  answer/reasoning channels while forwarding low/high/max unchanged. Existing
+  managed homes migrate on setup/start. Keep explicit custom cache prices.
+- GLM input/output/cached-input estimates are 1.4/4.4/0.14 USD per million
+  tokens. ACP cost is a session token estimate, never proof of a cash charge,
+  subscription, or account balance. An API key can use a Mistral subscription.
 - Keep `resolveVibeProfile` distinct from the public `vibeProfile` sequence
   input. Convertigo `include()` evaluates helpers in the request scope, even
   inside the loader IIFE; a helper named like the input overwrites it and
@@ -384,6 +392,9 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - Snapshots contain only provider, source, window percentages/reset times,
   timestamps and optional context/cost aggregates. Never pass credentials or
   raw protocol messages as a quota snapshot. Missing values are not zero usage.
+- ACP context carries `limitKind: "compaction"` and `costKind: "session_estimate"`.
+  Its size is the CLI's effective compaction threshold, not necessarily the
+  model's maximum context length. Do not infer billing mode from a key or CLI name.
 - Run `node tests/agent_quota.test.js`, `node tests/claude_provider.test.js` and
   `node tests/agent_bridge_runtime.test.js` after changing this contract.
 

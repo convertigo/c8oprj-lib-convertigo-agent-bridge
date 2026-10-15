@@ -535,7 +535,7 @@ console.log("Vibe image attachment contract OK");
     assert.match(written, /^\[\[providers\]\]\nname = "mistral"\n[\s\S]*?^backend = "mistral"$/m);
     assert.match(written, /^browser_auth_base_url = "https:\/\/console\.mistral\.ai"$/m);
     // The additional provider: same endpoint, same key, generic backend.
-    assert.match(written, /^\[\[providers\]\]\nname = "mistral-direct"\napi_base = "https:\/\/api\.mistral\.ai\/v1"\napi_key_env_var = "MISTRAL_API_KEY"\napi_style = "openai"\nbackend = "generic"\nreasoning_field_name = "reasoning_content"$/m);
+    assert.match(written, /^\[\[providers\]\]\nname = "mistral-direct"\napi_base = "https:\/\/api\.mistral\.ai\/v1"\napi_key_env_var = "MISTRAL_API_KEY"\napi_style = "reasoning"\nbackend = "generic"\nreasoning_field_name = "reasoning_content"$/m);
     assert.doesNotMatch(written, /name = "mistral-direct"[\s\S]*?browser_auth/, "the sign-in stays on the native provider only");
     // The GLM preset points at it; nothing else does.
     assert.match(written, /name = "zai-glm-5-3"\nprovider = "mistral-direct"\nalias = "glm-5-3"/);
