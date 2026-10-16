@@ -387,6 +387,28 @@
     return preset !== null && preset.genericBackend === true;
   }
 
+  var VIBE_MODEL_CONFIG_REVISION = "gateway-vision-v2";
+
+  function gatewayModelCatalogRefreshRequested(options) {
+    options = options || {};
+    return boolValue(options.refreshModelCatalog, false) || boolValue(options.refreshProviderSettings, false) || boolValue(options.refreshUpdateCheck, false);
+  }
+
+  // Mistral Large 4 accepts image inputs. GLM keeps its verified text-only behavior.
+  // Match the full gateway id as well as the alias used by the ACP session.
+  function gatewayModelSupportsImages(name) {
+    return /^mistral-large-4(?:[-.]|$)/i.test(gatewayModelAlias(name));
+  }
+
+  function vibeRuntimeCatalogNeedsRestart(entry, requestedModel) {
+    if (trim(entry.modelConfigRevision) !== VIBE_MODEL_CONFIG_REVISION) { return true; }
+    var models = entry.providerSettings && entry.providerSettings.models || [];
+    requestedModel = trim(requestedModel);
+    return requestedModel.length > 0 && models.length > 0 && !models.some(function (model) {
+      return trim(model.id) === requestedModel || trim(model.configuredName) === requestedModel;
+    });
+  }
+
   function convertigoGatewayModelNames(options, vibeHome) {
     options = options || {};
     // An explicit model, or an explicit list, pins the offer and skips the gateway.
@@ -395,7 +417,8 @@
     var listed = normalizeGatewayModelIds(options.gatewayModelIds || options.llmGatewayModels);
     if (listed.length) { return listed; }
     var cached = readConvertigoGatewayModelsCache(options);
-    if (cached !== null && now() - cached.at < CONVERTIGO_LLM_GATEWAY_MODELS_CACHE_MS) { return cached.models; }
+    if (boolValue(options.runtimePresenceOnly, false)) { return cached !== null ? cached.models : [CONVERTIGO_LLM_GATEWAY_MODEL]; }
+    if (!gatewayModelCatalogRefreshRequested(options) && cached !== null && now() - cached.at < CONVERTIGO_LLM_GATEWAY_MODELS_CACHE_MS) { return cached.models; }
     var apiKey = boolValue(options.dryRun, false) ? "" : convertigoGatewayApiKey(options, vibeHome);
     if (apiKey.length) {
       var fetched = fetchConvertigoGatewayModelIds(options, apiKey);
@@ -458,7 +481,7 @@
         outputPrice: "4.4",
         cachedInputPrice: "0.14",
         builtIn: false,
-        supportsImages: VIBE_GLM_SUPPORTS_IMAGES
+        supportsImages: gatewayModelSupportsImages(names[i])
       });
     }
     return specs;
@@ -779,7 +802,7 @@
       "claudePath",
       "mcpEndpoint", "workspaceRoot", "settingsTimeoutMs", "modelsTimeoutMs",
       "model", "reasoningEffort", "reasoningLevel", "serviceTier", "savePreferences",
-      "checkUpdates", "refreshUpdateCheck", "updateCheckTimeoutMs", "updateCheckCacheMs", "runtimePresenceOnly",
+      "checkUpdates", "refreshUpdateCheck", "refreshModelCatalog", "refreshProviderSettings", "updateCheckTimeoutMs", "updateCheckCacheMs", "runtimePresenceOnly",
       "codexRuntimeMode", "codexProtocol",
       "agentRevealMode", "convertigoRevealMode", "uiRevealMode", "revealMode",
       "nocodeMcpToken", "noCodeMcpToken", "mcpBearerToken",
@@ -5210,9 +5233,12 @@
         );
       }
       model.provider = "convertigo";
+      model.supportsImages = gatewayModelSupportsImages(alias);
       models.push(model);
     }
     provider.models = models;
+    provider.supports = provider.supports || {};
+    provider.supports.images = models.some(function (model) { return model.supportsImages === true; });
     if (aliases.indexOf(trim(provider.defaultModel)) < 0) { provider.defaultModel = models[0].id; }
     return provider;
   }
@@ -6941,7 +6967,8 @@
       thinking: "",
       temperature: "1.0",
       inputPrice: "0.0",
-      outputPrice: "0.0"
+      outputPrice: "0.0",
+      supportsImages: gatewayModelSupportsImages(model)
     };
   }
 
@@ -8322,6 +8349,7 @@
           id: gatewayProfile ? spec.alias : spec.activeModel,
           label: gatewayProfile ? spec.alias : spec.activeModel,
           configuredName: spec.name,
+          supportsImages: spec.supportsImages === true,
           provider: gatewayProfile ? "convertigo" : "mistral",
           defaultReasoning: spec.thinking,
           reasoningLevels: gatewayProfile && spec.efforts ? spec.efforts.map(function (level) {
@@ -8405,7 +8433,7 @@
       supports: {
         resume: true,
         stop: true,
-        images: false,
+        images: models.some(function (model) { return model.supportsImages === true; }),
         mcp: profileSupported && (setup.config.selected.valid || setup.config.user.hasConvertigoServer),
         reasoning: false,
         serviceTier: false
@@ -8897,7 +8925,7 @@
       }
       currentProvider = requireProviderAuthentication(currentProvider);
       if (!presenceOnly && vibeFamily && currentProvider.ready === true && typeof C8O.agentBridge.discoverVibeSettings === "function") {
-        var refreshProviderSettings = boolValue(options.refreshProviderSettings || options.refreshModelCatalog || options.refreshUpdateCheck, false);
+        var refreshProviderSettings = gatewayModelCatalogRefreshRequested(options);
         if (refreshProviderSettings || !providerSettingsCacheFresh(currentProvider, settingsCacheMaxAgeMs)) {
           currentProvider = C8O.agentBridge.discoverVibeSettings(withVibeProfile(options, currentProvider.profile || (normalizeProvider(currentProvider.id) === "convertigo" ? "convertigo" : "mistral")), currentProvider);
         }

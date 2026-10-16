@@ -456,8 +456,23 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 ## Release channels
 
 - Stable Tigo bundle: Assistant 1.4.49, Bridge 0.4.22, MCP 0.2.23.
-- Preview Tigo bundle: Assistant 1.5.0, Bridge 0.4.23, MCP 0.2.24.
+- Preview Tigo bundle: Assistant 1.5.1, Bridge 0.4.24, MCP 0.2.24.
 - All new GitHub tag publications are pre-releases and cannot become Latest
   automatically. No push or tag deploys a server. Hosted Assistant deployment
   has a separate manual workflow in its repository; do not deploy Bridge/MCP
   on backend-apps merely to host assistant.convertigo.com.
+
+## Gateway model refresh and image support
+
+- `refreshModelCatalog` bypasses the five-minute gateway model cache and the
+  provider metadata cache. Runtime presence checks stay offline, and a failed
+  refresh retains the last known offer. Parse each flag before combining it.
+- Mistral Large 4 (`mistral/mistral-large-4` and its ACP alias) accepts images.
+  Declare `supports_images = true` in its managed config and transmit ACP image
+  blocks; GLM remains text-only. Do not apply GLM capabilities to every model.
+- Configuration intent revision `gateway-vision-v2` refreshes existing managed
+  configs without requiring runtime reinstallation. If an attachment is skipped
+  for an unknown capability, explain that it was not transmitted rather than
+  claiming the upstream model cannot see images.
+- `node tests/gateway_models.test.js` checks metadata refresh, offline startup,
+  stale-catalog fallback and the outbound ACP image payload without inference.

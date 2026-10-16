@@ -87,7 +87,7 @@
         // out: agent_vibe_start passes an empty model on purpose and sets the session model over
         // ACP, so recording it would make start and setup fight over the file.
         var expectedIntent = vibeConfigIntent({
-          modelConfigRevision: "mistral-reasoning-cache-v1",
+          modelConfigRevision: VIBE_MODEL_CONFIG_REVISION,
           bearerTokenEnv: expectedBearerEnv,
           endpoint: expectedEndpoint,
           gatewayModels: expectedGatewayModels,
@@ -364,6 +364,19 @@
         });
         stopEntry(existing, true);
         existing = null;
+      } else if (vibeRuntimeCatalogNeedsRestart(existing, requestedModel)) {
+        // A metadata refresh can expose a model absent from this resident ACP catalog.
+        // Reuse the session when supported; no runtime download/install is required.
+        if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
+          options.sessionId = trim(existing.sessionId);
+        }
+        pushEvent(existing, "warning", {
+          phase: "session/config",
+          reason: "model_catalog_changed",
+          message: "Vibe must restart to apply the refreshed model capabilities."
+        });
+        stopEntry(existing, true);
+        existing = null;
       } else if (revealChanged) {
         // The reveal request travels as an MCP header in config.toml: restart to apply it.
         pushEvent(existing, "warning", {
@@ -470,6 +483,7 @@
     var command = parseCommand(options.command, [setup.setup.vibeAcp.path || "vibe-acp"]);
     var ttlMillis = intValue(options.ttlSeconds, DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
     var entry = createEntry(handle, "vibe", "acp", command, cwd, env, ttlMillis, setup.setup.home, credentials, requestedModel || setup.setup.model);
+    entry.modelConfigRevision = VIBE_MODEL_CONFIG_REVISION;
     entry.vibeProfile = resolveVibeProfile(options);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
@@ -711,7 +725,7 @@
       var noVision = images.skipped.filter(function (item) { return item.reason === "model_without_vision"; });
       if (noVision.length) {
         promptBlocks[0].text += "\n\nNote from the Agent Bridge: " + noVision.length + " attached image(s) could not be sent to the active model `"
-          + trim(noVision[0].model) + "` because it has no image input on this account. Tell the user that this model cannot see images and that Mistral Medium, Codex, or Claude can, then continue with the text of the request.";
+          + trim(noVision[0].model) + "` because the bridge has no verified image-input support for that model. Explain that the attachment was not transmitted; do not infer that the upstream model itself lacks vision. Continue with the text of the request.";
       }
     }
     var params = {
