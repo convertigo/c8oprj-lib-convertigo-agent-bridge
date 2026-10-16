@@ -418,7 +418,8 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - Claude model labels, resolved versions and effort levels come from the installed authenticated CLI stream-json `initialize` reply. Generic family aliases are compatibility fallback only. Catalog caches are scoped to the Claude home; presence-only startup never runs the CLI.
 - Claude quota refresh uses `get_usage` with `skip_behaviors:true`, including before the first prompt. Those percentages are already 0–100; `rate_limit_event` utilization is a 0–1 fraction. Normalize ISO resets to epoch seconds and include model-scoped weekly windows. Raw control replies (account identity included) never enter public events.
 - Codex metadata probes use only initialize and `account/rateLimits/read`, with no thread creation. Vibe ACP still supplies context usage rather than account credit.
-- Release commits marked `[skip deploy]` publish CARs through CI without deployment, on both branch and tag pushes. Other deployment behavior is unchanged.
+- Push/tag CI only builds CARs and publishes pre-releases; it never deploys,
+  regardless of `[skip deploy]`. Stable promotion is manual after review.
 
 - A newer workstation Keychain OAuth expiry takes precedence over an older managed credential file when synchronizing conversation homes. A copied file’s modification time alone must not make an expired session win over a later sign-in.
 
@@ -451,3 +452,12 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - Run `node --test tests/tigo_resources.test.js` together with runtime/provider
   tests when changing this contract. Assistant 1.5.0 owns library UI/storage and
   determines when a configuration change requires process restart and resume.
+
+## Release channels
+
+- Stable Tigo bundle: Assistant 1.4.49, Bridge 0.4.22, MCP 0.2.23.
+- Preview Tigo bundle: Assistant 1.5.0, Bridge 0.4.23, MCP 0.2.24.
+- All new GitHub tag publications are pre-releases and cannot become Latest
+  automatically. No push or tag deploys a server. Hosted Assistant deployment
+  has a separate manual workflow in its repository; do not deploy Bridge/MCP
+  on backend-apps merely to host assistant.convertigo.com.
