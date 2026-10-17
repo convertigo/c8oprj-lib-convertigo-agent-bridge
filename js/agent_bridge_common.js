@@ -8959,8 +8959,16 @@
     }
   }
 
+  // The agent_cleanup_storage sequence may name its conversation in the request.
   C8O.agentBridge.cleanupStorage = function (options) {
-    options = optionsWithRequestFallbacks(options || {});
+    return cleanupAgentStorage(optionsWithRequestFallbacks(options || {}));
+  };
+
+  // Never reads the HTTP request: an internal caller such as settings() runs inside a request
+  // that names the conversation being displayed, and an exact-conversation cleanup stops its
+  // agent process, so a viewer opening a running conversation would kill its turn.
+  function cleanupAgentStorage(options) {
+    options = options || {};
     var workspaceRoot = resolveWorkspaceRoot(options);
     var report = {
       ok: true,
@@ -9008,7 +9016,7 @@
     report.ok = report.errors.length === 0;
     report.status = report.ok ? "cleaned" : "partial";
     return report;
-  };
+  }
 
   C8O.agentBridge.settings = function (options) {
     options = optionsWithRequestFallbacks(options);
@@ -9092,7 +9100,8 @@
       defaults.model = preferences.model;
       defaults.reasoning = preferences.reasoning;
     }
-    var storageCleanup = C8O.agentBridge.cleanupStorage({
+    // Periodic orphan purge only, whatever conversation this settings request names.
+    var storageCleanup = cleanupAgentStorage({
       workspaceRoot: settingsWorkspaceRoot
     });
     return {
@@ -9407,7 +9416,114 @@
     if (auth.configured !== true) { return null; }
     return readWrapperMetadata(provider,scoped,setup,true).quota;
   }
-  function recordVibeUsage(entry, update) {
+  // Vibe 2.26's unified harness leaves cachedTokens at 0 in its usage updates, while its session journal logs the real
+  // usage of every model request (action_result records of type completion_succeeded). Totals are kept per journal
+  // segment with the byte offset already read: an update only reads what was appended, and a segment that rotates out
+  // of journal/ keeps its count.
+  function emptyVibeJournalSegment() {
+    return { offset: 0, requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+  }
+
+  function addVibeJournalText(segment, text) {
+    var lines = String(text || "").split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (line.indexOf("completion_succeeded") < 0) {
+        continue;
+      }
+      var record = null;
+      try {
+        record = JSON.parse(line);
+      } catch (_ignoreJournalLine) {
+        continue;
+      }
+      var outer = record && record.type === "action_result" && record.payload ? (record.payload.result || {}) : null;
+      var result = outer ? (outer.result || {}) : {};
+      if (!outer || (outer.type || result.type) !== "completion_succeeded") {
+        continue;
+      }
+      var usage = result.usage || {};
+      segment.requests++;
+      segment.inputTokens += Number(usage.input_tokens) || 0;
+      segment.cachedTokens += Number(usage.cached_input_tokens) || 0;
+      segment.outputTokens += Number(usage.output_tokens) || 0;
+    }
+    return segment;
+  }
+
+  function sumVibeJournalSegments(segments) {
+    var total = { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+    for (var name in segments) {
+      if (Object.prototype.hasOwnProperty.call(segments, name) && segments[name]) {
+        total.requests += Number(segments[name].requests) || 0;
+        total.inputTokens += Number(segments[name].inputTokens) || 0;
+        total.cachedTokens += Number(segments[name].cachedTokens) || 0;
+        total.outputTokens += Number(segments[name].outputTokens) || 0;
+      }
+    }
+    total.cacheRate = total.inputTokens > 0 ? total.cachedTokens / total.inputTokens : null;
+    return total;
+  }
+
+  function vibeJournalUsage(vibeHome, sessionId) {
+    var home = trim(vibeHome);
+    var session = trim(sessionId);
+    if (!home.length || !/^[A-Za-z0-9._-]{1,128}$/.test(session)) {
+      return null;
+    }
+    var sessionDir = new File(home, "logs/session/unified/" + session);
+    var journal = new File(sessionDir, "journal");
+    var names = journal.isDirectory() ? journal.list() : null;
+    if (names === null) {
+      return null;
+    }
+    var stateFile = new File(sessionDir, "convertigo-usage.json");
+    var state = readJsonFile(stateFile) || {};
+    var segments = state.segments && typeof state.segments === "object" ? state.segments : {};
+    var changed = false;
+    for (var i = 0; i < names.length; i++) {
+      var name = String(names[i]);
+      if (!/^[A-Za-z0-9._-]+\.jsonl$/.test(name)) {
+        continue;
+      }
+      var file = new File(journal, name);
+      var length = Number(file.length());
+      var segment = segments[name] || emptyVibeJournalSegment();
+      if (length < Number(segment.offset || 0)) {
+        segment = emptyVibeJournalSegment();
+      }
+      if (length > Number(segment.offset || 0)) {
+        var raf = new RandomAccessFile(file, "r");
+        var bytes = null;
+        try {
+          raf.seek(Number(segment.offset || 0));
+          bytes = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, length - Number(segment.offset || 0));
+          raf.readFully(bytes);
+        } finally {
+          raf.close();
+        }
+        // Only complete lines: a record still being written is read on the next update.
+        var end = bytes.length - 1;
+        while (end >= 0 && bytes[end] !== 10) {
+          end--;
+        }
+        if (end >= 0) {
+          addVibeJournalText(segment, String(new java.lang.String(bytes, 0, end + 1, StandardCharsets.UTF_8)));
+          segment.offset = Number(segment.offset || 0) + end + 1;
+          changed = true;
+        }
+      }
+      segments[name] = segment;
+    }
+    if (changed) {
+      try {
+        writeJsonFile(stateFile, { version: 1, sessionId: session, segments: segments });
+      } catch (_ignoreUsageStateWrite) {}
+    }
+    return sumVibeJournalSegments(segments);
+  }
+
+  function recordVibeUsage(entry, update, journalUsage) {
     update = update || {};
     updateWrapperQuota(entry, {available:false, kind:"context", windows:[], context:{
       usedTokens:quotaNumber(update.used), limitTokens:quotaNumber(update.size),
@@ -9416,6 +9532,8 @@
       costCurrency:update.cost && /^[A-Z]{3}$/.test(String(update.cost.currency)) ? String(update.cost.currency) : "",
       // Session totals Vibe sends with every usage update (steps, prompt/completion/cached tokens, speed, last turn).
       meta:update._meta && typeof update._meta === "object" ? update._meta : null,
+      // Requests, input, cached and output tokens of the session, read from the Vibe journal.
+      journal:journalUsage || null,
       threshold:vibeCompactThresholdFor(entry.model),
       window:vibeContextWindowFor(entry.model) || null
     }});
@@ -10103,7 +10221,12 @@
       return;
     }
     if (kind === "usage_update") {
-      recordVibeUsage(entry, update);
+      var journalUsage = null;
+      try {
+        journalUsage = vibeJournalUsage(entry.vibeHome, eventData.sessionId);
+      } catch (_ignoreJournalUsage) {}
+      recordVibeUsage(entry, update, journalUsage);
+      eventData.journalUsage = journalUsage;
       eventData.autoCompactThreshold = vibeCompactThresholdFor(entry.model);
       eventData.contextWindow = vibeContextWindowFor(entry.model) || null;
       pushEvent(entry, "usage/update", eventData);

@@ -25,6 +25,16 @@ assert.equal(vibe.quota.context.usedTokens,123);assert.equal(vibe.quota.context.
 assert.equal(vibe.quota.context.limitKind,'compaction');
 assert.equal(vibe.quota.context.costKind,'session_estimate','ACP token cost never establishes the account billing mode');
 recordVibeUsage(vibe,{used:null,size:null});assert.equal(vibe.quota.context.usedTokens,null);
+// Cached tokens come from the Vibe journal (completion_succeeded records), not from the usage update that reports 0.
+const done=(input,cached,output)=>JSON.stringify({type:'action_result',payload:{result:{type:'completion_succeeded',result:{usage:{input_tokens:input,cached_input_tokens:cached,output_tokens:output}}}}});
+const segment=addVibeJournalText(emptyVibeJournalSegment(),[done(1000,900,50),JSON.stringify({type:'action_result',payload:{result:{type:'tool_succeeded'}}}),'{"broken completion_succeeded',done(2000,1800,70)].join('\n'));
+assert.equal(segment.requests,2);assert.equal(segment.inputTokens,3000);assert.equal(segment.cachedTokens,2700);assert.equal(segment.outputTokens,120);
+const total=sumVibeJournalSegments({'a.jsonl':segment,'b.jsonl':addVibeJournalText(emptyVibeJournalSegment(),done(1000,0,10))});
+assert.equal(total.requests,3);assert.equal(total.cachedTokens,2700);assert.equal(total.cacheRate,2700/4000);
+assert.equal(sumVibeJournalSegments({}).cacheRate,null,'no request: the cache rate is unknown, not 0');
+assert.equal(vibeJournalUsage('','abc'),null);assert.equal(vibeJournalUsage('/tmp','../x'),null,'the session id never leaves the journal directory');
+recordVibeUsage(vibe,{used:5},{requests:3,inputTokens:4000,cachedTokens:2700,outputTokens:130,cacheRate:0.675});
+assert.equal(vibe.quota.context.journal.cachedTokens,2700);
 const pending={method:'account/rateLimits/read',done:false};
 const entry={provider:'codex',lastError:'unchanged',pending:{get(){return pending;}}};
 handleCodexAppServerLine(entry,JSON.stringify({id:7,error:{message:'unsupported'}}),'stdout');

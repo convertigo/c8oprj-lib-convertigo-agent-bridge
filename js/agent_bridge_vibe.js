@@ -484,6 +484,7 @@
     var ttlMillis = intValue(options.ttlSeconds, DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
     var entry = createEntry(handle, "vibe", "acp", command, cwd, env, ttlMillis, setup.setup.home, credentials, requestedModel || setup.setup.model);
     entry.modelConfigRevision = VIBE_MODEL_CONFIG_REVISION;
+    entry.vibeHome = vibeHome;
     entry.vibeProfile = resolveVibeProfile(options);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
