@@ -41,6 +41,30 @@ const two=addVibeJournalText(addVibeJournalText(emptyVibeJournalSegment(),done(1
 assert.equal(two.models.vision.requests,1,'a second model keeps its own bucket');
 assert.equal(sumVibeJournalSegments({'a.jsonl':two},{'glm-5-3':{inputPrice:1.4,cachedInputPrice:0.14,outputPrice:4.4}}).costAmount,null,'a model without prices leaves the session cost unknown');
 assert.equal(sumVibeJournalSegments({'a.jsonl':two},{'glm-5-3':{inputPrice:1.4,cachedInputPrice:0.14,outputPrice:4.4},vision:{inputPrice:2,cachedInputPrice:null,outputPrice:6}}).costAmount,3.4);
+// Session measures from the journal: active time, requests, tool calls, failures, durations, sleep and builder waits, per turn.
+const rec=(type,payload,extra)=>JSON.stringify(Object.assign({payload,type},extra||{}));
+const intent=(id,turn,call)=>rec('action_intent',{action_id:id,kind:'tool',request:{action_id:id,call,turn_id:turn}});
+const llm=(id,turn)=>rec('action_intent',{action_id:id,kind:'completion',request:{action_id:id,turn_id:turn,type:'llm_call'}});
+const res=(id,type,extra)=>rec('action_result',{action_id:id,result:Object.assign({type},extra||{})});
+const at=t=>rec('core_input',{input:{determinism:{time_unix_ms:t}}});
+const journal=[at(1792000000000),llm('c1','t1'),at(1792000001000),res('c1','completion_succeeded',{result:{finish_reason:'tool_call',usage:{}}}),
+  intent('a1','t1',{group_name:'file_system',tool_name:'bash',arguments:{command:'cd x && sleep 5'}}),at(1792000002000),res('a1','tool_succeeded'),at(1792000007000),
+  intent('a2','t1',{group_name:'mcp_Convertigo',tool_name:'mobile_builder_open',arguments:{wait:true}}),at(1792000008000),res('a2','tool_succeeded'),at(1792000038000),
+  intent('a3','t2',{group_name:'mcp_Convertigo',tool_name:'requestable_execute',arguments:{}}),at(1792001000000),res('a3','tool_failed'),at(1792001002000),
+  llm('c2','t2'),at(1792001003000),res('c2','completion_succeeded',{result:{finish_reason:'stop',usage:{}}}),at(1792001004000)].join('\n')+'\n';
+let measured=emptyVibeMetrics();
+for(const part of [journal.slice(0,journal.indexOf('\n',600)+1),journal.slice(journal.indexOf('\n',600)+1)])measured=addVibeJournalMetrics(JSON.parse(JSON.stringify(measured)),part);
+const view=vibeMetricsView(measured,2);
+assert.equal(view.requests,2);assert.deepEqual(JSON.parse(JSON.stringify(view.finishReasons)),{tool_call:1,stop:1});
+assert.equal(view.toolCalls,3);assert.equal(view.toolFailures,1);
+assert.equal(view.activeMs,38000+4000,'the 16-minute gap before the third call is not active time');
+assert.equal(view.wallMs,1004000);
+assert.equal(view.sleeps.count,1);assert.equal(view.sleeps.durationMs,5000);
+assert.equal(view.builderWaits.count,1);assert.equal(view.builderWaits.durationMs,30000);
+assert.equal(view.compactions,2);
+assert.equal(view.tools[0].name,'file_system.bash');
+assert.equal(view.tools.find(t=>t.name==='mcp_Convertigo.requestable_execute').failures,1);
+assert.equal(view.turns.length,2);assert.equal(view.turns[0].toolCalls,2);assert.equal(view.turns[0].builderWaitMs,30000);assert.equal(view.turns[1].toolFailures,1);assert.equal(view.turns[1].requests,1);
 assert.equal(vibeJournalUsage('','abc'),null);assert.equal(vibeJournalUsage('/tmp','../x'),null,'the session id never leaves the journal directory');
 // image-describe calls (a gateway vision model) come back in tool results with their own usage, summed per model.
 const visionUsage=(callId,model,input,output,cost)=>({tool:'image-describe',callId,model,inputTokens:input,cachedTokens:0,outputTokens:output,reasoningTokens:output-10,totalTokens:input+output,cost,currency:cost===null?'':'USD'});

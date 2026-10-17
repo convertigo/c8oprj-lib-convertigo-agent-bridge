@@ -9729,7 +9729,232 @@
     return total;
   }
 
-  function vibeJournalUsage(vibeHome, sessionId, model) {
+  // Session measures read from the Vibe journal, kept with the usage totals so that runs compare without an external
+  // script: active time (gaps over 10 min left out) and wall time, model requests and finish reasons, tool calls,
+  // failures and durations per tool, "sleep" commands, Convertigo builder waits (mobile-builder-open with wait), per
+  // turn and for the session. A tool call lasts from the first time recorded after its intent to the first time
+  // recorded after its result. Accumulated as the journal is read, so a segment that rotates out keeps its counts.
+  var VIBE_ACTIVE_GAP_MS = 10 * 60 * 1000;
+  var VIBE_METRICS_MAX_TURNS = 200;
+  var VIBE_METRICS_MAX_PENDING = 500;
+
+  function emptyVibeMetrics() {
+    return { minTime: 0, maxTime: 0, activeMs: 0, requests: 0, toolCalls: 0, toolFailures: 0, tools: {}, finishReasons: {},
+      sleeps: { count: 0, durationMs: 0 }, builderWaits: { count: 0, durationMs: 0 }, turns: {}, turnOrder: [], pending: {}, awaitingStart: [], awaitingEnd: [] };
+  }
+
+  function vibeMetricsTurn(metrics, turnId) {
+    var id = trim(turnId) || "unknown";
+    if (!metrics.turns[id]) {
+      metrics.turns[id] = { id: id, firstAt: 0, lastAt: 0, requests: 0, toolCalls: 0, toolFailures: 0, tools: {}, sleeps: 0, builderWaitMs: 0 };
+      metrics.turnOrder.push(id);
+      while (metrics.turnOrder.length > VIBE_METRICS_MAX_TURNS) {
+        delete metrics.turns[metrics.turnOrder.shift()];
+      }
+    }
+    return metrics.turns[id];
+  }
+
+  function vibeToolName(call) {
+    var name = String((call && (call.name || call.tool_name)) || "?");
+    return call && call.group_name ? String(call.group_name) + "." + name : name;
+  }
+
+  function addVibeToolCount(tools, name, failed, durationMs) {
+    var tool = tools[name] || { calls: 0, failures: 0, durationMs: 0 };
+    tool.calls++;
+    tool.failures += failed ? 1 : 0;
+    tool.durationMs += durationMs > 0 ? durationMs : 0;
+    tools[name] = tool;
+  }
+
+  function addVibeJournalMetrics(metrics, text) {
+    var lines = String(text || "").split("\n");
+    var timePattern = /"(?:time_unix_ms|createdAt)":\s*(1[0-9]{12})/g;
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (!line.length) {
+        continue;
+      }
+      // Times: the active time adds every gap under 10 minutes between the latest time and a later one.
+      var recordTime = 0;
+      var match;
+      timePattern.lastIndex = 0;
+      while ((match = timePattern.exec(line)) !== null) {
+        var t = Number(match[1]);
+        if (!metrics.minTime || t < metrics.minTime) {
+          metrics.minTime = t;
+        }
+        if (t > metrics.maxTime) {
+          if (metrics.maxTime && t - metrics.maxTime < VIBE_ACTIVE_GAP_MS) {
+            metrics.activeMs += t - metrics.maxTime;
+          }
+          metrics.maxTime = t;
+        }
+        recordTime = Math.max(recordTime, t);
+      }
+      if (recordTime) {
+        while (metrics.awaitingStart.length) {
+          var started = metrics.pending[metrics.awaitingStart.shift()];
+          if (started && !started.start) {
+            started.start = recordTime;
+          }
+        }
+        while (metrics.awaitingEnd.length) {
+          var ended = metrics.awaitingEnd.shift();
+          var durationMs = ended.start && recordTime >= ended.start ? recordTime - ended.start : 0;
+          var turn = vibeMetricsTurn(metrics, ended.turn);
+          addVibeToolCount(metrics.tools, ended.name, ended.failed, durationMs);
+          addVibeToolCount(turn.tools, ended.name, ended.failed, durationMs);
+          if (ended.sleep) {
+            metrics.sleeps.durationMs += durationMs;
+          }
+          if (ended.builderWait) {
+            metrics.builderWaits.durationMs += durationMs;
+            turn.builderWaitMs += durationMs;
+          }
+        }
+      }
+      if (line.indexOf('"type":"action_intent"') === -1 && line.indexOf('"type":"action_result"') === -1) {
+        continue;
+      }
+      var record = null;
+      try {
+        record = JSON.parse(line);
+      } catch (_ignoreMetricsLine) {
+        continue;
+      }
+      var payload = (record && record.payload) || {};
+      if (record.type === "action_intent") {
+        var request = payload.request || {};
+        var intentTurn = vibeMetricsTurn(metrics, request.turn_id);
+        if (recordTime) {
+          intentTurn.firstAt = intentTurn.firstAt || recordTime;
+          intentTurn.lastAt = Math.max(intentTurn.lastAt, recordTime);
+        }
+        if (payload.kind === "tool" || payload.kind === "completion") {
+          var call = request.call || {};
+          var args = call.arguments || {};
+          var name = payload.kind === "tool" ? vibeToolName(call) : "";
+          var command = typeof args.command === "string" ? args.command : "";
+          metrics.pending[payload.action_id] = {
+            kind: payload.kind,
+            name: name,
+            turn: request.turn_id || "",
+            start: 0,
+            sleep: payload.kind === "tool" && /(^|[;&|(\s])sleep\s+[0-9.]+/.test(command),
+            builderWait: /mobile[_-]builder[_-]open$/.test(name) && !!args.wait && String(args.wait) !== "false"
+          };
+          metrics.awaitingStart.push(payload.action_id);
+        }
+        continue;
+      }
+      if (record.type !== "action_result") {
+        continue;
+      }
+      var outer = payload.result || {};
+      var result = outer.result || {};
+      var resultType = outer.type || result.type;
+      var pending = metrics.pending[payload.action_id] || null;
+      if (pending) {
+        delete metrics.pending[payload.action_id];
+      }
+      if (resultType === "completion_succeeded") {
+        metrics.requests++;
+        var reason = String(result.finish_reason || "unknown");
+        metrics.finishReasons[reason] = (metrics.finishReasons[reason] || 0) + 1;
+        vibeMetricsTurn(metrics, pending ? pending.turn : "").requests++;
+      } else if (resultType === "tool_succeeded" || resultType === "tool_failed") {
+        var failed = resultType === "tool_failed";
+        var toolTurn = vibeMetricsTurn(metrics, pending ? pending.turn : "");
+        metrics.toolCalls++;
+        toolTurn.toolCalls++;
+        if (failed) {
+          metrics.toolFailures++;
+          toolTurn.toolFailures++;
+        }
+        var ending = { name: pending ? pending.name : "?", turn: pending ? pending.turn : "", start: pending ? pending.start : 0, failed: failed, sleep: !!(pending && pending.sleep), builderWait: !!(pending && pending.builderWait) };
+        if (ending.sleep) {
+          metrics.sleeps.count++;
+          toolTurn.sleeps++;
+        }
+        if (ending.builderWait) {
+          metrics.builderWaits.count++;
+        }
+        metrics.awaitingEnd.push(ending);
+      }
+    }
+    // Pending intents of calls that never got a result are bounded.
+    var pendingIds = Object.keys(metrics.pending);
+    for (var p = 0; p < pendingIds.length - VIBE_METRICS_MAX_PENDING; p++) {
+      delete metrics.pending[pendingIds[p]];
+    }
+    return metrics;
+  }
+
+  // Public shape of the measures: durations in ms, tools sorted by calls, turns in order.
+  function vibeMetricsView(metrics, compactions) {
+    if (!metrics) {
+      return null;
+    }
+    var sortTools = function (tools) {
+      return Object.keys(tools || {}).map(function (name) {
+        return { name: name, calls: tools[name].calls, failures: tools[name].failures, durationMs: tools[name].durationMs };
+      }).sort(function (a, b) {
+        return b.calls - a.calls || (a.name < b.name ? -1 : 1);
+      });
+    };
+    var turns = [];
+    for (var t = 0; t < metrics.turnOrder.length; t++) {
+      var turn = metrics.turns[metrics.turnOrder[t]];
+      if (turn && (turn.requests || turn.toolCalls)) {
+        turns.push({ id: turn.id, firstAt: turn.firstAt, lastAt: turn.lastAt, requests: turn.requests, toolCalls: turn.toolCalls,
+          toolFailures: turn.toolFailures, sleeps: turn.sleeps, builderWaitMs: turn.builderWaitMs, tools: sortTools(turn.tools) });
+      }
+    }
+    return {
+      activeMs: metrics.activeMs,
+      wallMs: metrics.maxTime && metrics.minTime ? metrics.maxTime - metrics.minTime : 0,
+      requests: metrics.requests,
+      finishReasons: metrics.finishReasons,
+      toolCalls: metrics.toolCalls,
+      toolFailures: metrics.toolFailures,
+      tools: sortTools(metrics.tools),
+      sleeps: metrics.sleeps,
+      builderWaits: metrics.builderWaits,
+      compactions: compactions === null || typeof compactions === "undefined" ? null : compactions,
+      turns: turns
+    };
+  }
+
+  // Vibe keeps its compaction count in the checkpoint of its latest generation.
+  function vibeCompactionCount(sessionDir) {
+    try {
+      var generations = new File(sessionDir, "generations").list();
+      if (generations === null || !generations.length) {
+        return null;
+      }
+      var latest = "";
+      for (var g = 0; g < generations.length; g++) {
+        if (String(generations[g]) > latest) {
+          latest = String(generations[g]);
+        }
+      }
+      var raf = new RandomAccessFile(new File(new File(new File(sessionDir, "generations"), latest), "checkpoint.json"), "r");
+      try {
+        var size = Math.min(4096, Number(raf.length()));
+        var head = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, size);
+        raf.readFully(head);
+        var match = /"compaction_count"\s*:\s*(\d+)/.exec(String(new java.lang.String(head, StandardCharsets.UTF_8)));
+        return match ? Number(match[1]) : null;
+      } finally {
+        raf.close();
+      }
+    } catch (_ignoreCompactionCount) {}
+    return null;
+  }
+
+  function vibeJournalUsage(vibeHome, sessionId, model, options) {
     var home = trim(vibeHome);
     var session = trim(sessionId);
     if (!home.length || !/^[A-Za-z0-9._-]{1,128}$/.test(session)) {
@@ -9745,6 +9970,10 @@
     var state = readJsonFile(stateFile) || {};
     var segments = state.segments && typeof state.segments === "object" ? state.segments : {};
     var changed = false;
+    // Measures started with this version: a state without them reads the segments still present from their start.
+    var metricsFresh = !state.metrics || typeof state.metrics !== "object";
+    var metrics = metricsFresh ? emptyVibeMetrics() : state.metrics;
+    names = Array.prototype.slice.call(names).map(String).sort();
     var seenCallIds = {};
     for (var known in segments) {
       if (Object.prototype.hasOwnProperty.call(segments, known) && segments[known] && segments[known].visionCallIds) {
@@ -9770,12 +9999,18 @@
         segment.models[trim(model) || "unknown"] = { requests: Number(segment.requests) || 0, inputTokens: Number(segment.inputTokens) || 0, cachedTokens: Number(segment.cachedTokens) || 0, outputTokens: Number(segment.outputTokens) || 0 };
         changed = true;
       }
-      if (length > Number(segment.offset || 0)) {
+      var usageOffset = Number(segment.offset || 0);
+      var metricsOffset = metricsFresh ? 0 : Number(segment.metricsOffset === undefined ? usageOffset : segment.metricsOffset);
+      if (metricsOffset > length) {
+        metricsOffset = 0;
+      }
+      var from = Math.min(usageOffset, metricsOffset);
+      if (length > from) {
         var raf = new RandomAccessFile(file, "r");
         var bytes = null;
         try {
-          raf.seek(Number(segment.offset || 0));
-          bytes = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, length - Number(segment.offset || 0));
+          raf.seek(from);
+          bytes = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, length - from);
           raf.readFully(bytes);
         } finally {
           raf.close();
@@ -9786,19 +10021,37 @@
           end--;
         }
         if (end >= 0) {
-          addVibeJournalText(segment, String(new java.lang.String(bytes, 0, end + 1, StandardCharsets.UTF_8)), model, seenCallIds);
-          segment.offset = Number(segment.offset || 0) + end + 1;
+          var usageStart = usageOffset - from;
+          if (usageStart <= end) {
+            addVibeJournalText(segment, String(new java.lang.String(bytes, usageStart, end + 1 - usageStart, StandardCharsets.UTF_8)), model, seenCallIds);
+            segment.offset = from + end + 1;
+          }
+          var metricsStart = metricsOffset - from;
+          if (metricsStart <= end) {
+            addVibeJournalMetrics(metrics, String(new java.lang.String(bytes, metricsStart, end + 1 - metricsStart, StandardCharsets.UTF_8)));
+            segment.metricsOffset = from + end + 1;
+          }
           changed = true;
         }
+      } else if (segment.metricsOffset === undefined) {
+        segment.metricsOffset = usageOffset;
       }
       segments[name] = segment;
     }
     if (changed) {
       try {
-        writeJsonFile(stateFile, { version: 1, sessionId: session, segments: segments });
+        writeJsonFile(stateFile, { version: 2, sessionId: session, segments: segments, metrics: metrics });
       } catch (_ignoreUsageStateWrite) {}
     }
-    return sumVibeJournalSegments(segments, vibeModelPrices(home));
+    var total = sumVibeJournalSegments(segments, vibeModelPrices(home));
+    var view = vibeMetricsView(metrics, vibeCompactionCount(sessionDir));
+    if (view && !(options && options.withTurns === true)) {
+      // The usage updates carry the session measures; the per-turn detail is for the export.
+      view.turnCount = view.turns.length;
+      delete view.turns;
+    }
+    total.metrics = view;
+    return total;
   }
 
   function recordVibeUsage(entry, update, journalUsage) {
