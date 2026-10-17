@@ -359,7 +359,9 @@ console.log("Vibe image attachment contract OK");
   assert.equal(vibeCompactThresholdFor("mistral/zai-glm-5-3"), 950000, "GLM 5.3 accepts ~975k input tokens; the run compacts itself at 900k");
   assert.equal(vibeCompactThresholdFor("glm-5-3"), 950000, "the alias matches too");
   assert.equal(vibeCompactThresholdFor("mistral/zai-glm-5-2"), 200000);
-  assert.equal(vibeCompactThresholdFor("mistral-large-4"), 200000, "unverified windows keep the default");
+  assert.equal(vibeCompactThresholdFor("mistral-large-4"), 950000, "Mistral Large 4 has a 1M window, like GLM 5.3");
+  assert.equal(vibeContextWindowFor("mistral/mistral-large-4"), 1000000);
+  assert.equal(vibeCompactThresholdFor("mistral/mistral-small-4"), 200000, "unverified windows keep the default");
   assert.equal(vibeCompactThresholdFor(""), 200000);
 
   const toml = 'active_model = "glm-5-3"\n\n[[providers]]\nname = "convertigo"\napi_base = "https://llm.convertigo.com/v1"\n\n[[models]]\nname = "mistral/zai-glm-5-3"\nprovider = "convertigo"\nalias = "glm-5-3"\n\n[[models]]\nname = "mistral/zai-glm-5-2"\nprovider = "convertigo"\nalias = "glm-5-2"\n\n[[models]]\nname = "devstral-small-latest"\nprovider = "mistral"\nalias = "devstral-small"\n';

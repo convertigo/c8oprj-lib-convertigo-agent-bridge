@@ -10,13 +10,16 @@
   // Per-model thresholds, keyed by the gateway model name (its alias matches too). Each value was measured on the
   // gateway: mistral/zai-glm-5-3 accepted a 975,713-token input. Its runs trigger a Convertigo /compact themselves at
   // 900k, so Vibe's native compaction at 950k (of the 1M window) is only the safety net.
+  // mistral/mistral-large-4 has a 1M window too (2026-10-18): same margin as GLM 5.3.
   var VIBE_MODEL_COMPACT_THRESHOLDS = {
-    "mistral/zai-glm-5-3": 950000
+    "mistral/zai-glm-5-3": 950000,
+    "mistral/mistral-large-4": 950000
   };
   // Real context window per model (Vibe max_context_length), when measured: GLM 5.3 accepted a
   // 975,713-token prompt through the Convertigo gateway. Unknown models declare no window.
   var VIBE_MODEL_CONTEXT_WINDOWS = {
-    "mistral/zai-glm-5-3": 1000000
+    "mistral/zai-glm-5-3": 1000000,
+    "mistral/mistral-large-4": 1000000
   };
   // Compaction prompt installed in every Vibe home (VIBE_HOME/prompts/<id>.md, selected by compaction_prompt_id).
   var VIBE_COMPACTION_PROMPT_ID = "convertigo_compact";
