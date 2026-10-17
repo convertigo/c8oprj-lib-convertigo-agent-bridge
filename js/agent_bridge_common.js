@@ -10282,6 +10282,7 @@
       status: entry.status,
       phase: entry.phase,
       alive: processAlive(entry.process),
+      turnActive: entry.turnActive === true,
       pid: Number(entry.pid || processPid(entry.process) || 0),
       cwd: entry.cwd,
       command: entry.command,
