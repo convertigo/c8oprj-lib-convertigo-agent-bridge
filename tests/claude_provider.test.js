@@ -815,3 +815,27 @@ console.log("Vibe image attachment contract OK");
   assert.deepEqual(applied, [["session/set_config_option", "thinking", "low"]],
     "a native Vibe session left on off is moved to the weakest remaining level");
 }
+
+// The Convertigo rules that survive automatic compactions are appended once to the Vibe AGENTS.md.
+{
+  const originalFile = File, originalRead = readTextFile, originalWrite = writeTextFile;
+  let content = "# Convertigo Vibe Workspace\n\n- For Convertigo tasks, use the `convertigo-vibe-generalist` skill.\n";
+  let exists = true, writes = 0;
+  File = function () { return { isFile: () => exists }; };
+  readTextFile = () => content;
+  writeTextFile = (_file, text) => { content = String(text); writes++; };
+  try {
+    assert.equal(appendVibeCompactionRules("/managed/vibe-home"), "updated");
+    assert.match(content, /^# Convertigo Vibe Workspace/);
+    assert.match(content, /\n\n## After a context compaction \(Convertigo\)\n/);
+    assert.match(content, /databaseobject-tree-get[\s\S]*childrenDepth: 1/);
+    assert.match(content, /at:"inside"/);
+    assert.equal(appendVibeCompactionRules("/managed/vibe-home"), "unchanged", "never appended twice");
+    assert.equal(writes, 1);
+    exists = false;
+    assert.equal(appendVibeCompactionRules("/managed/vibe-home"), "missing");
+  } finally {
+    File = originalFile; readTextFile = originalRead; writeTextFile = originalWrite;
+  }
+  console.log("Vibe compaction rules contract OK");
+}

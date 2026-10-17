@@ -1979,6 +1979,37 @@
     return null;
   }
 
+  // Vibe's Unified Harness keeps VIBE_HOME/AGENTS.md in the system prompt and never summarizes it, while its automatic
+  // compaction ignores compaction_prompt_id: the rules a compaction loses most are restated there, kept short because
+  // they are sent with every request.
+  var VIBE_COMPACTION_RULES_HEADING = "## After a context compaction (Convertigo)";
+  var VIBE_COMPACTION_RULES = [
+    VIBE_COMPACTION_RULES_HEADING,
+    "",
+    "- Reload the `convertigo-vibe-generalist` skill, read the target project's `docs/generated/PROGRESS.md`, and run `databaseobject-tree-get` on the project (`childrenDepth: 1`) before calling, reading or patching any object by name. Never rebuild a name or QName from memory.",
+    "- Keep `PROGRESS.md` and the `todo` list current after each step.",
+    "- Rules compactions lose most:",
+    "  - NGX pages load and send data with page or control events and `CallSequenceAction`, never `this.c8o.callJson` in `scriptContent`.",
+    "  - `databaseobject-tree-apply` needs `at:\"inside\"` to create or update a child.",
+    "  - Sequence input variables are JavaScript variables of the same name, not `context.get`.",
+    "  - SQL columns get quoted camelCase aliases; optional filters are `({x} = '' OR col = {x})`.",
+    "  - Read the full tool error `message` before retrying a variant.",
+    ""
+  ].join("\n");
+
+  function appendVibeCompactionRules(vibeHome) {
+    var agentsFile = new File(vibeHome, "AGENTS.md");
+    if (!agentsFile.isFile()) {
+      return "missing";
+    }
+    var text = String(readTextFile(agentsFile));
+    if (text.indexOf(VIBE_COMPACTION_RULES_HEADING) !== -1) {
+      return "unchanged";
+    }
+    writeTextFile(agentsFile, text.replace(/\s+$/, "") + "\n\n" + VIBE_COMPACTION_RULES);
+    return "updated";
+  }
+
   function setupVibeFromMcpProject(options, vibeHome, mcpEndpoint) {
     var setupProject = "lib_ConvertigoMCP";
     var report = {
@@ -2041,6 +2072,12 @@
           if (warning.length) {
             report.warnings.push(warning);
           }
+        }
+      }
+      if (!boolValue(options && options.dryRun, false)) {
+        report.compactionRulesStatus = appendVibeCompactionRules(new File(report.resolvedVibeHome));
+        if (report.compactionRulesStatus === "updated") {
+          report.generated.push("AGENTS.md (" + VIBE_COMPACTION_RULES_HEADING.replace(/^#+\s*/, "") + ")");
         }
       }
       var skillEntry = "skills/convertigo-vibe-generalist/SKILL.md";
