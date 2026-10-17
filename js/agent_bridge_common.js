@@ -8133,6 +8133,10 @@
       var alias = parseTomlValue(block, "alias");
       var provider = parseTomlValue(block, "provider");
       var thinking = parseTomlValue(block, "thinking");
+      var price = function (key) {
+        var value = parseFloat(parseTomlValue(block, key));
+        return isNaN(value) ? null : value;
+      };
       var id = alias || name;
       if (!id.length) {
         continue;
@@ -8149,7 +8153,11 @@
           description: "Configured by Vibe model"
         }] : [],
         serviceTiers: [],
-        speedTiers: []
+        speedTiers: [],
+        // Prices per million tokens, as written in the model block (input_price, cached_input_price, output_price).
+        inputPrice: price("input_price"),
+        cachedInputPrice: price("cached_input_price"),
+        outputPrice: price("output_price")
       });
     }
     return result;
@@ -9421,10 +9429,16 @@
   // segment with the byte offset already read: an update only reads what was appended, and a segment that rotates out
   // of journal/ keeps its count.
   function emptyVibeJournalSegment() {
-    return { offset: 0, requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+    return { offset: 0, requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {} };
   }
 
-  function addVibeJournalText(segment, text) {
+  // The journal does not name the model of a request: what is read is counted for the model active at that time. Each
+  // segment keeps one bucket per model, so another model used in the session (images, for example) adds its own bucket.
+  function addVibeJournalText(segment, text, model) {
+    var key = trim(model) || "unknown";
+    segment.models = segment.models && typeof segment.models === "object" ? segment.models : {};
+    var bucket = segment.models[key] || { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+    segment.models[key] = bucket;
     var lines = String(text || "").split("\n");
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i];
@@ -9443,29 +9457,80 @@
         continue;
       }
       var usage = result.usage || {};
-      segment.requests++;
-      segment.inputTokens += Number(usage.input_tokens) || 0;
-      segment.cachedTokens += Number(usage.cached_input_tokens) || 0;
-      segment.outputTokens += Number(usage.output_tokens) || 0;
+      var counts = [bucket, segment];
+      for (var c = 0; c < counts.length; c++) {
+        counts[c].requests++;
+        counts[c].inputTokens += Number(usage.input_tokens) || 0;
+        counts[c].cachedTokens += Number(usage.cached_input_tokens) || 0;
+        counts[c].outputTokens += Number(usage.output_tokens) || 0;
+      }
     }
     return segment;
   }
 
-  function sumVibeJournalSegments(segments) {
-    var total = { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+  // Cost of one model's tokens: uncached input, cached input and output at the model's prices per million tokens.
+  function vibeTokenCost(counts, prices) {
+    if (!prices || prices.inputPrice === null || prices.outputPrice === null || typeof prices.inputPrice === "undefined" || typeof prices.outputPrice === "undefined") {
+      return null;
+    }
+    var cached = Number(counts.cachedTokens) || 0;
+    var cachedPrice = prices.cachedInputPrice === null || typeof prices.cachedInputPrice === "undefined" ? prices.inputPrice : prices.cachedInputPrice;
+    var uncached = Math.max(0, (Number(counts.inputTokens) || 0) - cached);
+    return (uncached * prices.inputPrice + cached * cachedPrice + (Number(counts.outputTokens) || 0) * prices.outputPrice) / 1000000;
+  }
+
+  function vibeModelPrices(vibeHome) {
+    var prices = {};
+    try {
+      var models = parseVibeModelsFromConfig(new File(trim(vibeHome), "config.toml")).models;
+      for (var i = 0; i < models.length; i++) {
+        var price = { inputPrice: models[i].inputPrice, cachedInputPrice: models[i].cachedInputPrice, outputPrice: models[i].outputPrice };
+        prices[models[i].id] = price;
+        if (trim(models[i].configuredName).length) {
+          prices[trim(models[i].configuredName)] = price;
+        }
+      }
+    } catch (_ignoreVibePrices) {}
+    return prices;
+  }
+
+  function sumVibeJournalSegments(segments, prices) {
+    var total = { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {} };
+    var keys = ["requests", "inputTokens", "cachedTokens", "outputTokens"];
     for (var name in segments) {
-      if (Object.prototype.hasOwnProperty.call(segments, name) && segments[name]) {
-        total.requests += Number(segments[name].requests) || 0;
-        total.inputTokens += Number(segments[name].inputTokens) || 0;
-        total.cachedTokens += Number(segments[name].cachedTokens) || 0;
-        total.outputTokens += Number(segments[name].outputTokens) || 0;
+      if (!Object.prototype.hasOwnProperty.call(segments, name) || !segments[name]) {
+        continue;
+      }
+      for (var k = 0; k < keys.length; k++) {
+        total[keys[k]] += Number(segments[name][keys[k]]) || 0;
+      }
+      var models = segments[name].models || {};
+      for (var model in models) {
+        if (Object.prototype.hasOwnProperty.call(models, model) && models[model]) {
+          var bucket = total.models[model] || { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+          for (var m = 0; m < keys.length; m++) {
+            bucket[keys[m]] += Number(models[model][keys[m]]) || 0;
+          }
+          total.models[model] = bucket;
+        }
       }
     }
     total.cacheRate = total.inputTokens > 0 ? total.cachedTokens / total.inputTokens : null;
+    // The session cost is known only when every model used has its prices.
+    var cost = total.requests > 0 ? 0 : null;
+    for (var used in total.models) {
+      if (Object.prototype.hasOwnProperty.call(total.models, used)) {
+        var modelCost = vibeTokenCost(total.models[used], prices ? prices[used] : null);
+        total.models[used].costAmount = modelCost;
+        cost = cost === null || modelCost === null ? null : cost + modelCost;
+      }
+    }
+    total.costAmount = cost;
+    total.costCurrency = cost === null ? "" : "USD";
     return total;
   }
 
-  function vibeJournalUsage(vibeHome, sessionId) {
+  function vibeJournalUsage(vibeHome, sessionId, model) {
     var home = trim(vibeHome);
     var session = trim(sessionId);
     if (!home.length || !/^[A-Za-z0-9._-]{1,128}$/.test(session)) {
@@ -9492,6 +9557,12 @@
       if (length < Number(segment.offset || 0)) {
         segment = emptyVibeJournalSegment();
       }
+      if (!segment.models || typeof segment.models !== "object") {
+        // Totals saved before the per-model buckets belong to the model of the session.
+        segment.models = {};
+        segment.models[trim(model) || "unknown"] = { requests: Number(segment.requests) || 0, inputTokens: Number(segment.inputTokens) || 0, cachedTokens: Number(segment.cachedTokens) || 0, outputTokens: Number(segment.outputTokens) || 0 };
+        changed = true;
+      }
       if (length > Number(segment.offset || 0)) {
         var raf = new RandomAccessFile(file, "r");
         var bytes = null;
@@ -9508,7 +9579,7 @@
           end--;
         }
         if (end >= 0) {
-          addVibeJournalText(segment, String(new java.lang.String(bytes, 0, end + 1, StandardCharsets.UTF_8)));
+          addVibeJournalText(segment, String(new java.lang.String(bytes, 0, end + 1, StandardCharsets.UTF_8)), model);
           segment.offset = Number(segment.offset || 0) + end + 1;
           changed = true;
         }
@@ -9520,7 +9591,7 @@
         writeJsonFile(stateFile, { version: 1, sessionId: session, segments: segments });
       } catch (_ignoreUsageStateWrite) {}
     }
-    return sumVibeJournalSegments(segments);
+    return sumVibeJournalSegments(segments, vibeModelPrices(home));
   }
 
   function recordVibeUsage(entry, update, journalUsage) {
@@ -10223,7 +10294,7 @@
     if (kind === "usage_update") {
       var journalUsage = null;
       try {
-        journalUsage = vibeJournalUsage(entry.vibeHome, eventData.sessionId);
+        journalUsage = vibeJournalUsage(entry.vibeHome, eventData.sessionId, entry.model);
       } catch (_ignoreJournalUsage) {}
       recordVibeUsage(entry, update, journalUsage);
       eventData.journalUsage = journalUsage;

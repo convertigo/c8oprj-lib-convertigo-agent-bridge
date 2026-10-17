@@ -32,6 +32,15 @@ assert.equal(segment.requests,2);assert.equal(segment.inputTokens,3000);assert.e
 const total=sumVibeJournalSegments({'a.jsonl':segment,'b.jsonl':addVibeJournalText(emptyVibeJournalSegment(),done(1000,0,10))});
 assert.equal(total.requests,3);assert.equal(total.cachedTokens,2700);assert.equal(total.cacheRate,2700/4000);
 assert.equal(sumVibeJournalSegments({}).cacheRate,null,'no request: the cache rate is unknown, not 0');
+// Session cost from the journal: uncached input, cached input and output at each model's prices per million tokens.
+const glm=addVibeJournalText(emptyVibeJournalSegment(),done(118900000,116700000,220000),'glm-5-3');
+const priced=sumVibeJournalSegments({'a.jsonl':glm},{'glm-5-3':{inputPrice:1.4,cachedInputPrice:0.14,outputPrice:4.4}});
+assert.equal(Math.round(priced.costAmount*100)/100,20.39);assert.equal(priced.costCurrency,'USD');
+assert.equal(Math.round(priced.models['glm-5-3'].costAmount*100)/100,20.39);
+const two=addVibeJournalText(addVibeJournalText(emptyVibeJournalSegment(),done(1000000,0,0),'glm-5-3'),done(1000000,0,0),'vision');
+assert.equal(two.models.vision.requests,1,'a second model keeps its own bucket');
+assert.equal(sumVibeJournalSegments({'a.jsonl':two},{'glm-5-3':{inputPrice:1.4,cachedInputPrice:0.14,outputPrice:4.4}}).costAmount,null,'a model without prices leaves the session cost unknown');
+assert.equal(sumVibeJournalSegments({'a.jsonl':two},{'glm-5-3':{inputPrice:1.4,cachedInputPrice:0.14,outputPrice:4.4},vision:{inputPrice:2,cachedInputPrice:null,outputPrice:6}}).costAmount,3.4);
 assert.equal(vibeJournalUsage('','abc'),null);assert.equal(vibeJournalUsage('/tmp','../x'),null,'the session id never leaves the journal directory');
 recordVibeUsage(vibe,{used:5},{requests:3,inputTokens:4000,cachedTokens:2700,outputTokens:130,cacheRate:0.675});
 assert.equal(vibe.quota.context.journal.cachedTokens,2700);
