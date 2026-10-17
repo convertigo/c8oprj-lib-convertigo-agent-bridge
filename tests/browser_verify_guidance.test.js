@@ -16,6 +16,7 @@ for (const provider of ['vibe', 'codex', 'claude']) {
   assert.match(text, /verify the affected paths again/, provider);
   assert.match(text, /call it again with the id alone \(`runId`, or `verificationId` for `browser-verify`\) until the report comes/, provider);
   assert.doesNotMatch(text, /For a functional proof \(a login/, provider + ': the scripted proof is only the fallback');
+  assert.match(text, /Hand each build lot .* to a constructor sub-agent, `subagent-run` with `profile:"constructor"` and `inputs.project`/, provider);
 }
 // A Studio without the Flow capability falls back to the generalist profile: pretend it has it.
 flowCapabilityAvailable = () => true;
@@ -23,4 +24,5 @@ const flow = agentSkillInstructions('codex', 'flow');
 assert.equal(agentCapabilityProfile({ agentProfile: 'flow' }).id, 'flow');
 assert.doesNotMatch(flow, /browser-verify/, 'Flow sessions do not use the legacy MCP tool');
 assert.match(flow, /For a functional proof \(a login/);
+assert.doesNotMatch(flow, /constructor sub-agent/, 'Flow sessions do not use the legacy MCP tools');
 console.log('browser-verify guidance ok');
