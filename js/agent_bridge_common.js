@@ -6,6 +6,8 @@
   var FALLBACK_MCP_PATH = "/api/mcp";
   // Vibe compacts the conversation when its context reaches this many tokens; the Assistant shows it as the gauge limit.
   var VIBE_AUTO_COMPACT_THRESHOLD = 200000;
+  // Compaction prompt installed in every Vibe home (VIBE_HOME/prompts/<id>.md, selected by compaction_prompt_id).
+  var VIBE_COMPACTION_PROMPT_ID = "convertigo_compact";
   var FALLBACK_FLOW_MCP_PATH = "/api/flow-mcp";
   var DEFAULT_TTL_SECONDS = 3600;
   var RUNTIME_UPDATE_CACHE_KEY = "lib_ConvertigoAgentBridge.runtimeUpdateCache.v1";
@@ -7105,6 +7107,7 @@
       'active_model = "' + tomlString(spec.activeModel) + '"',
       'api_timeout = 720.0',
       'auto_compact_threshold = ' + VIBE_AUTO_COMPACT_THRESHOLD,
+      'compaction_prompt_id = "' + VIBE_COMPACTION_PROMPT_ID + '"',
       '',
       '[[providers]]',
       'name = "convertigo"',
@@ -7121,6 +7124,7 @@
       'active_model = "' + tomlString(spec.activeModel) + '"',
       'api_timeout = 720.0',
       'auto_compact_threshold = ' + VIBE_AUTO_COMPACT_THRESHOLD,
+      'compaction_prompt_id = "' + VIBE_COMPACTION_PROMPT_ID + '"',
       '',
       '[[providers]]',
       'name = "mistral"',
@@ -7228,11 +7232,41 @@
       );
     }
     var text = migrateManagedVibeModelPresets(lines.join("\n")).text;
+    writeVibeCompactionPrompt(configDir);
     return {
       path: filePath(configFile),
       model: spec.activeModel,
       bytes: writeTextFile(configFile, text)
     };
+  }
+
+  // The default Vibe summary loses what a Convertigo build needs to resume: exact object names,
+  // learned platform rules, test proofs and demo identifiers. config.toml selects this prompt.
+  function writeVibeCompactionPrompt(configDir) {
+    var promptsDir = new File(configDir, "prompts");
+    ensureDirectory(promptsDir);
+    writeTextFile(new File(promptsDir, VIBE_COMPACTION_PROMPT_ID + ".md"), [
+      "CRITICAL: Respond with text only. Do NOT call any tools. Any tool call will be rejected.",
+      "",
+      "You are performing a CONTEXT CHECKPOINT COMPACTION for a Convertigo agent. Write the handoff summary another LLM will resume the task from.",
+      "Exact names beat brevity: never paraphrase an object name, a path, a QName, a URL or an identifier.",
+      "",
+      "Keep, in this order:",
+      "1. Target: the Convertigo Studio (workspace, port, browser URL) and the target project; the user's goal, constraints and language.",
+      "2. Inventory: every object created or changed, with its exact name and current state (created, patched, validated, broken): connectors, transactions, sequences, pages, shared components, actions, styles, JS files, generated documents.",
+      "3. Rules learned: decisions taken and why, platform behaviours discovered (what failed, the cause, the pattern that works), conventions to keep.",
+      "4. Progress: the state of each batch (lot) and of each test, with its proof (tool call and result, log line, screenshot).",
+      "5. Demo data: accounts, identifiers and passwords of the demo data set, sample records.",
+      "6. Open problems and the exact next step.",
+      "7. Resume rule (common skill, Long tasks): after this compaction, re-read docs/generated/PROGRESS.md in the target project when it exists and run databaseobject-tree-get on the target project before any change; trust them over this summary when they differ.",
+      "",
+      "Wrap the ENTIRE summary in <summary></summary> tags and output nothing outside them:",
+      "",
+      "<summary>",
+      "...your handoff summary here...",
+      "</summary>",
+      ""
+    ].join("\n"));
   }
 
   // Vibe keys its persistent tool cache on the serialized server entry, so a
