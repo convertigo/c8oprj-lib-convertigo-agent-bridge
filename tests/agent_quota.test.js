@@ -103,6 +103,9 @@ assert.deepEqual(JSON.parse(JSON.stringify(visionTotal.sessionTokens)),{inputTok
 const pricedVision=sumVibeJournalSegments({'a.jsonl':addVibeJournalText(emptyVibeJournalSegment(),[done(1000000,0,0),described(visionUsage('c7','mistral/mistral-large-4',500,50,0.25))].join('\n'),'glm-5-3',{})},glmPrices);
 assert.ok(Math.abs(pricedVision.costAmount-1.65)<1e-12,'the session cost adds the agent journal cost and the gateway cost');assert.equal(pricedVision.costCurrency,'USD');
 assert.equal(Object.keys(sumVibeJournalSegments({'a.jsonl':segment}).models).length,1,'no vision call: only the agent model');
+// project-lint's text review returns its gateway usages in a list: counted like image-describe.
+const linted=addVibeJournalText(emptyVibeJournalSegment(),toolDone({content:[{type:'text',text:JSON.stringify({project:'P',textReview:{usages:[{...visionUsage('l1','mistral/mistral-large-4',300,40,0.0003),tool:'project-lint'},{...visionUsage('l2','mistral/mistral-large-4',300,9,0.0002),tool:'project-lint'}]}})}]}),'glm-5-3',{});
+assert.equal(linted.vision['mistral/mistral-large-4'].calls,2);assert.ok(Math.abs(linted.vision['mistral/mistral-large-4'].cost-0.0005)<1e-12);
 // state files written before the vision totals still sum
 assert.equal(sumVibeJournalSegments({'old.jsonl':{offset:9,requests:1,inputTokens:5,cachedTokens:0,outputTokens:1}}).requests,1);
 recordVibeUsage(vibe,{used:5},{requests:3,inputTokens:4000,cachedTokens:2700,outputTokens:130,cacheRate:0.675});

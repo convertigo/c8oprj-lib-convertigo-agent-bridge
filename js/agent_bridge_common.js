@@ -9521,22 +9521,32 @@
   // usage of every model request (action_result records of type completion_succeeded). Totals are kept per journal
   // segment with the byte offset already read: an update only reads what was appended, and a segment that rotates out
   // of journal/ keeps its count.
-  // The same journal holds the tool results: the image-describe calls of the Convertigo MCP (a vision model of the
-  // gateway, used by agents whose model cannot read images) return their own usage and gateway cost. Each segment keeps
-  // them per model in `vision`, and the session totals list them in `models` next to the agent's models.
+  // The same journal holds the tool results: the Convertigo MCP tools that call a second gateway model (image-describe,
+  // a vision model for agents whose model cannot read images, and the text review of project-lint) return their own
+  // usage and gateway cost. Each segment keeps them per model in `vision`, and the session totals list them in `models`
+  // next to the agent's models.
   function emptyVibeJournalSegment() {
     return { offset: 0, requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {}, vision: {}, visionCallIds: [] };
   }
 
-  var VISION_USAGE_TOOL = "image-describe";
+  var VISION_USAGE_TOOLS = { "image-describe": true, "project-lint": true };
 
-  // Usage blocks of image-describe found in a tool result, at any depth: a call made from Vibe code (run_typescript)
+  function mentionsVisionUsageTool(text) {
+    for (var tool in VISION_USAGE_TOOLS) {
+      if (Object.prototype.hasOwnProperty.call(VISION_USAGE_TOOLS, tool) && text.indexOf(tool) >= 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Usage blocks of those tools found in a tool result, at any depth: a call made from Vibe code (run_typescript)
   // may come back wrapped. The gateway call id keeps a result echoed twice from being counted twice.
   function collectVisionUsages(value, found, depth) {
     if (value === null || typeof value !== "object" || depth > 8) {
       return found;
     }
-    if (value.tool === VISION_USAGE_TOOL && typeof value.model === "string" && value.inputTokens !== undefined) {
+    if (VISION_USAGE_TOOLS[value.tool] === true && typeof value.model === "string" && value.inputTokens !== undefined) {
       found.push(value);
       return found;
     }
@@ -9552,7 +9562,7 @@
     var found = collectVisionUsages(result && (result.structured_content || result.structuredContent), [], 0);
     var content = result && Array.isArray(result.content) ? result.content : [];
     for (var i = 0; !found.length && i < content.length; i++) {
-      if (content[i] && typeof content[i].text === "string" && content[i].text.indexOf(VISION_USAGE_TOOL) >= 0) {
+      if (content[i] && typeof content[i].text === "string" && mentionsVisionUsageTool(content[i].text)) {
         try { collectVisionUsages(JSON.parse(content[i].text), found, 0); } catch (_notJsonToolText) {}
       }
     }
@@ -9596,7 +9606,7 @@
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i];
       var completion = line.indexOf("completion_succeeded") >= 0;
-      if (!completion && (line.indexOf("tool_succeeded") < 0 || line.indexOf(VISION_USAGE_TOOL) < 0)) {
+      if (!completion && (line.indexOf("tool_succeeded") < 0 || !mentionsVisionUsageTool(line))) {
         continue;
       }
       var record = null;
