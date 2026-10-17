@@ -2624,13 +2624,15 @@
       "- For viewer automation, use the Playwright MCP tools exposed by the managed Codex configuration. Do not run ad hoc shell scripts with `require('playwright')`, and do not launch a separate browser unless explicitly needed.",
       isFlow ? "- Use Playwright only after the capability pack reports that the dev viewer is ready and the managed browser target shows that viewer." : "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`.",
       "- Known-good fast check: `playwright.browser_tabs({action:\"list\"})`, then `playwright.browser_find({text:\"<visible text>\"})`; use `playwright.browser_evaluate({function:\"...\"})` only for DOM state or timing. Do not probe unsupported browser features first.",
-      "- For a functional proof (a login, a path through pages, a form, the values to check), do not drive the page one click or one evaluate per tool call: each call costs a full model step. Write the whole scenario as one Playwright script in a workspace file (`async (page) => { ...; return results; }`: navigate, click, fill, read the values, `page.screenshot({path:\".playwright-mcp/<page>.png\"})` at each page) and run it with one `playwright.browser_run_code_unsafe({filename:\"<file>\"})` call; keep each script under 45 s, one script per path, and fix and rerun the script instead of continuing by hand. Then check the screenshots (with `image-describe` when your model cannot read images).",
+      // Flow sessions do not use the legacy Convertigo MCP surface, so browser-verify is not theirs: they keep the scripted proof.
+      isFlow ? "- For a functional proof (a login, a path through pages, a form, the values to check), do not drive the page one click or one evaluate per tool call: each call costs a full model step. Write the whole scenario as one Playwright script in a workspace file (`async (page) => { ...; return results; }`: navigate, click, fill, read the values, `page.screenshot({path:\".playwright-mcp/<page>.png\"})` at each page) and run it with one `playwright.browser_run_code_unsafe({filename:\"<file>\"})` call; keep each script under 45 s, one script per path, and fix and rerun the script instead of continuing by hand. Then check the screenshots (with `image-describe` when your model cannot read images)." : "- Delegate each functional and visual browser proof (a login, a path through pages, a form, the values and the look to check) to a verifier sub-agent, the Convertigo MCP tool `subagent-run` with `profile:\"verifier\"` (or its shortcut `browser-verify`), one run per lot: `task` = what to prove, and in `inputs`: `url` = `viewerHomeUrl`, `paths` = one plain-language path per user journey with the values to type and the result to read, `checks` = the acceptance criteria with the exact expected texts, `hints` = demo accounts and expected values. A call answers within about 50 s: on `status:\"running\"`, call it again with the id alone (`runId`, or `verificationId` for `browser-verify`) until the report comes. Its vision sub-agent drives the same viewer and returns each check with its evidence, the visual defects (glued texts, overlaps, cut text, missing accents) and its screenshots; it never edits the project. Fix what it reports and verify the affected paths again; check a doubtful finding with `image-describe` or one targeted Playwright call. Without `browser-verify`, do not drive the page one call per click: script each path as one `playwright.browser_run_code_unsafe({filename:\"<file>\"})` call.",
       isFlow ? "- If the browser target is `about:blank`, use the capability pack readiness contract before browser proof." : "- If the browser target is `about:blank` while builder status is `building`, poll `mobile-builder-open(stateOnly=true, wait=true)` before Playwright. If status is `stopped`, launch asynchronously instead.",
       isFlow ? "- If Playwright is unavailable, disabled, still on `about:blank`, or attached to another endpoint, report the host configuration problem instead of bypassing it." : "- If `mobile-builder-open` reports `browserControlReady:true` but the Playwright/browser-control MCP tools are unavailable, disabled, still on `about:blank`, or attached to another endpoint, report the configuration problem to the user instead of bypassing it with Node scripts, raw CDP WebSocket code, or a new browser.",
       "- If a prompt says Convertigo runtime reveal mode is enabled, pass `reveal:true` only on supported Convertigo mutation/viewer tools that should visibly move Studio or No Code Studio; do not add it to read-only calls.",
       isFlow ? "- Keep viewer starts and synchronization asynchronous until the final acceptance proof." : "- For `mobile-builder-open`, use `wait:false` for reveal/focus polls; reserve long `wait:true` calls for readiness proof and omit `reveal` unless the user specifically needs UI focus.",
       isVibe ? "- Treat the Convertigo MCP transport as serial: issue exactly one Convertigo MCP tool call per assistant message, including reads. Never group Convertigo tool calls in one response." : "",
-      isVibe ? "- Do not wait with shell `sleep` or PowerShell delays. After one asynchronous builder launch and useful mutations, use one serial waited `mobile-builder-open` readiness call with a sufficient timeout." : "",
+      isVibe ? "- Do not wait with shell `sleep` or PowerShell delays. After one asynchronous builder launch and useful mutations, use one serial waited `mobile-builder-open` readiness call with a sufficient timeout. The one exception is a constructor sub-agent: wait about 60 s with `sleep 60` between two `subagent-run` calls with its `runId`." : "",
+      isFlow ? "" : "- Hand each build lot (the transactions and facades of a lot, one page, the test sequences) to a constructor sub-agent, `subagent-run` with `profile:\"constructor\"` and `inputs.project`: it builds, proves and saves the lot with a fresh context and reports the QNames it created and modified. Nobody else writes that project while it runs. Keep the specification, the plan, the decisions and its reports in your context, read back the QNames it lists, then prove the lot with a verifier run.",
       "- If those mutations are grouped with `batch-call`, pass top-level `reveal:true`; the batch reveals the final touched object after its deferred refresh.",
       isNoCode ? "- You are in the C8Oforms / No-Code Studio surface, not in Eclipse Studio. A selected Convertigo project is optional in this surface." : "- Work on the selected project unless the user explicitly asks for another project.",
       isNoCode ? "" : "- If no project is selected and the user explicitly asks to create a new project or application, derive a concise valid technical name when needed, check for collisions through Convertigo MCP, and proceed without asking for a project selection.",
@@ -3176,6 +3178,9 @@
     var viewerDebugPortHeaderEntry = viewerDebugPort >= 1024
       ? '"X-Convertigo-Viewer-Debug-Port" = "' + tomlEscape(String(viewerDebugPort)) + '"'
       : "";
+    var conversationHeaderEntry = viewerDebugPort >= 1024 && mcpConversationId(options).length
+      ? '"X-Convertigo-Conversation-Id" = "' + tomlEscape(mcpConversationId(options)) + '"'
+      : "";
     var mcpSessionCookie = trim(options.mcpSessionCookie);
     var mcpSessionCookieHeaderEntry = mcpSessionCookie.length
       ? '"Cookie" = "' + tomlEscape(mcpSessionCookie) + '"'
@@ -3238,6 +3243,13 @@
       } else if (viewerDebugPortPattern.test(body)) {
         body = body.replace(viewerDebugPortPattern, "");
         body = body.replace(/^\s*,\s*|\s*,\s*$/g, "").replace(/\s*,\s*,\s*/g, ", ");
+      }
+      var conversationPattern = /(["']X-Convertigo-Conversation-Id["']\s*=\s*)["'][^"']*["']/;
+      if (conversationHeaderEntry.length) {
+        body = conversationPattern.test(body) ? body.replace(conversationPattern, conversationHeaderEntry)
+          : (body.length ? body + ", " + conversationHeaderEntry : conversationHeaderEntry);
+      } else if (conversationPattern.test(body)) {
+        body = body.replace(conversationPattern, "").replace(/^\s*,\s*|\s*,\s*$/g, "").replace(/\s*,\s*,\s*/g, ", ");
       }
       if (revealModeHeaderEntry.length) {
         if (revealModePattern.test(body)) {
@@ -6944,6 +6956,8 @@
       // was rewritten at each start.
       var viewerPortMatch = block.match(/["']?X-Convertigo-Viewer-Debug-Port["']?\s*=\s*["'](\d+)["']/);
       info.viewerDebugPort = viewerPortMatch ? Number(viewerPortMatch[1]) : 0;
+      var conversationMatch = block.match(/["']?X-Convertigo-Conversation-Id["']?\s*=\s*["']([^"']+)["']/);
+      info.conversationId = conversationMatch ? conversationMatch[1] : "";
       info.revealMode = /["']?X-Convertigo-Reveal-Mode["']?\s*=\s*["']true["']/.test(block);
       info.noLog = /["']?X-Convertigo-No-Log["']?\s*=\s*["']true["']/.test(block);
       break;
@@ -6990,7 +7004,8 @@
     playwrightCommand: true,
     playwrightEndpoint: true,
     revealMode: true,
-    viewerDebugPort: true
+    viewerDebugPort: true,
+    conversationId: true
   };
 
   function vibeConfigIntentFile(vibeHome) {
@@ -7379,6 +7394,9 @@
       }
       if (viewerDebugPort >= 1024) {
         authHeaderLines.push('"X-Convertigo-Viewer-Debug-Port" = "' + String(viewerDebugPort) + '"');
+        if (mcpConversationId(options).length) {
+          authHeaderLines.push('"X-Convertigo-Conversation-Id" = "' + mcpConversationId(options) + '"');
+        }
       }
       if (revealModeEnabled(options, null)) {
         authHeaderLines.push('"X-Convertigo-Reveal-Mode" = "true"');
@@ -9521,15 +9539,19 @@
   // usage of every model request (action_result records of type completion_succeeded). Totals are kept per journal
   // segment with the byte offset already read: an update only reads what was appended, and a segment that rotates out
   // of journal/ keeps its count.
-  // The same journal holds the tool results: the Convertigo MCP tools that call a second gateway model (image-describe,
-  // a vision model for agents whose model cannot read images, and the text review of project-lint) return their own
-  // usage and gateway cost. Each segment keeps them per model in `vision`, and the session totals list them in `models`
-  // next to the agent's models.
+  // The same journal holds the tool results: the Convertigo MCP tools that call a second gateway model return their
+  // own usage and gateway cost. image-describe (a vision model for agents whose model cannot read images) and the text
+  // review of project-lint go per model in `vision`; browser-verify and subagent-run (a sub-agent run, several model
+  // calls) go per profile and model in `subagents`. The session totals list them in `models` next to the agent's models.
   function emptyVibeJournalSegment() {
-    return { offset: 0, requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {}, vision: {}, visionCallIds: [] };
+    return { offset: 0, requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {}, vision: {}, subagents: {}, visionCallIds: [] };
   }
 
-  var VISION_USAGE_TOOLS = { "image-describe": true, "project-lint": true };
+  // image-describe and project-lint make gateway calls listed one by one (vision rows of their model). A sub-agent run
+  // (subagent-run, or browser-verify, its verifier profile) reports all its model calls in `requests` and goes to the
+  // row of its profile and model.
+  var VISION_USAGE_TOOLS = { "image-describe": true, "project-lint": true, "browser-verify": true, "subagent-run": true };
+  var SUBAGENT_USAGE_TOOLS = { "browser-verify": true, "subagent-run": true };
 
   function mentionsVisionUsageTool(text) {
     for (var tool in VISION_USAGE_TOOLS) {
@@ -9540,8 +9562,9 @@
     return false;
   }
 
-  // Usage blocks of those tools found in a tool result, at any depth: a call made from Vibe code (run_typescript)
-  // may come back wrapped. The gateway call id keeps a result echoed twice from being counted twice.
+  // Usage blocks of these tools found in a tool result, at any depth: a call made from Vibe code (run_typescript)
+  // may come back wrapped. The call id (gateway call id, or verification id) keeps a result echoed twice from being
+  // counted twice.
   function collectVisionUsages(value, found, depth) {
     if (value === null || typeof value !== "object" || depth > 8) {
       return found;
@@ -9579,19 +9602,32 @@
       segment.visionCallIds = segment.visionCallIds || [];
       segment.visionCallIds.push(callId);
     }
-    segment.vision = segment.vision || {};
     var model = trim(usage.model) || "unknown";
-    var row = segment.vision[model] || { calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
-    row.calls++;
+    var subagent = SUBAGENT_USAGE_TOOLS[usage.tool] === true;
+    var profile = subagent ? (trim(usage.profile) || "verifier") : "";
+    var bucketName = subagent ? "subagents" : "vision";
+    var key = subagent ? profile + "|" + model : model;
+    segment[bucketName] = segment[bucketName] || {};
+    var row = segment[bucketName][key] || { calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
+    // calls = model calls; runs = sub-agent runs, each one several model calls.
+    var requests = subagent ? Math.max(0, Math.floor(Number(usage.requests) || 0)) : 1;
+    row.calls += requests;
+    if (subagent) {
+      row.profile = profile;
+      row.model = model;
+      row.runs = (Number(row.runs) || 0) + 1;
+      // A constructor run prices its tokens from its Vibe journal; a verifier run reports what the gateway charged.
+      row.costSource = usage.costSource === "journal" ? "journal" : "gateway";
+    }
     row.inputTokens += Number(usage.inputTokens) || 0;
     row.cachedTokens += Number(usage.cachedTokens) || 0;
     row.outputTokens += Number(usage.outputTokens) || 0;
     row.reasoningTokens += Number(usage.reasoningTokens) || 0;
     if (usage.cost !== null && usage.cost !== undefined && usage.cost !== "" && isFinite(Number(usage.cost))) {
       row.cost += Number(usage.cost);
-      row.costCalls++;
+      row.costCalls += requests;
     }
-    segment.vision[model] = row;
+    segment[bucketName][key] = row;
   }
 
   // The journal does not name the model of a request: what is read is counted for the model active at that time. Each
@@ -9674,8 +9710,8 @@
   function sumVibeJournalSegments(segments, prices) {
     var total = { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {} };
     var keys = ["requests", "inputTokens", "cachedTokens", "outputTokens"];
-    var visionKeys = ["calls", "inputTokens", "cachedTokens", "outputTokens", "reasoningTokens", "cost", "costCalls"];
-    var agent = {}, vision = {};
+    var visionKeys = ["calls", "runs", "inputTokens", "cachedTokens", "outputTokens", "reasoningTokens", "cost", "costCalls"];
+    var agent = {}, vision = {}, subagents = {};
     for (var name in segments) {
       if (!Object.prototype.hasOwnProperty.call(segments, name) || !segments[name]) {
         continue;
@@ -9698,9 +9734,22 @@
         if (Object.prototype.hasOwnProperty.call(visionModels, visionModel) && visionModels[visionModel]) {
           var row = vision[visionModel] || { model: visionModel, kind: "vision", calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
           for (var v = 0; v < visionKeys.length; v++) {
-            row[visionKeys[v]] += Number(visionModels[visionModel][visionKeys[v]]) || 0;
+            if (row[visionKeys[v]] !== undefined) {
+              row[visionKeys[v]] += Number(visionModels[visionModel][visionKeys[v]]) || 0;
+            }
           }
           vision[visionModel] = row;
+        }
+      }
+      var subagentRows = segments[name].subagents || {};
+      for (var subagentKey in subagentRows) {
+        if (Object.prototype.hasOwnProperty.call(subagentRows, subagentKey) && subagentRows[subagentKey]) {
+          var source = subagentRows[subagentKey];
+          var run = subagents[subagentKey] || { model: trim(source.model), profile: trim(source.profile), kind: "subagent", runs: 0, calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0, costSource: trim(source.costSource) };
+          for (var r = 0; r < visionKeys.length; r++) {
+            run[visionKeys[r]] += Number(source[visionKeys[r]]) || 0;
+          }
+          subagents[subagentKey] = run;
         }
       }
     }
@@ -9731,6 +9780,17 @@
         delete call.cost;
         delete call.costCalls;
         add(total.models[seen] ? "vision:" + seen : seen, call);
+      }
+    }
+    for (var delegated in subagents) {
+      if (Object.prototype.hasOwnProperty.call(subagents, delegated)) {
+        var sub = subagents[delegated];
+        sub.requests = sub.calls;
+        sub.costAmount = sub.costCalls === sub.calls ? sub.cost : null;
+        sub.costSource = sub.costAmount === null ? "" : (sub.costSource === "journal" ? "journal" : "gateway");
+        delete sub.cost;
+        delete sub.costCalls;
+        add("subagent:" + delegated, sub);
       }
     }
     total.costAmount = priced > 0 ? cost : null;
@@ -11038,6 +11098,13 @@
     return report;
   }
 
+  // The Tigo conversation the MCP calls belong to: the sub-agent tools record their runs under it. Like the viewer
+  // debug port, it goes into a config file only for a conversation-scoped home (one with a leased viewer port).
+  function mcpConversationId(options) {
+    var id = trim(options && (options.conversationId || options.threadid || options.handle));
+    return /^[A-Za-z0-9._-]{1,128}$/.test(id) ? id : "";
+  }
+
   function buildMcpServers(mcpEndpoint, options) {
     options = options || {};
     var headers = [];
@@ -11055,6 +11122,12 @@
       headers.push({
         name: "X-Convertigo-Viewer-Debug-Port",
         value: String(viewerDebugPort)
+      });
+    }
+    if (mcpConversationId(options).length && normalizeSkillProfile(options) !== "nocode") {
+      headers.push({
+        name: "X-Convertigo-Conversation-Id",
+        value: mcpConversationId(options)
       });
     }
     return [{

@@ -97,7 +97,8 @@
           playwrightEndpoint: expectedPlaywrightEndpoint,
           providerNames: expectedProviderNames,
           revealMode: expectedRevealMode,
-          viewerDebugPort: expectedBearerEnv.length ? expectedViewerDebugPort : 0
+          viewerDebugPort: expectedBearerEnv.length ? expectedViewerDebugPort : 0,
+          conversationId: expectedBearerEnv.length && expectedViewerDebugPort >= 1024 ? mcpConversationId(options) : ""
         });
         var recordedIntent = readVibeConfigIntent(setup.vibeHome);
         // The file-derived checks stay: they catch a config.toml deleted or hand-edited behind
