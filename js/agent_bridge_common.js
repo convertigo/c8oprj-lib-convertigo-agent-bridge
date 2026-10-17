@@ -9793,6 +9793,12 @@
         }
         recordTime = Math.max(recordTime, t);
       }
+      if (recordTime && metrics.currentTurn && metrics.turns[metrics.currentTurn]) {
+        // The intents carry the turn, the records around them carry the times.
+        var currentTurn = metrics.turns[metrics.currentTurn];
+        currentTurn.firstAt = currentTurn.firstAt || recordTime;
+        currentTurn.lastAt = Math.max(currentTurn.lastAt, recordTime);
+      }
       if (recordTime) {
         while (metrics.awaitingStart.length) {
           var started = metrics.pending[metrics.awaitingStart.shift()];
@@ -9828,6 +9834,7 @@
       if (record.type === "action_intent") {
         var request = payload.request || {};
         var intentTurn = vibeMetricsTurn(metrics, request.turn_id);
+        metrics.currentTurn = intentTurn.id;
         if (recordTime) {
           intentTurn.firstAt = intentTurn.firstAt || recordTime;
           intentTurn.lastAt = Math.max(intentTurn.lastAt, recordTime);

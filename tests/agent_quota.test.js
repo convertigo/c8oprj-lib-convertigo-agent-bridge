@@ -64,6 +64,7 @@ assert.equal(view.builderWaits.count,1);assert.equal(view.builderWaits.durationM
 assert.equal(view.compactions,2);
 assert.equal(view.tools[0].name,'file_system.bash');
 assert.equal(view.tools.find(t=>t.name==='mcp_Convertigo.requestable_execute').failures,1);
+assert.equal(view.turns[0].firstAt,1792000001000);assert.equal(view.turns[0].lastAt,1792000038000);assert.equal(view.turns[1].lastAt,1792001004000);
 assert.equal(view.turns.length,2);assert.equal(view.turns[0].toolCalls,2);assert.equal(view.turns[0].builderWaitMs,30000);assert.equal(view.turns[1].toolFailures,1);assert.equal(view.turns[1].requests,1);
 assert.equal(vibeJournalUsage('','abc'),null);assert.equal(vibeJournalUsage('/tmp','../x'),null,'the session id never leaves the journal directory');
 // image-describe calls (a gateway vision model) come back in tool results with their own usage, summed per model.
