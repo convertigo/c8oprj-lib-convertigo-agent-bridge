@@ -1679,7 +1679,13 @@
       if (!title.length || !/^((Claude )?(Fable|Opus|Sonnet|Haiku))\b/i.test(title)) {
         title = trim(item.displayName || item.label) || resolved || id;
       }
-      if (id === "default") { title = trim(item.displayName) + (description.length ? " · " + title : ""); }
+      if (id === "default") {
+        // "Use the default model (currently Opus 5.5) · ..." -> "Default (recommended) · Opus 5.5"
+        var current = /\(currently ([^)]+)\)/i.exec(description);
+        var target = current ? trim(current[1]) : resolved;
+        title = trim(item.displayName || item.label) || id;
+        if (target.length && target !== title) { title += " · " + target; }
+      }
       var levels = item.supportedEffortLevels || (item.supportsEffort ? CLAUDE_EFFORT_LEVELS : []), reasoning = [];
       for (var j = 0; j < levels.length; j++) {
         if (CLAUDE_EFFORT_LEVELS.indexOf(String(levels[j])) >= 0) {
