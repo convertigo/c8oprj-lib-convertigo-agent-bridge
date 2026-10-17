@@ -3177,6 +3177,9 @@
     var viewerDebugPortHeaderEntry = viewerDebugPort >= 1024
       ? '"X-Convertigo-Viewer-Debug-Port" = "' + tomlEscape(String(viewerDebugPort)) + '"'
       : "";
+    var conversationHeaderEntry = viewerDebugPort >= 1024 && mcpConversationId(options).length
+      ? '"X-Convertigo-Conversation-Id" = "' + tomlEscape(mcpConversationId(options)) + '"'
+      : "";
     var mcpSessionCookie = trim(options.mcpSessionCookie);
     var mcpSessionCookieHeaderEntry = mcpSessionCookie.length
       ? '"Cookie" = "' + tomlEscape(mcpSessionCookie) + '"'
@@ -3239,6 +3242,13 @@
       } else if (viewerDebugPortPattern.test(body)) {
         body = body.replace(viewerDebugPortPattern, "");
         body = body.replace(/^\s*,\s*|\s*,\s*$/g, "").replace(/\s*,\s*,\s*/g, ", ");
+      }
+      var conversationPattern = /(["']X-Convertigo-Conversation-Id["']\s*=\s*)["'][^"']*["']/;
+      if (conversationHeaderEntry.length) {
+        body = conversationPattern.test(body) ? body.replace(conversationPattern, conversationHeaderEntry)
+          : (body.length ? body + ", " + conversationHeaderEntry : conversationHeaderEntry);
+      } else if (conversationPattern.test(body)) {
+        body = body.replace(conversationPattern, "").replace(/^\s*,\s*|\s*,\s*$/g, "").replace(/\s*,\s*,\s*/g, ", ");
       }
       if (revealModeHeaderEntry.length) {
         if (revealModePattern.test(body)) {
@@ -6945,6 +6955,8 @@
       // was rewritten at each start.
       var viewerPortMatch = block.match(/["']?X-Convertigo-Viewer-Debug-Port["']?\s*=\s*["'](\d+)["']/);
       info.viewerDebugPort = viewerPortMatch ? Number(viewerPortMatch[1]) : 0;
+      var conversationMatch = block.match(/["']?X-Convertigo-Conversation-Id["']?\s*=\s*["']([^"']+)["']/);
+      info.conversationId = conversationMatch ? conversationMatch[1] : "";
       info.revealMode = /["']?X-Convertigo-Reveal-Mode["']?\s*=\s*["']true["']/.test(block);
       info.noLog = /["']?X-Convertigo-No-Log["']?\s*=\s*["']true["']/.test(block);
       break;
@@ -6991,7 +7003,8 @@
     playwrightCommand: true,
     playwrightEndpoint: true,
     revealMode: true,
-    viewerDebugPort: true
+    viewerDebugPort: true,
+    conversationId: true
   };
 
   function vibeConfigIntentFile(vibeHome) {
@@ -7380,6 +7393,9 @@
       }
       if (viewerDebugPort >= 1024) {
         authHeaderLines.push('"X-Convertigo-Viewer-Debug-Port" = "' + String(viewerDebugPort) + '"');
+        if (mcpConversationId(options).length) {
+          authHeaderLines.push('"X-Convertigo-Conversation-Id" = "' + mcpConversationId(options) + '"');
+        }
       }
       if (revealModeEnabled(options, null)) {
         authHeaderLines.push('"X-Convertigo-Reveal-Mode" = "true"');
@@ -9527,11 +9543,12 @@
   // walked by a verification sub-agent) return their own usage and gateway cost. Each segment keeps them per model in
   // `vision`, and the session totals list them in `models` next to the agent's models.
   function emptyVibeJournalSegment() {
-    return { offset: 0, requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {}, vision: {}, visionCallIds: [] };
+    return { offset: 0, requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {}, vision: {}, subagents: {}, visionCallIds: [] };
   }
 
-  // image-describe makes one model call; browser-verify reports all the model calls of its verification in `requests`.
-  var VISION_USAGE_TOOLS = { "image-describe": true, "browser-verify": true };
+  // image-describe makes one model call (a vision row of its model). A sub-agent run (subagent-run, or browser-verify,
+  // its verifier profile) reports all its model calls in `requests` and goes to the row of its profile and model.
+  var VISION_USAGE_TOOLS = { "image-describe": true, "browser-verify": true, "subagent-run": true };
 
   function mentionsVisionUsageTool(text) {
     for (var tool in VISION_USAGE_TOOLS) {
@@ -9582,14 +9599,20 @@
       segment.visionCallIds = segment.visionCallIds || [];
       segment.visionCallIds.push(callId);
     }
-    segment.vision = segment.vision || {};
     var model = trim(usage.model) || "unknown";
-    var row = segment.vision[model] || { calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
-    // calls = model calls; verifications = browser-verify calls, each one several model calls.
-    var requests = usage.tool === "browser-verify" ? Math.max(0, Math.floor(Number(usage.requests) || 0)) : 1;
+    var subagent = usage.tool !== "image-describe";
+    var profile = subagent ? (trim(usage.profile) || "verifier") : "";
+    var bucketName = subagent ? "subagents" : "vision";
+    var key = subagent ? profile + "|" + model : model;
+    segment[bucketName] = segment[bucketName] || {};
+    var row = segment[bucketName][key] || { calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
+    // calls = model calls; runs = sub-agent runs, each one several model calls.
+    var requests = subagent ? Math.max(0, Math.floor(Number(usage.requests) || 0)) : 1;
     row.calls += requests;
-    if (usage.tool === "browser-verify") {
-      row.verifications = (Number(row.verifications) || 0) + 1;
+    if (subagent) {
+      row.profile = profile;
+      row.model = model;
+      row.runs = (Number(row.runs) || 0) + 1;
     }
     row.inputTokens += Number(usage.inputTokens) || 0;
     row.cachedTokens += Number(usage.cachedTokens) || 0;
@@ -9599,7 +9622,7 @@
       row.cost += Number(usage.cost);
       row.costCalls += requests;
     }
-    segment.vision[model] = row;
+    segment[bucketName][key] = row;
   }
 
   // The journal does not name the model of a request: what is read is counted for the model active at that time. Each
@@ -9682,8 +9705,8 @@
   function sumVibeJournalSegments(segments, prices) {
     var total = { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {} };
     var keys = ["requests", "inputTokens", "cachedTokens", "outputTokens"];
-    var visionKeys = ["calls", "verifications", "inputTokens", "cachedTokens", "outputTokens", "reasoningTokens", "cost", "costCalls"];
-    var agent = {}, vision = {};
+    var visionKeys = ["calls", "runs", "inputTokens", "cachedTokens", "outputTokens", "reasoningTokens", "cost", "costCalls"];
+    var agent = {}, vision = {}, subagents = {};
     for (var name in segments) {
       if (!Object.prototype.hasOwnProperty.call(segments, name) || !segments[name]) {
         continue;
@@ -9704,11 +9727,24 @@
       var visionModels = segments[name].vision || {};
       for (var visionModel in visionModels) {
         if (Object.prototype.hasOwnProperty.call(visionModels, visionModel) && visionModels[visionModel]) {
-          var row = vision[visionModel] || { model: visionModel, kind: "vision", calls: 0, verifications: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
+          var row = vision[visionModel] || { model: visionModel, kind: "vision", calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
           for (var v = 0; v < visionKeys.length; v++) {
-            row[visionKeys[v]] += Number(visionModels[visionModel][visionKeys[v]]) || 0;
+            if (row[visionKeys[v]] !== undefined) {
+              row[visionKeys[v]] += Number(visionModels[visionModel][visionKeys[v]]) || 0;
+            }
           }
           vision[visionModel] = row;
+        }
+      }
+      var subagentRows = segments[name].subagents || {};
+      for (var subagentKey in subagentRows) {
+        if (Object.prototype.hasOwnProperty.call(subagentRows, subagentKey) && subagentRows[subagentKey]) {
+          var source = subagentRows[subagentKey];
+          var run = subagents[subagentKey] || { model: trim(source.model), profile: trim(source.profile), kind: "subagent", runs: 0, calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
+          for (var r = 0; r < visionKeys.length; r++) {
+            run[visionKeys[r]] += Number(source[visionKeys[r]]) || 0;
+          }
+          subagents[subagentKey] = run;
         }
       }
     }
@@ -9739,6 +9775,17 @@
         delete call.cost;
         delete call.costCalls;
         add(total.models[seen] ? "vision:" + seen : seen, call);
+      }
+    }
+    for (var delegated in subagents) {
+      if (Object.prototype.hasOwnProperty.call(subagents, delegated)) {
+        var sub = subagents[delegated];
+        sub.requests = sub.calls;
+        sub.costAmount = sub.costCalls === sub.calls ? sub.cost : null;
+        sub.costSource = sub.costAmount === null ? "" : "gateway";
+        delete sub.cost;
+        delete sub.costCalls;
+        add("subagent:" + delegated, sub);
       }
     }
     total.costAmount = priced > 0 ? cost : null;
@@ -10786,6 +10833,13 @@
     return report;
   }
 
+  // The Tigo conversation the MCP calls belong to: the sub-agent tools record their runs under it. Like the viewer
+  // debug port, it goes into a config file only for a conversation-scoped home (one with a leased viewer port).
+  function mcpConversationId(options) {
+    var id = trim(options && (options.conversationId || options.threadid || options.handle));
+    return /^[A-Za-z0-9._-]{1,128}$/.test(id) ? id : "";
+  }
+
   function buildMcpServers(mcpEndpoint, options) {
     options = options || {};
     var headers = [];
@@ -10803,6 +10857,12 @@
       headers.push({
         name: "X-Convertigo-Viewer-Debug-Port",
         value: String(viewerDebugPort)
+      });
+    }
+    if (mcpConversationId(options).length && normalizeSkillProfile(options) !== "nocode") {
+      headers.push({
+        name: "X-Convertigo-Conversation-Id",
+        value: mcpConversationId(options)
       });
     }
     return [{

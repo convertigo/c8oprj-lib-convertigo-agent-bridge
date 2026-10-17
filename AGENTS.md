@@ -443,12 +443,16 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   requests (context and cache). `models` has one entry per model of the session:
   the agent's models (`kind: "agent"`, cost from the journal tokens at the Vibe
   config prices, `costSource: "journal"`) and the vision models of the Convertigo
-  MCP tools `image-describe` and `browser-verify` (`kind: "vision"`, `calls` =
-  model calls, `verifications` = browser-verify calls, cost the gateway charged,
-  `costSource: "gateway"`), read from the `tool_succeeded` results whose usage
-  block has `tool: "image-describe"` (one model call) or `tool: "browser-verify"`
-  (`requests` model calls of the verification sub-agent), each counted once by
-  its `callId`.
+  MCP tool `image-describe` (`kind: "vision"`, `calls`, cost the gateway
+  charged, `costSource: "gateway"`) and the sub-agent runs of `subagent-run` and
+  `browser-verify` (`kind: "subagent"`, one row per `profile` and `model`, key
+  `subagent:<profile>|<model>`, `runs`, `calls` = model calls, gateway cost),
+  read from the `tool_succeeded` results whose usage block names one of these
+  tools, each counted once by its `callId` (the run id for a sub-agent).
+- The Convertigo MCP server entries carry `X-Convertigo-Conversation-Id` (the
+  Tigo conversation, `mcpConversationId`): always in the ACP session servers,
+  in a config file only for a conversation-scoped home (with a viewer port).
+  The MCP sub-agent tools record their runs under it.
   `costAmount`/`costCurrency` and `sessionTokens` are the whole session, every
   model included; a cost is null when one model of the session has none. Codex
   and Claude conversations do not read the vision calls yet.
