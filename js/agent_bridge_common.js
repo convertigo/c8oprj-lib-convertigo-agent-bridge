@@ -2011,6 +2011,89 @@
     return "updated";
   }
 
+  // Plan sync. Tigo shows the user the agent's `todo` list as the plan, and in long builds the agent forgot it for
+  // dozens of minutes while keeping PROGRESS.md current (run 4: 4 todo writes in about 600 tool calls), whatever the
+  // skill said. Vibe runs the hooks of VIBE_HOME/hooks.toml after every tool call (type post_tool) and appends their
+  // additional_context to the result the model reads next: hooks/vibe_plan_sync.py uses that to remind the agent to
+  // rewrite its todo list after a PROGRESS.md write or after many calls without one, quoting its last list and the
+  // "Lots" section of PROGRESS.md. The plan stays the agent's own; the Bridge only installs the hook, run by the
+  // Python of Vibe's virtual environment. options.vibePlanSync=false removes it.
+  var VIBE_PLAN_SYNC_HOOK = "convertigo-plan-sync";
+  var VIBE_PLAN_SYNC_BEGIN = "# BEGIN " + VIBE_PLAN_SYNC_HOOK + " (managed by lib_ConvertigoAgentBridge)";
+  var VIBE_PLAN_SYNC_END = "# END " + VIBE_PLAN_SYNC_HOOK;
+  var VIBE_PLAN_SYNC_SCRIPT = "convertigo_plan_sync.py";
+
+  function shellArgument(value) {
+    // hooks.toml commands run through the platform shell (sh -c, or cmd on Windows).
+    var text = String(value);
+    return isWindows() ? '"' + text.replace(/"/g, '""') + '"' : "'" + text.replace(/'/g, "'\\''") + "'";
+  }
+
+  function tomlBasicString(value) {
+    return '"' + String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+  }
+
+  function vibePlanSyncHookBlock(pythonPath, scriptPath) {
+    return [
+      VIBE_PLAN_SYNC_BEGIN,
+      "[[hooks]]",
+      "name = " + tomlBasicString(VIBE_PLAN_SYNC_HOOK),
+      'type = "post_tool"',
+      "command = " + tomlBasicString(shellArgument(pythonPath) + " " + shellArgument(scriptPath)),
+      "timeout = 10.0",
+      'description = "Remind the agent to keep its todo list, the plan shown by Tigo, in step with PROGRESS.md"',
+      VIBE_PLAN_SYNC_END
+    ].join("\n");
+  }
+
+  // Replaces the managed block, appends it, or removes it (block ""), and keeps every other hook of the file.
+  function mergeVibePlanSyncHook(existingText, block) {
+    var text = String(existingText == null ? "" : existingText).replace(/\r\n?/g, "\n");
+    var start = text.indexOf(VIBE_PLAN_SYNC_BEGIN);
+    var end = start >= 0 ? text.indexOf(VIBE_PLAN_SYNC_END, start) : -1;
+    if (start >= 0 && end > start) {
+      text = text.substring(0, start).replace(/\s+$/, "") + (block.length ? "\n\n" + block : "") + "\n" + text.substring(end + VIBE_PLAN_SYNC_END.length).replace(/^\s+/, "\n");
+    } else if (block.length) {
+      text = text.replace(/\s+$/, "") + "\n\n" + block;
+    }
+    text = text.replace(/^\s+/, "").replace(/\s+$/, "");
+    return text.length ? text + "\n" : "";
+  }
+
+  function writeFileIfChanged(file, text) {
+    if (file.isFile() && String(readTextFile(file)) === text) {
+      return false;
+    }
+    ensureDirectory(file.getParentFile());
+    writeTextFile(file, text);
+    return true;
+  }
+
+  function installVibePlanSyncHook(options, vibeHome) {
+    options = options || {};
+    var hooksFile = new File(vibeHome, "hooks.toml");
+    var existing = hooksFile.isFile() ? String(readTextFile(hooksFile)) : "";
+    if (!boolValue(options.vibePlanSync, true)) {
+      return existing.indexOf(VIBE_PLAN_SYNC_BEGIN) >= 0 && writeFileIfChanged(hooksFile, mergeVibePlanSyncHook(existing, "")) ? "removed" : "disabled";
+    }
+    var bridgeDir = projectDirectoryByName("lib_ConvertigoAgentBridge");
+    var source = bridgeDir === null ? null : new File(new File(bridgeDir, "hooks"), "vibe_plan_sync.py");
+    if (source === null || !source.isFile()) {
+      return "source_missing";
+    }
+    var workspaceRoot = resolveWorkspaceRoot(options);
+    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
+    // The venv path itself, not its canonical form: bin/python is a symlink to the managed CPython.
+    var python = new File(venvBinPath(childPath(installDir, ".venv"), "python"));
+    if (!python.isFile()) {
+      return "python_missing";
+    }
+    var script = new File(new File(vibeHome, "hooks"), VIBE_PLAN_SYNC_SCRIPT);
+    var scriptChanged = writeFileIfChanged(script, String(readTextFile(source)));
+    var hooksChanged = writeFileIfChanged(hooksFile, mergeVibePlanSyncHook(existing, vibePlanSyncHookBlock(String(python.getAbsolutePath()), filePath(script))));
+    return scriptChanged || hooksChanged ? "updated" : "unchanged";
+  }
+
   function setupVibeFromMcpProject(options, vibeHome, mcpEndpoint) {
     var setupProject = "lib_ConvertigoMCP";
     var report = {
@@ -2079,6 +2162,15 @@
         report.compactionRulesStatus = appendVibeCompactionRules(new File(report.resolvedVibeHome));
         if (report.compactionRulesStatus === "updated") {
           report.generated.push("AGENTS.md (" + VIBE_COMPACTION_RULES_HEADING.replace(/^#+\s*/, "") + ")");
+        }
+        try {
+          report.planSyncHookStatus = installVibePlanSyncHook(options, new File(report.resolvedVibeHome));
+        } catch (planSyncError) {
+          report.planSyncHookStatus = "error";
+          report.warnings.push("Plan sync hook not installed: " + String(planSyncError));
+        }
+        if (report.planSyncHookStatus === "updated") {
+          report.generated.push("hooks.toml (" + VIBE_PLAN_SYNC_HOOK + ")");
         }
       }
       var skillEntry = "skills/convertigo-vibe-generalist/SKILL.md";

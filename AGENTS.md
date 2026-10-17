@@ -395,6 +395,25 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - Tags are expected to match the Convertigo project version when producing `.car`
   releases.
 
+## Plan sync hook (Vibe)
+
+- Tigo shows the agent's `todo` list as the plan. In long builds the agent forgot it
+  for dozens of minutes while keeping `docs/generated/PROGRESS.md` current (run 4:
+  4 todo writes in about 600 tool calls), whatever the skill said.
+- `setupVibeFromMcpProject` installs `hooks/vibe_plan_sync.py` as
+  `VIBE_HOME/hooks/convertigo_plan_sync.py` and declares it in `VIBE_HOME/hooks.toml`
+  (type `post_tool`, between `# BEGIN/END convertigo-plan-sync` markers; other hooks
+  of the file are kept). Vibe runs it after every tool call with the Python of its
+  own venv and appends its `additional_context` to the tool result the model reads.
+- The hook appends a reminder to rewrite the todo list after a second PROGRESS.md
+  write without a todo write in between, or after 25 calls without one
+  (`CONVERTIGO_PLAN_SYNC_EVERY`), quoting the last todo list and the "Lots" section
+  of PROGRESS.md. State: `<session>/convertigo-plan-sync.json`. It never rewrites
+  the plan itself, and any error leaves the tool result untouched.
+- A Vibe process reads hooks.toml when it starts: running conversations get the
+  hook at their next start. `vibePlanSync=false` removes the block.
+- Run `node --test tests/vibe_plan_sync.test.js` after changing this.
+
 ## Quota snapshots
 
 - Private `agent_quota(handle, provider)` reads account rate limits from an existing
