@@ -1,0 +1,28 @@
+accessibility: Hidden
+comment: WEB_ADMIN only. Measures of a Vibe session read from its unified journal (usage totals, active and wall time, requests, tool calls, failures and durations per tool, sleeps, builder waits, compactions, per turn), for the Assistant thread id (agent-...) or the Vibe session id.
+includeResponseElement: false
+responseTimeout: 120
+↓Read [steps.SimpleStep-1792266561312]: 
+  expression: |
+    var studio=com.twinsoft.convertigo.engine.Engine.isStudioMode();
+    var admin=com.twinsoft.convertigo.engine.Engine.authenticatedSessionManager.hasRole(context.httpSession,com.twinsoft.convertigo.engine.AuthenticatedSessionManager.Role.WEB_ADMIN);
+    if(!admin){throw new com.twinsoft.convertigo.engine.EngineException("WEB_ADMIN authentication is required");}
+    include("js/vibe_agent_bridge.js");
+    var response=C8O.agentBridge.sessionMetrics({threadid:String(threadid||""),sessionId:String(sessionId||"")});
+↓Response [steps.JsonToXmlStep-1792266561314]: 
+  jsonObject: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: JS
+        - →→: response
+  key: 
+    - xmlizable: 
+      - ↑classname: com.twinsoft.convertigo.beans.steps.SmartType
+      - SmartType: 
+        - ↑mode: PLAIN
+        - →→: response
+↓threadid [variables.RequestableVariable-1792266561316]: 
+  comment: Assistant conversation id (agent-...).
+↓sessionId [variables.RequestableVariable-1792266561318]: 
+  comment: Vibe session id, instead of threadid.

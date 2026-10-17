@@ -11339,6 +11339,74 @@
     };
   };
 
+  // Session measures of a Vibe conversation, for reports: usage totals, session measures and per-turn detail, read
+  // from its journal. The conversation is the Assistant thread id (agent-…) or the Vibe session id.
+  function findVibeSessionDir(workspaceRoot, sessionId) {
+    var vibeRoot = new File(new File(workspaceRoot, "agents"), "vibe");
+    var homes = vibeRoot.listFiles();
+    for (var h = 0; homes !== null && h < homes.length; h++) {
+      if (!homes[h].isDirectory() || !/^homes-/.test(String(homes[h].getName()))) {
+        continue;
+      }
+      var users = new File(homes[h], "users").listFiles();
+      for (var u = 0; users !== null && u < users.length; u++) {
+        var places = [new File(users[u], ".vibe-home")];
+        var conversations = new File(users[u], "conversations").listFiles();
+        for (var c = 0; conversations !== null && c < conversations.length; c++) {
+          places.push(new File(conversations[c], ".vibe-home"));
+        }
+        for (var p = 0; p < places.length; p++) {
+          if (new File(places[p], "logs/session/unified/" + sessionId + "/journal").isDirectory()) {
+            return places[p];
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  C8O.agentBridge.sessionMetrics = function (options) {
+    options = options || {};
+    var workspaceRoot = trim(options.workspaceRoot) || engineWorkspaceRoot();
+    var threadid = trim(options.threadid || options.conversationId);
+    var sessionId = trim(options.sessionId);
+    var model = trim(options.model);
+    var provider = "";
+    if (threadid.length) {
+      if (!/^agent-[A-Za-z0-9-]{1,80}$/.test(threadid)) {
+        return { ok: false, error: "invalid_threadid" };
+      }
+      var providers = new File(workspaceRoot, "agents").listFiles();
+      for (var i = 0; providers !== null && i < providers.length && !sessionId.length; i++) {
+        var users = new File(providers[i], "users").listFiles();
+        for (var j = 0; users !== null && j < users.length && !sessionId.length; j++) {
+          var record = readJsonFile(new File(new File(new File(users[j], "conversations"), threadid), "conversation.json"));
+          if (record && trim(record.externalSessionId).length) {
+            sessionId = trim(record.externalSessionId);
+            model = model || trim(record.model);
+            provider = trim(record.provider);
+          }
+        }
+      }
+      if (!sessionId.length) {
+        return { ok: false, error: "conversation_not_found", threadid: threadid };
+      }
+    }
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(sessionId)) {
+      return { ok: false, error: "invalid_session" };
+    }
+    var vibeHome = findVibeSessionDir(workspaceRoot, sessionId);
+    if (vibeHome === null) {
+      return { ok: false, error: "journal_not_found", threadid: threadid, sessionId: sessionId };
+    }
+    var usage = vibeJournalUsage(String(vibeHome.getPath()), sessionId, model, { withTurns: true });
+    var metrics = usage ? usage.metrics : null;
+    if (usage) {
+      delete usage.metrics;
+    }
+    return { ok: true, threadid: threadid, sessionId: sessionId, provider: provider, model: model, usage: usage, metrics: metrics, timestamp: now() };
+  };
+
   C8O.agentBridge.quota = function(options) {
     options = options || {};
     var entry = getRegistry().get(resolveHandle(options.handle));

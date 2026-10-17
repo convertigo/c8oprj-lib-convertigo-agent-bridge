@@ -22,6 +22,7 @@
   ↓agent_interrupt [sequences.GenericSequence]: 🗏 sequences/agent_interrupt.yaml
   ↓agent_python_setup [sequences.GenericSequence]: 🗏 sequences/agent_python_setup.yaml
   ↓agent_quota [sequences.GenericSequence]: 🗏 sequences/agent_quota.yaml
+  ↓agent_session_metrics [sequences.GenericSequence]: 🗏 sequences/agent_session_metrics.yaml
   ↓agent_settings [sequences.GenericSequence]: 🗏 sequences/agent_settings.yaml
   ↓agent_status [sequences.GenericSequence]: 🗏 sequences/agent_status.yaml
   ↓agent_sweep_expired [sequences.GenericSequence]: 🗏 sequences/agent_sweep_expired.yaml
