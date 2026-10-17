@@ -12,6 +12,11 @@
   var VIBE_MODEL_COMPACT_THRESHOLDS = {
     "mistral/zai-glm-5-3": 900000
   };
+  // Real context window per model (Vibe max_context_length), when measured: GLM 5.3 accepted a
+  // 975,713-token prompt through the Convertigo gateway. Unknown models declare no window.
+  var VIBE_MODEL_CONTEXT_WINDOWS = {
+    "mistral/zai-glm-5-3": 1000000
+  };
   // Compaction prompt installed in every Vibe home (VIBE_HOME/prompts/<id>.md, selected by compaction_prompt_id).
   var VIBE_COMPACTION_PROMPT_ID = "convertigo_compact";
   var FALLBACK_FLOW_MCP_PATH = "/api/flow-mcp";
@@ -469,6 +474,22 @@
     return gatewayModelAlias(names[0]);
   }
 
+  function vibeContextWindowFor(model) {
+    var key = trim(model);
+    if (!key.length) {
+      return 0;
+    }
+    if (Object.prototype.hasOwnProperty.call(VIBE_MODEL_CONTEXT_WINDOWS, key)) {
+      return VIBE_MODEL_CONTEXT_WINDOWS[key];
+    }
+    for (var name in VIBE_MODEL_CONTEXT_WINDOWS) {
+      if (Object.prototype.hasOwnProperty.call(VIBE_MODEL_CONTEXT_WINDOWS, name) && gatewayModelAlias(name) === key) {
+        return VIBE_MODEL_CONTEXT_WINDOWS[name];
+      }
+    }
+    return 0;
+  }
+
   function vibeCompactThresholdFor(model) {
     var key = trim(model);
     if (!key.length) {
@@ -508,7 +529,8 @@
         cachedInputPrice: "0.14",
         builtIn: false,
         supportsImages: gatewayModelSupportsImages(names[i]),
-        compactThreshold: vibeCompactThresholdFor(names[i])
+        compactThreshold: vibeCompactThresholdFor(names[i]),
+        contextWindow: vibeContextWindowFor(names[i])
       });
     }
     return specs;
@@ -517,7 +539,7 @@
   function vibeGatewayModelsFingerprint(specs) {
     // Name and thinking level: a level that a model stopped accepting rewrites the config too.
     var names = [];
-    for (var i = 0; i < specs.length; i++) { names.push(specs[i].name + ":" + specs[i].thinking + ":" + (specs[i].compactThreshold || VIBE_AUTO_COMPACT_THRESHOLD)); }
+    for (var i = 0; i < specs.length; i++) { names.push(specs[i].name + ":" + specs[i].thinking + ":" + (specs[i].compactThreshold || VIBE_AUTO_COMPACT_THRESHOLD) + ":" + (specs[i].contextWindow || 0)); }
     return names.sort().join(",");
   }
 
@@ -671,7 +693,8 @@
       var name = block.match(/\nname\s*=\s*["']([^"']+)["']/);
       var thinking = block.match(/\nthinking\s*=\s*["']([^"']*)["']/);
       var threshold = block.match(/\nauto_compact_threshold\s*=\s*(\d+)/);
-      if (name) { names.push(trim(name[1]) + ":" + (thinking ? trim(thinking[1]) : "") + ":" + (threshold ? threshold[1] : "")); }
+      var windowSize = block.match(/\nmax_context_length\s*=\s*(\d+)/);
+      if (name) { names.push(trim(name[1]) + ":" + (thinking ? trim(thinking[1]) : "") + ":" + (threshold ? threshold[1] : "") + ":" + (windowSize ? windowSize[1] : "0")); }
     }
     return names.sort().join(",");
   }
@@ -7197,6 +7220,7 @@
         modelSpec.thinking.length ? 'thinking = "' + tomlString(modelSpec.thinking) + '"' : '',
         'supports_images = ' + (modelSpec.supportsImages === true ? 'true' : 'false'),
         'auto_compact_threshold = ' + (modelSpec.compactThreshold || vibeCompactThresholdFor(modelSpec.name)),
+        (modelSpec.contextWindow || vibeContextWindowFor(modelSpec.name)) ? 'max_context_length = ' + (modelSpec.contextWindow || vibeContextWindowFor(modelSpec.name)) : '',
         ''
       );
     }
@@ -9354,7 +9378,8 @@
       costCurrency:update.cost && /^[A-Z]{3}$/.test(String(update.cost.currency)) ? String(update.cost.currency) : "",
       // Session totals Vibe sends with every usage update (steps, prompt/completion/cached tokens, speed, last turn).
       meta:update._meta && typeof update._meta === "object" ? update._meta : null,
-      threshold:vibeCompactThresholdFor(entry.model)
+      threshold:vibeCompactThresholdFor(entry.model),
+      window:vibeContextWindowFor(entry.model) || null
     }});
   }
 
@@ -10042,6 +10067,7 @@
     if (kind === "usage_update") {
       recordVibeUsage(entry, update);
       eventData.autoCompactThreshold = vibeCompactThresholdFor(entry.model);
+      eventData.contextWindow = vibeContextWindowFor(entry.model) || null;
       pushEvent(entry, "usage/update", eventData);
       return;
     }

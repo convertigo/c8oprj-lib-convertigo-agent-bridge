@@ -355,7 +355,7 @@ console.log("Vibe image attachment contract OK");
   assert.equal(vibeGatewayModelSpecs(Object.assign({ model: "devstral-small" }, offer), "")[0].activeModel, "glm-5-3", "an unknown model falls back to the default");
   assert.deepEqual(vibeGatewayModelSpecs({ llmGatewayModel: "mistral/zai-glm-5-2", gatewayModelIds: offer.gatewayModelIds }, "").map(s => s.name),
     ["mistral/zai-glm-5-2"], "an explicit llmGatewayModel pins the offer");
-  assert.equal(vibeGatewayModelsFingerprint(specs), "mistral/zai-glm-5-2:high:200000,mistral/zai-glm-5-3:high:900000");
+  assert.equal(vibeGatewayModelsFingerprint(specs), "mistral/zai-glm-5-2:high:200000:0,mistral/zai-glm-5-3:high:900000:1000000");
   assert.equal(vibeCompactThresholdFor("mistral/zai-glm-5-3"), 900000, "GLM 5.3 accepts ~975k input tokens on the gateway");
   assert.equal(vibeCompactThresholdFor("glm-5-3"), 900000, "the alias matches too");
   assert.equal(vibeCompactThresholdFor("mistral/zai-glm-5-2"), 200000);
@@ -363,7 +363,7 @@ console.log("Vibe image attachment contract OK");
   assert.equal(vibeCompactThresholdFor(""), 200000);
 
   const toml = 'active_model = "glm-5-3"\n\n[[providers]]\nname = "convertigo"\napi_base = "https://llm.convertigo.com/v1"\n\n[[models]]\nname = "mistral/zai-glm-5-3"\nprovider = "convertigo"\nalias = "glm-5-3"\n\n[[models]]\nname = "mistral/zai-glm-5-2"\nprovider = "convertigo"\nalias = "glm-5-2"\n\n[[models]]\nname = "devstral-small-latest"\nprovider = "mistral"\nalias = "devstral-small"\n';
-  assert.equal(parseVibeGatewayModels(toml), "mistral/zai-glm-5-2::,mistral/zai-glm-5-3::", "only gateway models count in the reuse fingerprint");
+  assert.equal(parseVibeGatewayModels(toml), "mistral/zai-glm-5-2:::0,mistral/zai-glm-5-3:::0", "only gateway models count in the reuse fingerprint");
   assert.match(vibeSource, /selected\.gatewayModels\) === expectedGatewayModels/);
 
   // Vibe advertises its built-in Mistral models over ACP; the Convertigo mode hides them.
@@ -392,7 +392,7 @@ console.log("Vibe image attachment contract OK");
     assert.match(written, /name = "mistral\/zai-glm-5-3"\nprovider = "convertigo"\nalias = "glm-5-3"/);
     assert.match(written, /name = "mistral\/zai-glm-5-2"\nprovider = "convertigo"\nalias = "glm-5-2"/);
     assert.doesNotMatch(written, /provider = "mistral"/);
-    assert.equal(parseVibeGatewayModels(written), "mistral/zai-glm-5-2:high:200000,mistral/zai-glm-5-3:high:900000");
+    assert.equal(parseVibeGatewayModels(written), "mistral/zai-glm-5-2:high:200000:0,mistral/zai-glm-5-3:high:900000:1000000");
     assert.match(written, /^auto_compact_threshold = 200000$/m, "the global threshold follows the active model (GLM 5.2)");
     assert.equal(result.model, "glm-5-2");
     writeLocalVibeConfig("/managed/vibe-home", "http://localhost:18080/convertigo/api/mcp", "glm-5-3",
