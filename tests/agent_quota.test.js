@@ -89,7 +89,7 @@ const verifySegment=addVibeJournalText(emptyVibeJournalSegment(),[
   verified(verifyUsage('verify-1',6,22000,900,0.0153)),
   verified(verifyUsage('verify-1',6,22000,900,0.0153)),
   verified(verifyUsage('verify-2',4,15000,600,0.01,'subagent-run','verifier')),
-  verified(verifyUsage('build-1',30,400000,9000,0.6,'subagent-run','constructor','glm-5-3'))
+  verified(Object.assign(verifyUsage('build-1',30,400000,9000,0.6,'subagent-run','constructor','glm-5-3'),{costSource:'journal'}))
 ].join('\n'),'glm-5-3',verifySeen);
 assert.equal(verifySegment.vision['mistral/mistral-large-4'].calls,1,'the image description alone in the vision row');
 const verifierRow=verifySegment.subagents['verifier|mistral/mistral-large-4'];
@@ -105,6 +105,7 @@ assert.equal(verifierTotal.runs,2);assert.equal(verifierTotal.calls,10);assert.e
 assert.ok(Math.abs(verifierTotal.costAmount-0.0253)<1e-12);assert.equal(verifierTotal.costSource,'gateway');
 const builderTotal=verifyTotal.models['subagent:constructor|glm-5-3'];
 assert.equal(builderTotal.kind,'subagent');assert.equal(builderTotal.calls,30);assert.equal(builderTotal.costAmount,0.6);
+assert.equal(builderTotal.costSource,'journal','a constructor run is priced from its Vibe journal');
 assert.equal(verifyTotal.models['glm-5-3'].kind,'agent','the agent model keeps its own row beside a sub-agent on the same model');
 assert.equal(verifyTotal.models['mistral/mistral-large-4'].kind,'vision');
 assert.equal(verifyTotal.requests,1,'the agent totals stay the agent model requests');

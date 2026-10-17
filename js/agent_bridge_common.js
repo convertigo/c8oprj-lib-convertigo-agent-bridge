@@ -9613,6 +9613,8 @@
       row.profile = profile;
       row.model = model;
       row.runs = (Number(row.runs) || 0) + 1;
+      // A constructor run prices its tokens from its Vibe journal; a verifier run reports what the gateway charged.
+      row.costSource = usage.costSource === "journal" ? "journal" : "gateway";
     }
     row.inputTokens += Number(usage.inputTokens) || 0;
     row.cachedTokens += Number(usage.cachedTokens) || 0;
@@ -9740,7 +9742,7 @@
       for (var subagentKey in subagentRows) {
         if (Object.prototype.hasOwnProperty.call(subagentRows, subagentKey) && subagentRows[subagentKey]) {
           var source = subagentRows[subagentKey];
-          var run = subagents[subagentKey] || { model: trim(source.model), profile: trim(source.profile), kind: "subagent", runs: 0, calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
+          var run = subagents[subagentKey] || { model: trim(source.model), profile: trim(source.profile), kind: "subagent", runs: 0, calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0, costSource: trim(source.costSource) };
           for (var r = 0; r < visionKeys.length; r++) {
             run[visionKeys[r]] += Number(source[visionKeys[r]]) || 0;
           }
@@ -9782,7 +9784,7 @@
         var sub = subagents[delegated];
         sub.requests = sub.calls;
         sub.costAmount = sub.costCalls === sub.calls ? sub.cost : null;
-        sub.costSource = sub.costAmount === null ? "" : "gateway";
+        sub.costSource = sub.costAmount === null ? "" : (sub.costSource === "journal" ? "journal" : "gateway");
         delete sub.cost;
         delete sub.costCalls;
         add("subagent:" + delegated, sub);
