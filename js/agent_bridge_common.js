@@ -8,9 +8,10 @@
   // Default for models whose real window is not verified; VIBE_MODEL_COMPACT_THRESHOLDS raises it per model.
   var VIBE_AUTO_COMPACT_THRESHOLD = 200000;
   // Per-model thresholds, keyed by the gateway model name (its alias matches too). Each value was measured on the
-  // gateway: mistral/zai-glm-5-3 accepted a 975,713-token input, so it compacts at 900k instead of every 200k.
+  // gateway: mistral/zai-glm-5-3 accepted a 975,713-token input. Its runs trigger a Convertigo /compact themselves at
+  // 900k, so Vibe's native compaction at 950k (of the 1M window) is only the safety net.
   var VIBE_MODEL_COMPACT_THRESHOLDS = {
-    "mistral/zai-glm-5-3": 900000
+    "mistral/zai-glm-5-3": 950000
   };
   // Real context window per model (Vibe max_context_length), when measured: GLM 5.3 accepted a
   // 975,713-token prompt through the Convertigo gateway. Unknown models declare no window.

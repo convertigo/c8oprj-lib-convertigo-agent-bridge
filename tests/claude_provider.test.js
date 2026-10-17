@@ -355,9 +355,9 @@ console.log("Vibe image attachment contract OK");
   assert.equal(vibeGatewayModelSpecs(Object.assign({ model: "devstral-small" }, offer), "")[0].activeModel, "glm-5-3", "an unknown model falls back to the default");
   assert.deepEqual(vibeGatewayModelSpecs({ llmGatewayModel: "mistral/zai-glm-5-2", gatewayModelIds: offer.gatewayModelIds }, "").map(s => s.name),
     ["mistral/zai-glm-5-2"], "an explicit llmGatewayModel pins the offer");
-  assert.equal(vibeGatewayModelsFingerprint(specs), "mistral/zai-glm-5-2:high:200000:0,mistral/zai-glm-5-3:high:900000:1000000");
-  assert.equal(vibeCompactThresholdFor("mistral/zai-glm-5-3"), 900000, "GLM 5.3 accepts ~975k input tokens on the gateway");
-  assert.equal(vibeCompactThresholdFor("glm-5-3"), 900000, "the alias matches too");
+  assert.equal(vibeGatewayModelsFingerprint(specs), "mistral/zai-glm-5-2:high:200000:0,mistral/zai-glm-5-3:high:950000:1000000");
+  assert.equal(vibeCompactThresholdFor("mistral/zai-glm-5-3"), 950000, "GLM 5.3 accepts ~975k input tokens; the run compacts itself at 900k");
+  assert.equal(vibeCompactThresholdFor("glm-5-3"), 950000, "the alias matches too");
   assert.equal(vibeCompactThresholdFor("mistral/zai-glm-5-2"), 200000);
   assert.equal(vibeCompactThresholdFor("mistral-large-4"), 200000, "unverified windows keep the default");
   assert.equal(vibeCompactThresholdFor(""), 200000);
@@ -392,13 +392,13 @@ console.log("Vibe image attachment contract OK");
     assert.match(written, /name = "mistral\/zai-glm-5-3"\nprovider = "convertigo"\nalias = "glm-5-3"/);
     assert.match(written, /name = "mistral\/zai-glm-5-2"\nprovider = "convertigo"\nalias = "glm-5-2"/);
     assert.doesNotMatch(written, /provider = "mistral"/);
-    assert.equal(parseVibeGatewayModels(written), "mistral/zai-glm-5-2:high:200000:0,mistral/zai-glm-5-3:high:900000:1000000");
+    assert.equal(parseVibeGatewayModels(written), "mistral/zai-glm-5-2:high:200000:0,mistral/zai-glm-5-3:high:950000:1000000");
     assert.match(written, /^auto_compact_threshold = 200000$/m, "the global threshold follows the active model (GLM 5.2)");
     assert.equal(result.model, "glm-5-2");
     writeLocalVibeConfig("/managed/vibe-home", "http://localhost:18080/convertigo/api/mcp", "glm-5-3",
       { vibeProfile: "convertigo", gatewayModelIds: ["mistral/zai-glm-5-2", "mistral/zai-glm-5-3"] });
-    assert.match(written, /^active_model = "glm-5-3"\napi_timeout = 720\.0\nauto_compact_threshold = 900000$/m, "GLM 5.3 active: global threshold 900k");
-    assert.match(written, /alias = "glm-5-3"[\s\S]*?auto_compact_threshold = 900000/);
+    assert.match(written, /^active_model = "glm-5-3"\napi_timeout = 720\.0\nauto_compact_threshold = 950000$/m, "GLM 5.3 active: global threshold 950k");
+    assert.match(written, /alias = "glm-5-3"[\s\S]*?auto_compact_threshold = 950000/);
   } finally {
     writeTextFile = originalWrite;
     ensureDirectory = originalEnsure;
