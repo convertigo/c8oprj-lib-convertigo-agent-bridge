@@ -7615,7 +7615,8 @@
     if (value === "xhigh") {
       return "Very high";
     }
-    return value;
+    // Other levels (minimal, max, ultra...) only need a capital letter to match the list.
+    return value.length ? value.charAt(0).toUpperCase() + value.substring(1) : value;
   }
 
   function normalizeCodexReasoningLevels(levels) {
