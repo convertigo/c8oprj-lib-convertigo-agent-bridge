@@ -44,6 +44,13 @@ same context.
   status, source type, and the required action; never expose credential values.
   Codex accepts a scoped/user `auth.json` or `OPENAI_API_KEY`. Vibe accepts
   `MISTRAL_API_KEY` from the scoped/user `.vibe/.env` or process environment.
+- Settings are read with the displayed conversation's id in the request, also
+  while its turn runs (a viewer opening it). Settings may only run the periodic
+  orphan purge (`cleanupAgentStorage({workspaceRoot})`), never the public
+  `cleanupStorage`: its request fallbacks pick up that id and the
+  exact-conversation cleanup stops the agent process (Vibe journals
+  "client interrupt", Codex also loses its conversation home). Run
+  `node tests/settings_storage_cleanup.test.js` after changing this.
 - When no provider is ready, settings must leave the default provider empty so
   the Assistant can ask the user to choose Vibe or Codex. Runtime setup may
   finish with `authentication_required`; session start must stop immediately in
