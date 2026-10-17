@@ -417,6 +417,19 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - ACP context carries `limitKind: "compaction"` and `costKind: "session_estimate"`.
   Its size is the CLI's effective compaction threshold, not necessarily the
   model's maximum context length. Do not infer billing mode from a key or CLI name.
+- Vibe session totals come from the unified journal (`vibeJournalUsage`, state in
+  `<session>/convertigo-usage.json`) and travel as `journalUsage` with each
+  usage update and as `quota.context.journal`. `requests`, `inputTokens`,
+  `cachedTokens`, `outputTokens` and `cacheRate` are the agent's own model
+  requests (context and cache). `models` has one entry per model of the session:
+  the agent's models (`kind: "agent"`, cost from the journal tokens at the Vibe
+  config prices, `costSource: "journal"`) and the vision models of the Convertigo
+  MCP tool `image-describe` (`kind: "vision"`, `calls`, cost the gateway charged,
+  `costSource: "gateway"`), read from the `tool_succeeded` results whose usage
+  block has `tool: "image-describe"` and counted once by their gateway `callId`.
+  `costAmount`/`costCurrency` and `sessionTokens` are the whole session, every
+  model included; a cost is null when one model of the session has none. Codex
+  and Claude conversations do not read the vision calls yet.
 - Run `node tests/agent_quota.test.js`, `node tests/claude_provider.test.js` and
   `node tests/agent_bridge_runtime.test.js` after changing this contract.
 

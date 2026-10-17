@@ -42,6 +42,44 @@ assert.equal(two.models.vision.requests,1,'a second model keeps its own bucket')
 assert.equal(sumVibeJournalSegments({'a.jsonl':two},{'glm-5-3':{inputPrice:1.4,cachedInputPrice:0.14,outputPrice:4.4}}).costAmount,null,'a model without prices leaves the session cost unknown');
 assert.equal(sumVibeJournalSegments({'a.jsonl':two},{'glm-5-3':{inputPrice:1.4,cachedInputPrice:0.14,outputPrice:4.4},vision:{inputPrice:2,cachedInputPrice:null,outputPrice:6}}).costAmount,3.4);
 assert.equal(vibeJournalUsage('','abc'),null);assert.equal(vibeJournalUsage('/tmp','../x'),null,'the session id never leaves the journal directory');
+// image-describe calls (a gateway vision model) come back in tool results with their own usage, summed per model.
+const visionUsage=(callId,model,input,output,cost)=>({tool:'image-describe',callId,model,inputTokens:input,cachedTokens:0,outputTokens:output,reasoningTokens:output-10,totalTokens:input+output,cost,currency:cost===null?'':'USD'});
+const toolDone=result=>JSON.stringify({type:'action_result',payload:{result:{type:'tool_succeeded',result}}});
+const described=(usage)=>toolDone({content:[{type:'text',text:JSON.stringify({description:'ok',usage})}],structured_content:{description:'ok',usage}});
+const seen={};
+const visionSegment=addVibeJournalText(emptyVibeJournalSegment(),[
+  done(1000,900,50),
+  described(visionUsage('c1','mistral/mistral-large-4',1500,200,0.004)),
+  // the same call echoed by run_typescript (wrapped, text only) is counted once
+  toolDone({content:[{type:'text',text:JSON.stringify({result:{usage:visionUsage('c1','mistral/mistral-large-4',1500,200,0.004)}})}]}),
+  // the hook record repeats the tool result: not an action_result, ignored
+  JSON.stringify({type:'action_intent',payload:{request:{hook:'post_tool_call',input:{tool_result:{structured_content:{usage:visionUsage('c9','mistral/mistral-large-4',1,1,1)}}}}}}),
+  described(visionUsage('c2','mistral/mistral-large-4',1000,100,0.002)),
+  described(visionUsage('c3','other/vision',500,50,null)),
+  toolDone({structured_content:{projects:[]}})
+].join('\n'),'glm-5-3',seen);
+assert.equal(visionSegment.requests,1,'tool results are not model requests of the agent');
+assert.deepEqual(Object.keys(visionSegment.vision).sort(),['mistral/mistral-large-4','other/vision']);
+assert.equal(visionSegment.vision['mistral/mistral-large-4'].calls,2);
+assert.deepEqual(visionSegment.visionCallIds,['c1','c2','c3']);
+// a call already counted in another segment is not counted again
+const later=addVibeJournalText(emptyVibeJournalSegment(),described(visionUsage('c2','mistral/mistral-large-4',1000,100,0.002)),'glm-5-3',seen);
+assert.equal(Object.keys(later.vision).length,0);
+// One structure per model: the agent model priced from the journal, each vision model at the cost the gateway charged.
+const glmPrices={'glm-5-3':{inputPrice:1.4,cachedInputPrice:0.14,outputPrice:4.4}};
+const visionTotal=sumVibeJournalSegments({'a.jsonl':visionSegment,'b.jsonl':later},glmPrices);
+assert.equal(visionTotal.requests,1,'the agent totals stay the agent model requests');
+const large=visionTotal.models['mistral/mistral-large-4'];
+assert.equal(large.kind,'vision');assert.equal(large.calls,2);assert.equal(large.requests,2);assert.equal(large.inputTokens,2500);assert.ok(Math.abs(large.costAmount-0.006)<1e-12);assert.equal(large.costSource,'gateway');
+assert.equal(visionTotal.models['other/vision'].costAmount,null,'an unpriced vision call');
+assert.equal(visionTotal.models['glm-5-3'].kind,'agent');assert.equal(visionTotal.models['glm-5-3'].costSource,'journal');
+assert.equal(visionTotal.costAmount,null,'one unpriced model makes the session cost unknown');
+assert.deepEqual(JSON.parse(JSON.stringify(visionTotal.sessionTokens)),{inputTokens:4000,cachedTokens:900,outputTokens:400},'session tokens: agent and vision models');
+const pricedVision=sumVibeJournalSegments({'a.jsonl':addVibeJournalText(emptyVibeJournalSegment(),[done(1000000,0,0),described(visionUsage('c7','mistral/mistral-large-4',500,50,0.25))].join('\n'),'glm-5-3',{})},glmPrices);
+assert.ok(Math.abs(pricedVision.costAmount-1.65)<1e-12,'the session cost adds the agent journal cost and the gateway cost');assert.equal(pricedVision.costCurrency,'USD');
+assert.equal(Object.keys(sumVibeJournalSegments({'a.jsonl':segment}).models).length,1,'no vision call: only the agent model');
+// state files written before the vision totals still sum
+assert.equal(sumVibeJournalSegments({'old.jsonl':{offset:9,requests:1,inputTokens:5,cachedTokens:0,outputTokens:1}}).requests,1);
 recordVibeUsage(vibe,{used:5},{requests:3,inputTokens:4000,cachedTokens:2700,outputTokens:130,cacheRate:0.675});
 assert.equal(vibe.quota.context.journal.cachedTokens,2700);
 const pending={method:'account/rateLimits/read',done:false};

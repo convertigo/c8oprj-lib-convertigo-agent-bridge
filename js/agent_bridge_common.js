@@ -9428,13 +9428,73 @@
   // usage of every model request (action_result records of type completion_succeeded). Totals are kept per journal
   // segment with the byte offset already read: an update only reads what was appended, and a segment that rotates out
   // of journal/ keeps its count.
+  // The same journal holds the tool results: the image-describe calls of the Convertigo MCP (a vision model of the
+  // gateway, used by agents whose model cannot read images) return their own usage and gateway cost. Each segment keeps
+  // them per model in `vision`, and the session totals list them in `models` next to the agent's models.
   function emptyVibeJournalSegment() {
-    return { offset: 0, requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {} };
+    return { offset: 0, requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {}, vision: {}, visionCallIds: [] };
+  }
+
+  var VISION_USAGE_TOOL = "image-describe";
+
+  // Usage blocks of image-describe found in a tool result, at any depth: a call made from Vibe code (run_typescript)
+  // may come back wrapped. The gateway call id keeps a result echoed twice from being counted twice.
+  function collectVisionUsages(value, found, depth) {
+    if (value === null || typeof value !== "object" || depth > 8) {
+      return found;
+    }
+    if (value.tool === VISION_USAGE_TOOL && typeof value.model === "string" && value.inputTokens !== undefined) {
+      found.push(value);
+      return found;
+    }
+    for (var key in value) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        collectVisionUsages(value[key], found, depth + 1);
+      }
+    }
+    return found;
+  }
+
+  function visionUsagesOfToolResult(result) {
+    var found = collectVisionUsages(result && (result.structured_content || result.structuredContent), [], 0);
+    var content = result && Array.isArray(result.content) ? result.content : [];
+    for (var i = 0; !found.length && i < content.length; i++) {
+      if (content[i] && typeof content[i].text === "string" && content[i].text.indexOf(VISION_USAGE_TOOL) >= 0) {
+        try { collectVisionUsages(JSON.parse(content[i].text), found, 0); } catch (_notJsonToolText) {}
+      }
+    }
+    return found;
+  }
+
+  function addVisionUsage(segment, usage, seenCallIds) {
+    var callId = trim(usage.callId);
+    if (callId.length) {
+      if (seenCallIds[callId] === true) {
+        return;
+      }
+      seenCallIds[callId] = true;
+      segment.visionCallIds = segment.visionCallIds || [];
+      segment.visionCallIds.push(callId);
+    }
+    segment.vision = segment.vision || {};
+    var model = trim(usage.model) || "unknown";
+    var row = segment.vision[model] || { calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
+    row.calls++;
+    row.inputTokens += Number(usage.inputTokens) || 0;
+    row.cachedTokens += Number(usage.cachedTokens) || 0;
+    row.outputTokens += Number(usage.outputTokens) || 0;
+    row.reasoningTokens += Number(usage.reasoningTokens) || 0;
+    if (usage.cost !== null && usage.cost !== undefined && usage.cost !== "" && isFinite(Number(usage.cost))) {
+      row.cost += Number(usage.cost);
+      row.costCalls++;
+    }
+    segment.vision[model] = row;
   }
 
   // The journal does not name the model of a request: what is read is counted for the model active at that time. Each
-  // segment keeps one bucket per model, so another model used in the session (images, for example) adds its own bucket.
-  function addVibeJournalText(segment, text, model) {
+  // segment keeps one bucket per model, so another agent model used in the session adds its own bucket.
+  function addVibeJournalText(segment, text, model, seenCallIds) {
+    seenCallIds = seenCallIds || {};
     var key = trim(model) || "unknown";
     segment.models = segment.models && typeof segment.models === "object" ? segment.models : {};
     var bucket = segment.models[key] || { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
@@ -9442,7 +9502,8 @@
     var lines = String(text || "").split("\n");
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i];
-      if (line.indexOf("completion_succeeded") < 0) {
+      var completion = line.indexOf("completion_succeeded") >= 0;
+      if (!completion && (line.indexOf("tool_succeeded") < 0 || line.indexOf(VISION_USAGE_TOOL) < 0)) {
         continue;
       }
       var record = null;
@@ -9453,7 +9514,15 @@
       }
       var outer = record && record.type === "action_result" && record.payload ? (record.payload.result || {}) : null;
       var result = outer ? (outer.result || {}) : {};
-      if (!outer || (outer.type || result.type) !== "completion_succeeded") {
+      var type = outer ? (outer.type || result.type) : "";
+      if (type === "tool_succeeded") {
+        var usages = visionUsagesOfToolResult(result);
+        for (var u = 0; u < usages.length; u++) {
+          addVisionUsage(segment, usages[u], seenCallIds);
+        }
+        continue;
+      }
+      if (type !== "completion_succeeded") {
         continue;
       }
       var usage = result.usage || {};
@@ -9494,9 +9563,16 @@
     return prices;
   }
 
+  // One entry per model in `models`: the agent's models (kind "agent", cost at the Vibe config prices, costSource
+  // "journal") and the vision models of image-describe (kind "vision", cost the gateway charged, costSource "gateway").
+  // requests/inputTokens/cachedTokens/outputTokens/cacheRate stay the agent's own model requests (context and cache);
+  // costAmount and sessionTokens are the whole session, every model included. A cost is null when one model of the
+  // session has none (no prices, or a vision call the gateway did not price).
   function sumVibeJournalSegments(segments, prices) {
     var total = { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, models: {} };
     var keys = ["requests", "inputTokens", "cachedTokens", "outputTokens"];
+    var visionKeys = ["calls", "inputTokens", "cachedTokens", "outputTokens", "reasoningTokens", "cost", "costCalls"];
+    var agent = {}, vision = {};
     for (var name in segments) {
       if (!Object.prototype.hasOwnProperty.call(segments, name) || !segments[name]) {
         continue;
@@ -9507,26 +9583,56 @@
       var models = segments[name].models || {};
       for (var model in models) {
         if (Object.prototype.hasOwnProperty.call(models, model) && models[model]) {
-          var bucket = total.models[model] || { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+          var bucket = agent[model] || { model: model, kind: "agent", requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
           for (var m = 0; m < keys.length; m++) {
             bucket[keys[m]] += Number(models[model][keys[m]]) || 0;
           }
-          total.models[model] = bucket;
+          agent[model] = bucket;
+        }
+      }
+      var visionModels = segments[name].vision || {};
+      for (var visionModel in visionModels) {
+        if (Object.prototype.hasOwnProperty.call(visionModels, visionModel) && visionModels[visionModel]) {
+          var row = vision[visionModel] || { model: visionModel, kind: "vision", calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, reasoningTokens: 0, cost: 0, costCalls: 0 };
+          for (var v = 0; v < visionKeys.length; v++) {
+            row[visionKeys[v]] += Number(visionModels[visionModel][visionKeys[v]]) || 0;
+          }
+          vision[visionModel] = row;
         }
       }
     }
     total.cacheRate = total.inputTokens > 0 ? total.cachedTokens / total.inputTokens : null;
-    // The session cost is known only when every model used has its prices.
-    var cost = total.requests > 0 ? 0 : null;
-    for (var used in total.models) {
-      if (Object.prototype.hasOwnProperty.call(total.models, used)) {
-        var modelCost = vibeTokenCost(total.models[used], prices ? prices[used] : null);
-        total.models[used].costAmount = modelCost;
-        cost = cost === null || modelCost === null ? null : cost + modelCost;
+    var cost = 0, priced = 0;
+    var session = { inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
+    var add = function (key, entry) {
+      total.models[key] = entry;
+      session.inputTokens += entry.inputTokens;
+      session.cachedTokens += entry.cachedTokens;
+      session.outputTokens += entry.outputTokens;
+      priced++;
+      cost = cost === null || entry.costAmount === null ? null : cost + entry.costAmount;
+    };
+    for (var used in agent) {
+      if (Object.prototype.hasOwnProperty.call(agent, used) && agent[used].requests > 0) {
+        agent[used].costAmount = vibeTokenCost(agent[used], prices ? prices[used] : null);
+        agent[used].costSource = agent[used].costAmount === null ? "" : "journal";
+        add(used, agent[used]);
       }
     }
-    total.costAmount = cost;
-    total.costCurrency = cost === null ? "" : "USD";
+    for (var seen in vision) {
+      if (Object.prototype.hasOwnProperty.call(vision, seen)) {
+        var call = vision[seen];
+        call.requests = call.calls;
+        call.costAmount = call.costCalls === call.calls ? call.cost : null;
+        call.costSource = call.costAmount === null ? "" : "gateway";
+        delete call.cost;
+        delete call.costCalls;
+        add(total.models[seen] ? "vision:" + seen : seen, call);
+      }
+    }
+    total.costAmount = priced > 0 ? cost : null;
+    total.costCurrency = total.costAmount === null ? "" : "USD";
+    total.sessionTokens = session;
     return total;
   }
 
@@ -9546,6 +9652,12 @@
     var state = readJsonFile(stateFile) || {};
     var segments = state.segments && typeof state.segments === "object" ? state.segments : {};
     var changed = false;
+    var seenCallIds = {};
+    for (var known in segments) {
+      if (Object.prototype.hasOwnProperty.call(segments, known) && segments[known] && segments[known].visionCallIds) {
+        for (var k = 0; k < segments[known].visionCallIds.length; k++) { seenCallIds[segments[known].visionCallIds[k]] = true; }
+      }
+    }
     for (var i = 0; i < names.length; i++) {
       var name = String(names[i]);
       if (!/^[A-Za-z0-9._-]+\.jsonl$/.test(name)) {
@@ -9555,6 +9667,8 @@
       var length = Number(file.length());
       var segment = segments[name] || emptyVibeJournalSegment();
       if (length < Number(segment.offset || 0)) {
+        // Rewritten segment: read it again from the start, its vision calls included.
+        for (var r = 0; segment.visionCallIds && r < segment.visionCallIds.length; r++) { delete seenCallIds[segment.visionCallIds[r]]; }
         segment = emptyVibeJournalSegment();
       }
       if (!segment.models || typeof segment.models !== "object") {
@@ -9579,7 +9693,7 @@
           end--;
         }
         if (end >= 0) {
-          addVibeJournalText(segment, String(new java.lang.String(bytes, 0, end + 1, StandardCharsets.UTF_8)), model);
+          addVibeJournalText(segment, String(new java.lang.String(bytes, 0, end + 1, StandardCharsets.UTF_8)), model, seenCallIds);
           segment.offset = Number(segment.offset || 0) + end + 1;
           changed = true;
         }
