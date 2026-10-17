@@ -443,9 +443,12 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   requests (context and cache). `models` has one entry per model of the session:
   the agent's models (`kind: "agent"`, cost from the journal tokens at the Vibe
   config prices, `costSource: "journal"`) and the vision models of the Convertigo
-  MCP tool `image-describe` (`kind: "vision"`, `calls`, cost the gateway charged,
+  MCP tools `image-describe` and `browser-verify` (`kind: "vision"`, `calls` =
+  model calls, `verifications` = browser-verify calls, cost the gateway charged,
   `costSource: "gateway"`), read from the `tool_succeeded` results whose usage
-  block has `tool: "image-describe"` and counted once by their gateway `callId`.
+  block has `tool: "image-describe"` (one model call) or `tool: "browser-verify"`
+  (`requests` model calls of the verification sub-agent), each counted once by
+  its `callId`.
   `costAmount`/`costCurrency` and `sessionTokens` are the whole session, every
   model included; a cost is null when one model of the session has none. Codex
   and Claude conversations do not read the vision calls yet.

@@ -78,6 +78,28 @@ assert.deepEqual(JSON.parse(JSON.stringify(visionTotal.sessionTokens)),{inputTok
 const pricedVision=sumVibeJournalSegments({'a.jsonl':addVibeJournalText(emptyVibeJournalSegment(),[done(1000000,0,0),described(visionUsage('c7','mistral/mistral-large-4',500,50,0.25))].join('\n'),'glm-5-3',{})},glmPrices);
 assert.ok(Math.abs(pricedVision.costAmount-1.65)<1e-12,'the session cost adds the agent journal cost and the gateway cost');assert.equal(pricedVision.costCurrency,'USD');
 assert.equal(Object.keys(sumVibeJournalSegments({'a.jsonl':segment}).models).length,1,'no vision call: only the agent model');
+// browser-verify: one tool call, several model calls of the verification sub-agent, one usage block for all of them.
+const verifyUsage=(callId,requests,input,output,cost)=>({tool:'browser-verify',callId,model:'mistral/mistral-large-4',requests,inputTokens:input,cachedTokens:100,outputTokens:output,reasoningTokens:0,totalTokens:input+output,cost,currency:cost===null?'':'USD',durationMs:18000});
+const verified=usage=>toolDone({content:[{type:'text',text:JSON.stringify({verdict:'failed',checks:[],usage})}],structured_content:{verdict:'failed',checks:[],usage}});
+const verifySeen={};
+const verifySegment=addVibeJournalText(emptyVibeJournalSegment(),[
+  done(1000,900,50),
+  described(visionUsage('d1','mistral/mistral-large-4',1500,200,0.004)),
+  verified(verifyUsage('verify-1',6,22000,900,0.0153)),
+  verified(verifyUsage('verify-1',6,22000,900,0.0153)),
+  verified(verifyUsage('verify-2',4,15000,600,0.01))
+].join('\n'),'glm-5-3',verifySeen);
+const verifyRow=verifySegment.vision['mistral/mistral-large-4'];
+assert.equal(verifyRow.calls,11,'model calls: 1 description + 6 + 4 verification calls, the echoed verification once');
+assert.equal(verifyRow.verifications,2);
+assert.equal(verifyRow.inputTokens,38500);
+assert.equal(verifyRow.costCalls,11);
+const verifyTotal=sumVibeJournalSegments({'a.jsonl':verifySegment},glmPrices).models['mistral/mistral-large-4'];
+assert.equal(verifyTotal.kind,'vision');assert.equal(verifyTotal.calls,11);assert.equal(verifyTotal.requests,11);assert.equal(verifyTotal.verifications,2);
+assert.ok(Math.abs(verifyTotal.costAmount-0.0293)<1e-12);assert.equal(verifyTotal.costSource,'gateway');
+const unpricedVerify=sumVibeJournalSegments({'a.jsonl':addVibeJournalText(emptyVibeJournalSegment(),[done(1000,0,0),verified(verifyUsage('verify-3',5,1000,10,null))].join('\n'),'glm-5-3',{})},glmPrices);
+assert.equal(unpricedVerify.models['mistral/mistral-large-4'].costAmount,null,'an unpriced verification keeps the cost unknown');
+assert.equal(unpricedVerify.costAmount,null);
 // state files written before the vision totals still sum
 assert.equal(sumVibeJournalSegments({'old.jsonl':{offset:9,requests:1,inputTokens:5,cachedTokens:0,outputTokens:1}}).requests,1);
 recordVibeUsage(vibe,{used:5},{requests:3,inputTokens:4000,cachedTokens:2700,outputTokens:130,cacheRate:0.675});
