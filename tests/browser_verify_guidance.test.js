@@ -14,6 +14,7 @@ for (const provider of ['vibe', 'codex', 'claude']) {
   assert.match(text, /`paths` = one plain-language path per user journey/, provider);
   assert.match(text, /it never edits the project/, provider);
   assert.match(text, /verify the affected paths again/, provider);
+  assert.match(text, /call it again with `verificationId` alone until the report comes/, provider);
   assert.doesNotMatch(text, /For a functional proof \(a login/, provider + ': the scripted proof is only the fallback');
 }
 // A Studio without the Flow capability falls back to the generalist profile: pretend it has it.
