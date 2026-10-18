@@ -1953,6 +1953,14 @@
     }
 
     var env = claudeRuntimeEnv(options, setup.setup.claudeHome);
+    // A conversation started on a precise model (claude-sonnet-5-5) runs on that model only: the agent's sub-agents
+    // asked for "opus" or "sonnet", and Claude Code's own background calls (haiku), all map to it. An alias (sonnet)
+    // keeps Claude Code's defaults. CLAUDE_CODE_SUBAGENT_MODEL alone does not win over a model given in the call.
+    var pinnedModel = trim(options.model || options.agentModel);
+    if (/^claude-[a-z]+-\d/.test(pinnedModel)) {
+      ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"].forEach(function (name) { env[name] = pinnedModel; });
+    }
     var extraEnv = parseObject(options.env, {});
     for (var envKey in extraEnv) {
       if (Object.prototype.hasOwnProperty.call(extraEnv, envKey)) {
