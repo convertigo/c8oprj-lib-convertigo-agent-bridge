@@ -434,8 +434,10 @@
   }
 
   function ensureClaudePlaywrightRuntime(options, installDir, claudeCommand) {
-    if (!claudeCommand || !commandPathStartsWith(claudeCommand, installDir)) {
-      return { attempted: false, installed: false, reused: false, skipped: true, method: "external_claude", steps: [], timestamp: now() };
+    // Playwright MCP does not depend on the Claude CLI: a user's own claude (outside installDir) gets the
+    // browser tools too, from the same npm prefix. Without them a Claude agent has no way to see the app.
+    if (!claudeCommand) {
+      return { attempted: false, installed: false, reused: false, skipped: true, method: "no_claude", steps: [], timestamp: now() };
     }
     try {
       return ensureCodexPlaywrightRuntime(options, installDir);
@@ -1577,7 +1579,7 @@
         messages.push(presenceSetup.home.error);
       }
       if (presenceSetup.claude.found === true && claudePlaywrightEnabled(options) && presenceSetup.playwright.installed !== true
-          && commandPathStartsWith(presenceSetup.claude, presenceSetup.installDir) && !boolValue(options.skipPlaywrightInstall || options.skipClaudePlaywrightInstall, false)) {
+          && !boolValue(options.skipPlaywrightInstall || options.skipClaudePlaywrightInstall, false)) {
         var lazyPlaywright = ensureClaudePlaywrightRuntime(options, presenceSetup.installDir, presenceSetup.claude);
         if (lazyPlaywright.error) {
           messages.push(String(lazyPlaywright.error));
