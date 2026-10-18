@@ -2646,6 +2646,7 @@
       isFlow ? "- Import generated or supplied images with `frontend-svelte-asset-import`, use its returned `resources/...` URL unchanged, and never copy assets with shell commands or into generated static folders." : "",
       isFlow ? "" : "- If `mobile-builder-open(stateOnly=true)` returns `status:\"stopped\"`, immediately call it once with `stateOnly=false, wait=false`; do not spend a timeout polling an inactive builder.",
       "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
+      "- Playwright MCP files live in `.playwright-mcp/` under your working directory: screenshots go there, and a file the viewer downloads (an export) is saved without any dialog in `.playwright-mcp/downloads/`, where you can read it. Playwright MCP only reads files inside your working directory: write `browser_run_code_unsafe` scripts in `.playwright-mcp/scripts/` and pass that relative path.",
       "- For viewer automation, use the Playwright MCP tools exposed by the managed Codex configuration. Do not run ad hoc shell scripts with `require('playwright')`, and do not launch a separate browser unless explicitly needed.",
       isFlow ? "- Use Playwright only after the capability pack reports that the dev viewer is ready and the managed browser target shows that viewer." : "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`.",
       "- Known-good fast check: `playwright.browser_tabs({action:\"list\"})`, then `playwright.browser_find({text:\"<visible text>\"})`; use `playwright.browser_evaluate({function:\"...\"})` only for DOM state or timing. Do not probe unsupported browser features first.",
@@ -3067,8 +3068,63 @@
     }
     return {
       command: node.path,
-      args: [filePath(cli), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"]
+      args: [filePath(cli), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"].concat(playwrightViewerInitArgs(installDir))
     };
+  }
+
+  // Playwright MCP runs this module on each page it drives (--init-page). Attached over CDP,
+  // Playwright leaves downloads to the embedder, and JxBrowser then opens its modal Save panel
+  // on the Studio UI thread: every engine request, the MCP included, waits until someone closes
+  // it (run 9b lost 2 h 46 on a CSV export). The module has Chromium save downloads in
+  // .playwright-mcp/downloads instead, through a browser CDP session kept open while Playwright
+  // MCP runs: Chromium drops the setting when that session detaches.
+  var PLAYWRIGHT_VIEWER_INIT_SOURCE = [
+    "// Written by the Convertigo Agent Bridge (playwrightViewerInitArgs): downloads started in the",
+    "// Studio viewer are saved in .playwright-mcp/downloads instead of opening JxBrowser's modal Save panel.",
+    "const fs = require(\"fs\");",
+    "const path = require(\"path\");",
+    "let ready = null;",
+    "",
+    "function downloadsDir() {",
+    "  const at = process.argv.indexOf(\"--output-dir\");",
+    "  const base = at > 0 && process.argv[at + 1] ? path.resolve(process.argv[at + 1]) : path.join(process.cwd(), \".playwright-mcp\");",
+    "  return path.join(base, \"downloads\");",
+    "}",
+    "",
+    "exports.default = async ({ page }) => {",
+    "  if (!ready) {",
+    "    ready = (async () => {",
+    "      const browser = page.context().browser();",
+    "      if (!browser || typeof browser.newBrowserCDPSession !== \"function\") {",
+    "        return;",
+    "      }",
+    "      const dir = downloadsDir();",
+    "      fs.mkdirSync(dir, { recursive: true });",
+    "      const session = await browser.newBrowserCDPSession();",
+    "      await session.send(\"Browser.setDownloadBehavior\", { behavior: \"allow\", downloadPath: dir });",
+    "      exports.session = session;",
+    "    })().catch((error) => {",
+    "      ready = null;",
+    "      process.stderr.write(\"Convertigo viewer init: \" + (error && error.message ? error.message : error) + \"\\n\");",
+    "    });",
+    "  }",
+    "  await ready;",
+    "};",
+    ""
+  ].join("\n");
+
+  function playwrightViewerInitArgs(installDir) {
+    if (!trim(installDir).length) {
+      return [];
+    }
+    try {
+      var file = new File(childPath(childPath(installDir, "c8o"), "playwright_viewer_init.cjs"));
+      file.getParentFile().mkdirs();
+      writeManagedTextFile(file, PLAYWRIGHT_VIEWER_INIT_SOURCE, false);
+      return ["--init-page", filePath(file)];
+    } catch (initError) {
+      return [];
+    }
   }
 
   function codexPlaywrightMcpInlineCdpEndpointEnabled(options) {
@@ -3100,6 +3156,7 @@
       args.push("--cdp-endpoint");
       args.push(endpoint);
       args.push("--shared-browser-context");
+      args = args.concat(playwrightViewerInitArgs(installDir));
     }
     return args;
   }
@@ -7549,7 +7606,7 @@
       return direct;
     }
     var npx = codexPlaywrightMcpCommand(options, installDir);
-    var args = ["--prefix", codexNpmPrefix(installDir), codexPlaywrightMcpBinaryName(options), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"];
+    var args = ["--prefix", codexNpmPrefix(installDir), codexPlaywrightMcpBinaryName(options), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"].concat(playwrightViewerInitArgs(installDir));
     var node = detectNodeRuntime(options);
     if (node.found && /\.js$/i.test(npx)) {
       return { command: node.path, args: [npx].concat(args) };
