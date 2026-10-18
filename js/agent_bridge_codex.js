@@ -1513,6 +1513,20 @@
       }
       return;
     }
+    // The structured plan (Codex's update_plan): steps with pending / inProgress / completed. The Assistant reads
+    // Vibe's shape, update.entries [{content, status}]; the plan items' text alone never reached its plan panel.
+    if (method === "turn/plan/updated") {
+      var steps = params.plan || [];
+      pushEvent(entry, "plan/update", {
+        provider: "codex",
+        explanation: params.explanation || "",
+        update: { entries: steps.map(function (st) {
+          var status = String(st.status || "pending");
+          return { content: String(st.step || ""), status: status === "inProgress" ? "in_progress" : status, priority: "" };
+        }) }
+      });
+      return;
+    }
     if (method === "item/plan/delta") {
       codexAppServerAppendDelta(entry, params.itemId || "", params.delta || "");
       return;

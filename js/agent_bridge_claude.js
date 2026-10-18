@@ -119,6 +119,8 @@
     }
     env.DISABLE_AUTOUPDATER = "1";
     env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE = "1";
+    // claude -p has no task tools unless asked: TaskCreate / TaskUpdate feed the Assistant's plan.
+    env.CLAUDE_CODE_ENABLE_TODO_TOOLS = "1";
     // Claude Code aborts MCP tool calls after 60 s by default; Convertigo tools such as
     // mobile-builder-open (wait up to 180 s), builds and batches legitimately run longer.
     env.MCP_TOOL_TIMEOUT = String(intValue(options.claudeMcpToolTimeoutMs || options.mcpToolTimeoutMs, 600000, 60000, 3600000));
@@ -2508,6 +2510,10 @@
       var block = content[i] || {};
       if (block.type === "tool_use") {
         claudeRegisterToolUse(entry, block);
+        if (block.name === "TaskUpdate" && block.input && block.input.taskId != null && block.input.subject) {
+          entry.claudeTaskSubjects = entry.claudeTaskSubjects || {};
+          entry.claudeTaskSubjects[String(block.input.taskId)] = String(block.input.subject);
+        }
       } else if (block.type === "text") {
         // Text already reached the narration buffer through the stream events
         // (partial messages are always enabled). Without partials, buffer it here.
@@ -2530,7 +2536,53 @@
     }
   }
 
+  // The plan shown by the Assistant, in Vibe's shape (update.entries [{content, status}]), kept from the structured
+  // results of Claude's task tools: TaskCreate gives {task:{id, subject}}, TaskUpdate {taskId, statusChange:{to}}.
+  function claudeTrackTasks(entry, message) {
+    try {
+      var result = message.tool_use_result;
+      if (!result || typeof result !== "object") {
+        return;
+      }
+      if (!entry.claudeTasks) {
+        entry.claudeTasks = [];
+      }
+      var tasks = entry.claudeTasks;
+      var changed = false;
+      if (result.task && result.task.id != null) {
+        tasks.push({ id: String(result.task.id), content: String(result.task.subject || ""), status: "pending" });
+        changed = true;
+      } else if (result.taskId != null && result.success !== false) {
+        var id = String(result.taskId);
+        for (var i = 0; i < tasks.length; i++) {
+          if (tasks[i].id !== id) {
+            continue;
+          }
+          var to = result.statusChange && result.statusChange.to ? String(result.statusChange.to) : "";
+          if (to === "deleted") {
+            tasks.splice(i, 1);
+          } else if (to.length) {
+            tasks[i].status = to;
+          }
+          var subject = entry.claudeTaskSubjects ? entry.claudeTaskSubjects[id] : null;
+          if (subject) {
+            tasks[i].content = subject;
+          }
+          changed = true;
+          break;
+        }
+      }
+      if (changed) {
+        pushEvent(entry, "plan/update", {
+          provider: "claude",
+          update: { entries: tasks.map(function (t) { return { content: t.content, status: t.status, priority: "" }; }) }
+        });
+      }
+    } catch (_ignoreTasks) {}
+  }
+
   function claudeHandleUserMessage(entry, message) {
+    claudeTrackTasks(entry, message);
     var payload = message.message || {};
     var content = payload.content || [];
     if (typeof content === "string") {
