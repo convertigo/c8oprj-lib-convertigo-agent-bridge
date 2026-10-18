@@ -21,6 +21,28 @@
     "mistral/zai-glm-5-3": 1000000,
     "mistral/mistral-large-4": 1000000
   };
+  // Prices per million tokens of the gateway models ($: input, cached input, output), used for the cost of a Vibe session.
+  // mistral/mistral-large-4 was fitted on 40 calls the gateway billed (2026-10-18): every one matches to the cent.
+  // Other models keep the GLM 5.3 prices.
+  var VIBE_MODEL_PRICES = {
+    "mistral/zai-glm-5-3": { inputPrice: "1.4", cachedInputPrice: "0.14", outputPrice: "4.4" },
+    "mistral/mistral-large-4": { inputPrice: "0.68", cachedInputPrice: "0.068", outputPrice: "2.09" }
+  };
+  var VIBE_DEFAULT_PRICES = VIBE_MODEL_PRICES["mistral/zai-glm-5-3"];
+
+  function vibeModelPricesFor(model) {
+    var key = trim(model);
+    if (Object.prototype.hasOwnProperty.call(VIBE_MODEL_PRICES, key)) {
+      return VIBE_MODEL_PRICES[key];
+    }
+    for (var name in VIBE_MODEL_PRICES) {
+      if (Object.prototype.hasOwnProperty.call(VIBE_MODEL_PRICES, name) && gatewayModelAlias(name) === key) {
+        return VIBE_MODEL_PRICES[name];
+      }
+    }
+    return VIBE_DEFAULT_PRICES;
+  }
+
   // Compaction prompt installed in every Vibe home (VIBE_HOME/prompts/<id>.md, selected by compaction_prompt_id).
   var VIBE_COMPACTION_PROMPT_ID = "convertigo_compact";
   var FALLBACK_FLOW_MCP_PATH = "/api/flow-mcp";
@@ -528,9 +550,9 @@
         efforts: modelEfforts,
         thinking: gatewayEffortFor(thinking, modelEfforts),
         temperature: "1.0",
-        inputPrice: "1.4",
-        outputPrice: "4.4",
-        cachedInputPrice: "0.14",
+        inputPrice: vibeModelPricesFor(names[i]).inputPrice,
+        outputPrice: vibeModelPricesFor(names[i]).outputPrice,
+        cachedInputPrice: vibeModelPricesFor(names[i]).cachedInputPrice,
         builtIn: false,
         supportsImages: gatewayModelSupportsImages(names[i]),
         compactThreshold: vibeCompactThresholdFor(names[i]),
