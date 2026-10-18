@@ -355,7 +355,7 @@ console.log("Vibe image attachment contract OK");
   assert.equal(vibeGatewayModelSpecs(Object.assign({ model: "devstral-small" }, offer), "")[0].activeModel, "glm-5-3", "an unknown model falls back to the default");
   assert.deepEqual(vibeGatewayModelSpecs({ llmGatewayModel: "mistral/zai-glm-5-2", gatewayModelIds: offer.gatewayModelIds }, "").map(s => s.name),
     ["mistral/zai-glm-5-2"], "an explicit llmGatewayModel pins the offer");
-  assert.equal(vibeGatewayModelsFingerprint(specs), "mistral/zai-glm-5-2:high:200000:0,mistral/zai-glm-5-3:high:950000:1000000");
+  assert.equal(vibeGatewayModelsFingerprint(specs), "mistral/zai-glm-5-2:high:200000:0:1.4/0.14/4.4,mistral/zai-glm-5-3:high:950000:1000000:1.4/0.14/4.4");
   const large = vibeGatewayModelSpecs({ gatewayModelIds: ["mistral/mistral-large-4"] }, "")[0];
   assert.deepEqual([large.inputPrice, large.cachedInputPrice, large.outputPrice], ["0.68", "0.068", "2.09"], "Mistral Large 4 prices fitted on gateway bills");
   assert.equal(vibeCompactThresholdFor("mistral/zai-glm-5-3"), 950000, "GLM 5.3 accepts ~975k input tokens; the run compacts itself at 900k");

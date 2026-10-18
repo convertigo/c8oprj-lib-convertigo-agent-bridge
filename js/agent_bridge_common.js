@@ -565,7 +565,7 @@
   function vibeGatewayModelsFingerprint(specs) {
     // Name and thinking level: a level that a model stopped accepting rewrites the config too.
     var names = [];
-    for (var i = 0; i < specs.length; i++) { names.push(specs[i].name + ":" + specs[i].thinking + ":" + (specs[i].compactThreshold || VIBE_AUTO_COMPACT_THRESHOLD) + ":" + (specs[i].contextWindow || 0)); }
+    for (var i = 0; i < specs.length; i++) { names.push(specs[i].name + ":" + specs[i].thinking + ":" + (specs[i].compactThreshold || VIBE_AUTO_COMPACT_THRESHOLD) + ":" + (specs[i].contextWindow || 0) + ":" + [specs[i].inputPrice, specs[i].cachedInputPrice, specs[i].outputPrice].join("/")); }
     return names.sort().join(",");
   }
 
