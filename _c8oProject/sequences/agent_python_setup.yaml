@@ -2,6 +2,7 @@ comment: Check or install a workspace-local Python runtime for agent CLIs.
 ↓Run [steps.SimpleStep-1781785110545]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.pythonSetup({
       install: typeof install === "undefined" ? false : install,
       workspaceRoot: typeof workspaceRoot === "undefined" ? "" : workspaceRoot,

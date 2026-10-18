@@ -2,6 +2,7 @@ comment: Send a prompt to a running Vibe ACP session. By default the call return
 ↓Run [steps.SimpleStep-1781600000301]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.vibePrompt({
       tigoResourcesHandle: typeof tigoResourcesHandle === "undefined" ? "" : tigoResourcesHandle,
       handle: typeof handle === "undefined" ? "" : handle,

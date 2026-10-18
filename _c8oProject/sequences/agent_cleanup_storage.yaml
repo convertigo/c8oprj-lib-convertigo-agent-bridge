@@ -2,6 +2,7 @@ comment: Remove conversation-scoped agent artifacts and periodically purge unref
 ↓Run [steps.SimpleStep-1785339093426]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.cleanupStorage({
       workspaceRoot: typeof workspaceRoot === "undefined" ? "" : workspaceRoot,
       userId: typeof userId === "undefined" ? "" : userId,

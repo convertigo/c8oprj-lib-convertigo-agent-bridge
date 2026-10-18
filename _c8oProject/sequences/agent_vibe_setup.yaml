@@ -3,6 +3,7 @@ responseTimeout: 900
 ↓Run [steps.SimpleStep-1781600000101]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.vibeSetup({
       install: typeof install === "undefined" ? false : install,
       vibeProfile: typeof vibeProfile === "undefined" ? "" : vibeProfile,

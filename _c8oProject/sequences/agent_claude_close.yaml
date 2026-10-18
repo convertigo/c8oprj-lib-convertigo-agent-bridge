@@ -2,6 +2,7 @@ comment: Close a Claude Code bridge entry and stop its running process if needed
 ↓Run [steps.SimpleStep-1789369797979]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.claudeClose({
       handle: typeof handle === "undefined" ? "" : handle
     });'

@@ -2,6 +2,7 @@ comment: Close a Vibe ACP session and stop its process.
 ↓Run [steps.SimpleStep-1781600000601]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.vibeClose({
       handle: typeof handle === "undefined" ? "" : handle
     });'

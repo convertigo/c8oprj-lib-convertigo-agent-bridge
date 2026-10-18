@@ -22,6 +22,24 @@ http://localhost:18082/convertigo/projects/lib_ConvertigoAgentBridge/.json?__con
 Ce connecteur ne sert qu'a satisfaire la resolution HTTP du moteur Convertigo.
 Il ne porte aucune logique metier.
 
+## Acces
+
+Les sequences pilotent des agents qui ont des outils fichiers et le MCP Convertigo,
+et le Studio ecoute sur toutes les interfaces reseau. Chaque sequence Public commence
+par `C8O.agentBridge.requireCaller()` (`js/agent_bridge_access.js`), qui refuse un
+appel anonyme (`agent_bridge_caller_refused`) et n'accepte que :
+
+- une session `WEB_ADMIN` (le Studio, ou un pilote apres
+  `admin/services/engine.Authenticate`, meme cookie que les appels au bridge) ;
+- l'Assistant du meme moteur, qui envoie la cle d'appelant dans l'en-tete
+  `X-Convertigo-Agent-Bridge-Key`. La cle est creee au premier usage dans
+  `context.server` (`lib_ConvertigoAgentBridge.callerKey.v1`), sous le verrou du store,
+  change a chaque demarrage du moteur et n'est jamais ecrite sur disque.
+
+`agent_quota` et `agent_session_metrics` gardent leur propre controle `WEB_ADMIN`.
+L'accessibilite ne protege rien ici : en mode Studio, le moteur execute aussi les
+sequences Private appelees en HTTP.
+
 ## Cycle minimal
 
 Verifier ou installer Python dans le workspace Convertigo :

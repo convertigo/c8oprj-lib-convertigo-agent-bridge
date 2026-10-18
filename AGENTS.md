@@ -414,6 +414,22 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   hook at their next start. `vibePlanSync=false` removes the block.
 - Run `node --test tests/vibe_plan_sync.test.js` after changing this.
 
+## Who may call the Bridge sequences
+
+- Every Public sequence starts with `C8O.agentBridge.requireCaller();` right after
+  `include("js/vibe_agent_bridge.js");` (`js/agent_bridge_access.js`). Anonymous callers
+  are refused: the Studio listens on every interface, and these sequences drive agents
+  that have file tools and the Convertigo MCP.
+- Accepted: a WEB_ADMIN session, or the Assistant of this engine with the engine caller
+  key in `X-Convertigo-Agent-Bridge-Key`. The key is created on first use in
+  `context.server` (`lib_ConvertigoAgentBridge.callerKey.v1`) under the store lock, lives
+  in memory only and changes at each engine start. lib_ConvertigoAssistant
+  (`js/agent_bridge_client.js`) uses the same entry and lock.
+- A new Public sequence must add the same call; `tests/agent_bridge_access.test.js`
+  fails otherwise. `agent_quota` and `agent_session_metrics` keep their own WEB_ADMIN
+  checks. Accessibility is no protection: the Studio runs Private requestables over HTTP.
+- Run `node --test tests/agent_bridge_access.test.js` after changing this.
+
 ## Quota snapshots
 
 - Private `agent_quota(handle, provider)` reads account rate limits from an existing

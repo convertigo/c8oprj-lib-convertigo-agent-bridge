@@ -2,6 +2,7 @@ comment: Stop the running turn of an agent and keep its process, so the conversa
 ↓Run [steps.SimpleStep-1789800000001]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.interrupt({
       handle: typeof handle === "undefined" ? "" : handle,
       waitMs: typeof waitMs === "undefined" ? "" : waitMs

@@ -2,6 +2,7 @@ comment: Long-poll normalized stream events from a running agent process.
 ↓Run [steps.SimpleStep-1781600000401]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.events({
       handle: typeof handle === "undefined" ? "" : handle,
       cursor: typeof cursor === "undefined" ? "" : cursor,

@@ -2,6 +2,7 @@ comment: Send a prompt to Codex CLI through codex exec --json. Poll agent_events
 ↓Run [steps.SimpleStep-1781693000301]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.codexPrompt({
       tigoResourcesHandle: typeof tigoResourcesHandle === "undefined" ? "" : tigoResourcesHandle,
       handle: typeof handle === "undefined" ? "" : handle,

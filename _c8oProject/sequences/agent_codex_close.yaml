@@ -2,6 +2,7 @@ comment: Close a Codex bridge entry and stop its running process if needed.
 ↓Run [steps.SimpleStep-1781693000601]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.codexClose({
       handle: typeof handle === "undefined" ? "" : handle
     });'

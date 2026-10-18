@@ -3,6 +3,7 @@ responseTimeout: 120
 ↓Run [steps.SimpleStep-1782118867492]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.settings({
       provider: typeof provider === "undefined" ? "" : provider,
       model: typeof model === "undefined" ? "" : model,

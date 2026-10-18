@@ -2,6 +2,7 @@ comment: Stop abandoned agent processes whose idle time exceeds their TTL.
 ↓Run [steps.SimpleStep-1781600000701]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.sweepExpired({
       maxIdleSeconds: typeof maxIdleSeconds === "undefined" ? "" : maxIdleSeconds
     });'

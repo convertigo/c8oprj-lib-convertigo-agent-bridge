@@ -3,6 +3,7 @@ responseTimeout: 900
 ↓Run [steps.SimpleStep-1781693000101]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.codexSetup({
       workspaceRoot: typeof workspaceRoot === "undefined" ? "" : workspaceRoot,
       installDir: typeof installDir === "undefined" ? "" : installDir,

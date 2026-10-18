@@ -3,6 +3,7 @@ responseTimeout: 300
 ↓Run [steps.SimpleStep-1789369797938]: 
   expression: |
     'include("js/vibe_agent_bridge.js");
+    C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.claudePrompt({
       tigoResourcesHandle: typeof tigoResourcesHandle === "undefined" ? "" : tigoResourcesHandle,
       handle: typeof handle === "undefined" ? "" : handle,
