@@ -1281,6 +1281,7 @@
       "- Reply to the user in their language. Keep progress updates short and factual, and never expose hidden reasoning.",
       "- When you change a project, validate the result with the available Convertigo tools before claiming completion.",
       "- Keep your plan visible: create its steps with TaskCreate and move them with TaskUpdate (pending, in_progress, completed); load the two tools once with ToolSearch \"select:TaskCreate,TaskUpdate\". The Convertigo Assistant shows this list to the user as the plan.",
+      "- To wait for something (a scheduled job, a build, a server), do not run a bare `sleep N`: Claude Code refuses it. Loop on the condition with `until <check>; do sleep 2; done`, or start the command with `run_in_background` and keep working.",
       "",
       "Provider: Claude"
     ].filter(function (line) { return line !== ""; }).join("\n");
