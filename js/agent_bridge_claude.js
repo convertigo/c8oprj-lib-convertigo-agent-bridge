@@ -2451,8 +2451,53 @@
     pushEvent(entry, "claude/event", { event: event, provider: "claude" });
   }
 
+  // Context shown by the Assistant (used / window), in the shape Vibe gives: update.used, update.size, contextWindow.
+  // Claude Code reports the usage of each model call on its assistant messages; the context is what the call read
+  // (input, cache creation, cache read) plus what it wrote. The window comes from the result's modelUsage, else a
+  // default per family (Sonnet 5.5 has 1M tokens in Claude Code).
+  function claudeContextWindow(entry) {
+    var known = Number(entry.claudeContextWindow || 0);
+    if (known > 0) {
+      return known;
+    }
+    return /haiku/i.test(String(entry.model || "")) ? 200000 : 1000000;
+  }
+
+  function claudePushContextUsage(entry, extra) {
+    var window = claudeContextWindow(entry);
+    var data = {
+      provider: "claude",
+      update: { used: entry.claudeContextUsed || 0, size: window, _meta: entry.claudeContextMeta || {} },
+      contextWindow: window,
+      autoCompactThreshold: null
+    };
+    for (var key in (extra || {})) {
+      if (Object.prototype.hasOwnProperty.call(extra, key)) {
+        data[key] = extra[key];
+      }
+    }
+    pushEvent(entry, "usage/update", data);
+  }
+
+  function claudeTrackContextUsage(entry, payload) {
+    try {
+      var usage = payload && payload.usage;
+      var messageId = String((payload && payload.id) || "");
+      if (!usage || (messageId.length && entry.claudeLastUsageMessage === messageId)) {
+        return;
+      }
+      entry.claudeLastUsageMessage = messageId;
+      var read = (Number(usage.input_tokens) || 0) + (Number(usage.cache_creation_input_tokens) || 0) + (Number(usage.cache_read_input_tokens) || 0);
+      var wrote = Number(usage.output_tokens) || 0;
+      entry.claudeContextUsed = read + wrote;
+      entry.claudeContextMeta = { promptTokens: read, completionTokens: wrote, cachedTokens: Number(usage.cache_read_input_tokens) || 0 };
+      claudePushContextUsage(entry, null);
+    } catch (_ignoreContextUsage) {}
+  }
+
   function claudeHandleAssistantMessage(entry, message) {
     var payload = message.message || {};
+    claudeTrackContextUsage(entry, payload);
     var content = payload.content || [];
     var messageId = String(payload.id || "");
     if (!entry.claudeSeenMessages) {
@@ -2527,8 +2572,20 @@
     if (message.session_id && !trim(entry.sessionId).length) {
       entry.sessionId = String(message.session_id);
     }
+    try {
+      var modelUsage = message.modelUsage || {};
+      for (var modelName in modelUsage) {
+        if (Object.prototype.hasOwnProperty.call(modelUsage, modelName) && Number(modelUsage[modelName] && modelUsage[modelName].contextWindow) > 0) {
+          entry.claudeContextWindow = Math.max(Number(entry.claudeContextWindow || 0), Number(modelUsage[modelName].contextWindow));
+        }
+      }
+    } catch (_ignoreModelUsage) {}
     if (message.usage) {
-      pushEvent(entry, "usage/update", { usage: message.usage, totalCostUsd: message.total_cost_usd || 0, provider: "claude" });
+      // usage is the turn's total (all its model calls); update carries the context of the last call, as for Vibe.
+      claudePushContextUsage(entry, { usage: message.usage, totalCostUsd: message.total_cost_usd || 0 });
+      if (message.total_cost_usd) {
+        entry.claudeLastCost = Number(message.total_cost_usd) || 0;
+      }
     }
     var isError = message.is_error === true || (subtype.length && subtype !== "success");
     if (isError || claudeLooksLikeAuthenticationError(text)) {
