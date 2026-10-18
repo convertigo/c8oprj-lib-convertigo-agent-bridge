@@ -1279,6 +1279,7 @@
       "- Do not use shell, `rg`, or filesystem scans to rediscover MCP tool signatures already exposed by the MCP schemas and the skills.",
       "- Reply to the user in their language. Keep progress updates short and factual, and never expose hidden reasoning.",
       "- When you change a project, validate the result with the available Convertigo tools before claiming completion.",
+      "- Keep your plan visible: create its steps with TaskCreate and move them with TaskUpdate (pending, in_progress, completed); load the two tools once with ToolSearch \"select:TaskCreate,TaskUpdate\". The Convertigo Assistant shows this list to the user as the plan.",
       "",
       "Provider: Claude"
     ].filter(function (line) { return line !== ""; }).join("\n");
