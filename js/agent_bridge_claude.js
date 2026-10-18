@@ -136,6 +136,8 @@
     var serverName = managedMcpServerName(options);
     var headers = {};
     headers["X-Convertigo-Guidance-Version"] = codexSkillGuidanceVersion(homePath, options);
+    // Claude reads images and runs its own sub-agents: the MCP leaves out the tools that would call a gateway model.
+    headers["X-Convertigo-Agent-Provider"] = "claude";
     if (usesProtectedConvertigoMcp(mcpEndpoint, options)) {
       headers.Authorization = "Bearer ${" + mcpBearerTokenEnv(options) + "}";
     }
