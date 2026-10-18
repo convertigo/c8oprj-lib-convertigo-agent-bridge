@@ -159,6 +159,33 @@ assert.equal(finalAnswer.data.text, "Aucun projet.");
 assert.equal(types[types.length - 1], "turn/end");
 assert.equal(entry.status, "completed");
 
+// Skill calls acknowledge the managed skills: the next turns no longer ask for a reread (run 9).
+{
+  const skillEntry = fakeEntry();
+  skillEntry.home = { path: "/tmp/claude-home" };
+  skillEntry.managedSkillBundle = {
+    ready: true, fingerprint: "f1", refreshRequired: true, skills: {},
+    slugs: ["convertigo-studio", "convertigo-generalist"], pendingSlugs: ["convertigo-studio", "convertigo-generalist"]
+  };
+  const acknowledged = [];
+  const originalAcknowledge = acknowledgeManagedSkillBundle;
+  acknowledgeManagedSkillBundle = (home, bundle) => { acknowledged.push([home, bundle.fingerprint]); return true; };
+  try {
+    const skillCall = (id, name, input) => [
+      JSON.stringify({ type: "assistant", message: { id: "m" + id, content: [{ type: "tool_use", id, name, input }] } }),
+      JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] } })
+    ];
+    skillCall("s1", "Skill", { skill: "convertigo-studio" }).forEach((line) => handleClaudeStreamLine(skillEntry, line, "stdout"));
+    assert.equal(acknowledged.length, 0, "one skill out of two is not an acknowledgement");
+    skillCall("s2", "Read", { file_path: "/tmp/claude-home/skills/convertigo-generalist/SKILL.md" }).forEach((line) => handleClaudeStreamLine(skillEntry, line, "stdout"));
+    assert.deepEqual(acknowledged, [["/tmp/claude-home", "f1"]]);
+    assert.equal(skillEntry.managedSkillBundle.refreshRequired, false);
+    assert.ok(skillEntry._events.some((event) => event.type === "guidance/acknowledged"));
+  } finally {
+    acknowledgeManagedSkillBundle = originalAcknowledge;
+  }
+}
+
 // Authentication failures surface as turn errors.
 const authEntry = fakeEntry();
 handleClaudeStreamLine(authEntry, JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "Not logged in · Please run /login" }), "stdout");

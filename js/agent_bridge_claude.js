@@ -2520,6 +2520,10 @@
       var block = content[i] || {};
       if (block.type === "tool_use") {
         claudeRegisterToolUse(entry, block);
+        var skillSlugs = claudeManagedSkillSlugsOfToolUse(entry, block);
+        if (skillSlugs.length && entry.claudeToolCalls[block.id]) {
+          entry.claudeToolCalls[block.id].skillSlugs = skillSlugs;
+        }
         if (block.name === "TaskUpdate" && block.input && block.input.taskId != null && block.input.subject) {
           entry.claudeTaskSubjects = entry.claudeTaskSubjects || {};
           entry.claudeTaskSubjects[String(block.input.taskId)] = String(block.input.subject);
@@ -2591,6 +2595,54 @@
     } catch (_ignoreTasks) {}
   }
 
+  // The managed skills that a Skill call or a Read of their SKILL.md loads.
+  function claudeManagedSkillSlugsOfToolUse(entry, block) {
+    var bundle = entry && entry.managedSkillBundle;
+    var input = block && block.input ? block.input : {};
+    var slug = "";
+    if (block && block.name === "Skill") {
+      slug = trim(input.skill).replace(/^.*:/, "");
+    } else if (block && block.name === "Read") {
+      var match = String(input.file_path || "").replace(/\\/g, "/").match(/\/skills\/([^\/]+)\/SKILL\.md$/);
+      slug = match ? match[1] : "";
+    }
+    if (!slug.length || !bundle || !bundle.slugs || bundle.slugs.indexOf(slug) === -1) {
+      return [];
+    }
+    return [slug];
+  }
+
+  // The turn preamble asks the agent to reread the managed skills until the bridge records their
+  // reads. Codex records them; Claude did not, so every turn asked for a reread although nothing
+  // had changed (run 9). Its Skill calls and SKILL.md reads are recorded here.
+  function claudeRecordManagedSkillReads(entry, slugs) {
+    var bundle = entry && entry.managedSkillBundle;
+    if (!bundle || bundle.refreshRequired !== true || !slugs || !slugs.length) {
+      return;
+    }
+    entry.managedSkillBundleReadSlugs = entry.managedSkillBundleReadSlugs || {};
+    for (var i = 0; i < slugs.length; i++) {
+      entry.managedSkillBundleReadSlugs[slugs[i]] = true;
+    }
+    var pending = bundle.pendingSlugs || [];
+    for (var j = 0; j < pending.length; j++) {
+      if (entry.managedSkillBundleReadSlugs[pending[j]] !== true) {
+        return;
+      }
+    }
+    if (acknowledgeManagedSkillBundle(entry.home && entry.home.path, bundle)) {
+      bundle.acknowledgedFingerprint = bundle.fingerprint;
+      bundle.acknowledgedAt = now();
+      bundle.refreshRequired = false;
+      bundle.pendingSlugs = [];
+      pushEvent(entry, "guidance/acknowledged", {
+        provider: "claude",
+        fingerprint: bundle.fingerprint,
+        skills: pending.slice(0)
+      });
+    }
+  }
+
   function claudeHandleUserMessage(entry, message) {
     claudeTrackTasks(entry, message);
     var payload = message.message || {};
@@ -2606,6 +2658,9 @@
       var callId = String(block.tool_use_id || "");
       var known = entry.claudeToolCalls ? entry.claudeToolCalls[callId] : null;
       var failed = block.is_error === true;
+      if (known && known.skillSlugs && !failed) {
+        claudeRecordManagedSkillReads(entry, known.skillSlugs);
+      }
       pushEvent(entry, "tool/update", {
         title: known ? known.title : "tool",
         toolName: known ? known.name : "",
