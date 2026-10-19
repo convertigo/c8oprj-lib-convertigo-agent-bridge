@@ -448,6 +448,106 @@ assert.equal(envDoctor.configured, true);
 
 console.log("Claude doctor authentication OK");
 
+// Homebrew discovery uses both the symlink (full settings) and the real binary
+// (presence-only login). They must share a verdict, including across executions.
+function withLoginCacheFixture(body, javaStore) {
+  const path = require("node:path");
+  const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "claude auth cache-"));
+  const binary = path.join(root, "Caskroom", "claude");
+  const alias = path.join(root, "bin", "claude");
+  const home = path.join(root, "claude-home");
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  fs.mkdirSync(home);
+  fs.writeFileSync(binary, "test fixture, never executed");
+  // Directory junctions also let Windows runners exercise canonical aliases
+  // without requiring the privilege needed to create a file symlink.
+  fs.symlinkSync(path.dirname(binary), path.dirname(alias), process.platform === "win32" ? "junction" : "dir");
+  const originals = { File, hashShort, resolveWorkspaceRoot, fileHasContent, readJsonFile,
+    writeTextFile, ensureDirectory, acquireFileLock, claudeAuthProbeCacheMap,
+    inspectClaudeAuthentication, claudeAuthenticationProbe, expireLoginProcess,
+    loginProcessOutput, processAlive, loginProcessExitCode, claudeLoginCapturedUrl };
+  const memory = {};
+  let loggedIn = false;
+  let probes = 0;
+  File = class {
+    constructor(parent, child) { this.path = child === undefined ? String(parent) : path.join(String(parent), String(child)); }
+    toString() { return this.path; }
+    getCanonicalPath() { return fs.existsSync(this.path) ? fs.realpathSync(this.path) : path.resolve(this.path); }
+    getParentFile() { return new File(path.dirname(this.path)); }
+  };
+  hashShort = (value) => require("node:crypto").createHash("sha256").update(String(value)).digest("hex").slice(0, 16);
+  resolveWorkspaceRoot = () => root;
+  fileHasContent = (file) => fs.existsSync(String(file)) && fs.statSync(String(file)).size > 0;
+  readJsonFile = (file) => fileHasContent(file) ? JSON.parse(fs.readFileSync(String(file), "utf8")) : null;
+  writeTextFile = (file, text) => fs.writeFileSync(String(file), text);
+  ensureDirectory = (file) => fs.mkdirSync(String(file), { recursive: true });
+  acquireFileLock = () => ({ release() {} });
+  const cache = javaStore ? {
+    get: (key) => memory[key], put: (key, value) => { memory[key] = value; },
+    remove: (key) => { delete memory[key]; }
+  } : memory;
+  claudeAuthProbeCacheMap = () => cache;
+  inspectClaudeAuthentication = () => ({ configured: loggedIn, status: loggedIn ? "configured" : "missing", method: "scoped_home", home });
+  claudeAuthenticationProbe = () => {
+    probes += 1;
+    return { checked: true, conclusive: true, valid: loggedIn, unauthorized: !loggedIn,
+      loggedIn, authMethod: loggedIn ? "claude.ai" : "none", reason: loggedIn ? "logged_in" : "logged_out" };
+  };
+  expireLoginProcess = () => false;
+  loginProcessOutput = () => "";
+  processAlive = () => false;
+  loginProcessExitCode = () => 0;
+  claudeLoginCapturedUrl = () => "";
+  try {
+    body({ alias, binary, home, memory,
+      persisted: () => readJsonFile(claudeAuthProbeCacheFile({})).checks,
+      probes: () => probes, signIn: () => { loggedIn = true; } });
+  } finally {
+    for (const [name, value] of Object.entries(originals)) { global[name] = value; }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+withLoginCacheFixture((fixture) => {
+  assert.equal(claudeDoctorAuthentication({}, fixture.home, fixture.alias, false).configured, false);
+  assert.equal(claudeDoctorAuthentication({}, fixture.home, fixture.binary, false).configured, false);
+  assert.equal(fixture.probes(), 1, "the Homebrew link and its target must reuse one auth probe");
+  assert.equal(Object.keys(fixture.persisted()).length, 1, "only one verdict is persisted per canonical binary and home");
+  // Simulate a fresh sequence execution with only the file cache available.
+  for (const key of Object.keys(fixture.memory)) { delete fixture.memory[key]; }
+  claudeDoctorAuthentication({}, fixture.home, fixture.alias, false);
+  assert.equal(fixture.probes(), 1, "the persisted canonical verdict survives a new execution");
+});
+
+[false, true].forEach((javaStore) => withLoginCacheFixture((fixture) => {
+  claudeDoctorAuthentication({}, fixture.home, fixture.alias, false);
+  claudeCachedAuthenticationProbe("other-user", {}, () => ({ conclusive: true, valid: false }));
+  fixture.signIn();
+  const entry = { home: fixture.home, commandPath: fixture.binary };
+  assert.equal(publicClaudeLogin(entry, {}).authenticated, true);
+  assert.equal(fixture.probes(), 2, "login must force a real check despite the cached failure");
+  assert.deepEqual(Object.keys(fixture.memory), ["other-user"], "successful login invalidates this home's in-memory verdict");
+  assert.deepEqual(Object.keys(fixture.persisted()), ["other-user"], "successful login also invalidates its persisted verdict");
+  assert.equal(claudeDoctorAuthentication({}, fixture.home, fixture.alias, false).configured, true,
+    "settings immediately see the successful sign-in through the other command path");
+  assert.equal(fixture.probes(), 3);
+  publicClaudeLogin(entry, {});
+  claudeDoctorAuthentication({}, fixture.home, fixture.binary, false);
+  assert.equal(fixture.probes(), 3, "repeated completed-login polls must not keep invalidating the new verdict");
+}, javaStore));
+
+withLoginCacheFixture((fixture) => {
+  claudeDoctorAuthentication({}, fixture.home, fixture.alias, false);
+  const entry = { home: fixture.home, commandPath: fixture.binary };
+  assert.equal(publicClaudeLogin(entry, {}).authenticated, false);
+  assert.equal(Object.keys(fixture.memory).length, 1, "a failed login retains its conclusive negative verdict");
+  assert.equal(Object.keys(fixture.persisted()).length, 1);
+  claudeDoctorAuthentication({}, fixture.home, fixture.alias, false);
+  assert.equal(fixture.probes(), 2, "failed login still benefits from the normal cache window");
+});
+
+console.log("Claude Homebrew authentication cache and login invalidation OK");
+
 // ---------------------------------------------------------------------------
 // 6. Turn-error mapping: the wordings a revoked session really produces.
 // ---------------------------------------------------------------------------

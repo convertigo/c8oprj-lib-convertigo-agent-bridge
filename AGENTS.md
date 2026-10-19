@@ -96,6 +96,10 @@ same context.
 - Authentication mirrors Codex: sync `.credentials.json` from `~/.claude` or the
   user-scoped home, or import it from the macOS keychain; verify with
   `claude auth status`. Never log or return token values.
+- Authentication probe cache keys use canonical CLI and home paths so Homebrew
+  symlinks share one verdict. A successful login invalidates that entry in both
+  memory and `agents/claude-auth-checks.json` once; repeated completed-login
+  polls keep the new verdict cached. Run `node tests/claude_authentication.test.js`.
 - Playwright viewer automation is not wired for Claude yet; `CLAUDE.md` tells
   the agent to report unvalidated browser proof instead of bypassing.
 - Tests: `node tests/claude_provider.test.js`.
