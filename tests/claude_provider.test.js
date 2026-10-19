@@ -692,6 +692,30 @@ console.log("Vibe image attachment contract OK");
   new vm.Script(guardLines.join("\n"));
   assert.ok(guardLines.some(l => l.includes("process.ppid !== startedUnder")) && guardLines.some(l => l.includes("process.kill(owner, 0)")));
   assert.equal(agentGuardedCommand({ command: ["vibe-acp"] }, { agentProcessGuard: "false" }).reason, "disabled");
+  // Version 2 also stops what the agent detached, on every way out, and the Bridge gives it the time to.
+  assert.ok(guardLines.some(l => l.includes("C8O_AGENT_GUARD: markValue")), "the agent and its processes inherit the mark");
+  assert.ok(guardLines.some(l => l.includes("if (!stopping) { stopping = true; sweep(); }")), "an agent that ends by itself takes its leftovers along");
+  assert.match(commonSource, /if \(entry\.guarded === true\) \{\s*stopThroughGuard\(/);
+  assert.match(commonSource, /Guards first, all at once/);
+  if (process.platform !== "win32") {
+    // The case seen in run 9b: the agent starts a server with nohup, its shell exits, the server is
+    // re-parented to launchd. A Node server stands for it here.
+    const os = require("node:os"), path = require("node:path"), childProcess = require("node:child_process");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "c8o-guard-"));
+    const script = path.join(dir, "agent-guard.cjs");
+    fs.writeFileSync(script, guardLines.join("\n"));
+    const tag = "c8o-guard-leftover-" + process.pid;
+    const leftovers = () => (childProcess.spawnSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8" }).stdout || "")
+      .split("\n").filter(line => line.includes(tag)).map(line => Number(line.trim().split(/\s+/)[0]));
+    const run = childProcess.spawnSync(process.execPath, [script, String(process.pid), "--", "/bin/sh", "-c",
+      "nohup '" + process.execPath + "' -e 'setTimeout(() => {}, 60000)' " + tag + " >/dev/null 2>&1 & sleep 1; exit 3"], { timeout: 20000 });
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    const left = leftovers();
+    left.forEach(pid => { try { process.kill(pid, "SIGKILL"); } catch (e) {} });
+    fs.rmSync(dir, { recursive: true, force: true });
+    assert.equal(run.status, 3, "the guard keeps the agent's exit code");
+    assert.deepEqual(left, [], "the detached process is stopped with its agent");
+  }
 }
 
 // Stop interrupts the turn and keeps the agent; one thin adapter per protocol.
