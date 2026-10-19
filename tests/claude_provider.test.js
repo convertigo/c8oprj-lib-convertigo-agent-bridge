@@ -56,10 +56,16 @@ assert.match(buildConvertigoStudioRouterSkill(false), /convertigo-flow/);
 assert.match(buildConvertigoStudioRouterSkill(false), /same agent home/);
 assert.doesNotMatch(buildConvertigoStudioRouterSkill(true), /convertigo-flow/);
 assert.match(buildConvertigoStudioRouterSkill(true), /agent home/);
+const flowConfig = buildClaudeMcpConfig("http://localhost:18080/convertigo/api/mcp", { userId: "studio" }, "").mcpServers;
+assert.ok(flowConfig.convertigo && flowConfig["convertigo-flow"], "a Studio Claude home reaches both MCP servers");
+assert.match(flowConfig["convertigo-flow"].url, /\/convertigo\/api\/flow-mcp(?:\?|$)/);
+assert.deepEqual(flowConfig["convertigo-flow"].headers, flowConfig.convertigo.headers);
+assert.equal(buildClaudeMcpConfig("http://localhost:18080/convertigo/api/mcp", { userId: "someone", skillProfile: "nocode" }, "").mcpServers["convertigo-flow"], undefined);
 // Without Flow, the Claude bundle stays standard Convertigo.
 flowCapabilityAvailability = () => ({ available: false });
 assert.deepEqual(managedSkillBundleSlugs({}, "claude"), ["convertigo-studio", "convertigo-generalist"]);
 assert.doesNotMatch(buildConvertigoStudioRouterSkill(false), /convertigo-flow/);
+assert.equal(buildClaudeMcpConfig("http://localhost:18080/convertigo/api/mcp", { userId: "studio" }, "").mcpServers["convertigo-flow"], undefined);
 flowCapabilityAvailability = () => ({ available: true });
 
 // Effort and command line.

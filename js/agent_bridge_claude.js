@@ -159,6 +159,15 @@
       url: managedMcpTransportEndpoint(mcpEndpoint),
       headers: headers
     };
+    // A Studio home with Flow available also reaches the Flow MCP (same token and headers), as Codex does.
+    var flowServerName = AGENT_CAPABILITY_PROFILES.flow.mcpServerName;
+    if (serverName !== flowServerName && normalizeSkillProfile(options) !== "nocode" && flowCapabilityAvailable()) {
+      servers[flowServerName] = {
+        type: "http",
+        url: managedMcpTransportEndpoint(mcpEndpointForProfile({ mcpEndpoint: mcpEndpoint }, "flow")),
+        headers: JSON.parse(JSON.stringify(headers))
+      };
+    }
     var playwright = claudePlaywrightServer(options);
     if (playwright !== null) {
       servers.playwright = playwright;
