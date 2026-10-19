@@ -159,6 +159,28 @@ assert.equal(finalAnswer.data.text, "Aucun projet.");
 assert.equal(types[types.length - 1], "turn/end");
 assert.equal(entry.status, "completed");
 
+// The input of a call reaches the Assistant with its result: the tool/start of a streamed call carries {} (run 13, Read of a PNG).
+{
+  const readEntry = fakeEntry();
+  const big = "x".repeat(5000);
+  [
+    JSON.stringify({ type: "stream_event", event: { type: "message_start", message: { id: "m2" } } }),
+    JSON.stringify({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_r", name: "Read", input: {} } } }),
+    JSON.stringify({ type: "stream_event", event: { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "toolu_w", name: "Write", input: {} } } }),
+    JSON.stringify({ type: "assistant", message: { id: "m2", content: [
+      { type: "tool_use", id: "toolu_r", name: "Read", input: { file_path: "/ws/.playwright-mcp/home.png" } },
+      { type: "tool_use", id: "toolu_w", name: "Write", input: { file_path: "/ws/a.txt", content: big, meta: { a: 1 } } }] } }),
+    JSON.stringify({ type: "user", message: { role: "user", content: [
+      { type: "tool_result", tool_use_id: "toolu_r", content: [{ type: "image", source: { type: "base64", data: "AAAA" } }] },
+      { type: "tool_result", tool_use_id: "toolu_w", content: "ok" }] } })
+  ].forEach((line) => handleClaudeStreamLine(readEntry, line, "stdout"));
+  const updates = readEntry._events.filter((event) => event.type === "tool/update");
+  assert.deepEqual(updates[0].data.input, { file_path: "/ws/.playwright-mcp/home.png" });
+  assert.equal(updates[1].data.input.file_path, "/ws/a.txt");
+  assert.equal(updates[1].data.input.content.length, 301, "a long argument is cut, not copied whole");
+  assert.equal(updates[1].data.input.meta, undefined, "objects are left out");
+}
+
 // Skill calls acknowledge the managed skills: the next turns no longer ask for a reread (run 9).
 {
   const skillEntry = fakeEntry();

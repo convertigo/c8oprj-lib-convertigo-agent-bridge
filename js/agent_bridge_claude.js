@@ -2568,6 +2568,12 @@
       var block = content[i] || {};
       if (block.type === "tool_use") {
         claudeRegisterToolUse(entry, block);
+        // With partial messages the tool/start went out at content_block_start, when the input was still {}:
+        // keep the complete input now, for the tool/update of its result (the Assistant shows the image a Read names).
+        var inputSummary = claudeToolInputSummary(block.input);
+        if (inputSummary && entry.claudeToolCalls[block.id]) {
+          entry.claudeToolCalls[block.id].input = inputSummary;
+        }
         var skillSlugs = claudeManagedSkillSlugsOfToolUse(entry, block);
         if (skillSlugs.length && entry.claudeToolCalls[block.id]) {
           entry.claudeToolCalls[block.id].skillSlugs = skillSlugs;
@@ -2715,9 +2721,35 @@
         status: failed ? "failed" : "completed",
         callId: callId,
         detail: claudePreview(block.content),
+        input: known && known.input ? known.input : undefined,
         provider: "claude"
       });
     }
+  }
+
+  // The scalar arguments of a call (file_path, path, filename, a command...), each cut to 300 characters: enough for the
+  // Assistant to name the file of a Read or a screenshot, without copying a Write's content or a batch into the history.
+  function claudeToolInputSummary(input) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      return null;
+    }
+    var summary = {};
+    var count = 0;
+    for (var key in input) {
+      if (!Object.prototype.hasOwnProperty.call(input, key) || count >= 20) {
+        continue;
+      }
+      var value = input[key];
+      if (typeof value === "string") {
+        summary[key] = value.length > 300 ? value.substring(0, 300) + "…" : value;
+      } else if (typeof value === "number" || typeof value === "boolean") {
+        summary[key] = value;
+      } else {
+        continue;
+      }
+      count++;
+    }
+    return count ? summary : null;
   }
 
   function claudeLooksLikeAuthenticationError(text) {
