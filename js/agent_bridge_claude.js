@@ -1251,6 +1251,16 @@
 
   // Managed home -----------------------------------------------------------
 
+  // The directory Claude Code runs in (and Playwright MCP with it): the workspace root unless a cwd is given, as claudeStart does.
+  function claudeWorkingDir(options) {
+    var root = resolveWorkspaceRoot(options || {});
+    return filePath(new File(normalizeDirectory((options || {}).cwd, root, root)));
+  }
+
+  function claudePlaywrightOutputDir(options) {
+    return claudeWorkingDir(options) + "/.playwright-mcp";
+  }
+
   function claudeInstructions(options, profile) {
     var capabilityProfile = agentCapabilityProfile({ agentProfile: profile });
     var isNoCode = capabilityProfile.id === "nocode";
@@ -1269,7 +1279,8 @@
       "- For viewer automation, use the managed `playwright` MCP server tools (`mcp__playwright__browser_tabs`, `mcp__playwright__browser_snapshot`, `mcp__playwright__browser_click`, `mcp__playwright__browser_evaluate`, ...). They are attached to the Studio JxBrowser viewer over CDP. Do not run ad hoc scripts with `require('playwright')`, raw CDP, or a separate browser.",
       "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`. If the browser target is `about:blank` while builder status is `building`, poll `mobile-builder-open(stateOnly=true, wait=true)` first.",
       "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
-      "- Playwright MCP files live in `.playwright-mcp/` under your working directory: screenshots go there, and a file the viewer downloads (an export) is saved without any dialog in `.playwright-mcp/downloads/`, where you can read it. Playwright MCP only reads files inside your working directory: write `browser_run_code_unsafe` scripts in `.playwright-mcp/scripts/` and pass that relative path.",
+      // The absolute path: "under your working directory" was read as the Studio workspace, where the screenshot was not (run 10).
+      "- Playwright MCP files live in `" + claudePlaywrightOutputDir(options) + "`: screenshots go there (read them at that path), and a file the viewer downloads (an export) is saved without any dialog in `" + claudePlaywrightOutputDir(options) + "/downloads/`. Playwright MCP only reads files inside `" + claudeWorkingDir(options) + "`: write `browser_run_code_unsafe` scripts in `" + claudePlaywrightOutputDir(options) + "/scripts/` and pass that path.",
       "- If the `playwright` MCP server is unavailable, disabled, still on `about:blank`, or attached to another endpoint after readiness, report the host configuration problem to the user instead of bypassing it; if no viewer automation is configured at all, report the result as implemented but functionally unvalidated.",
       "- If `mobile-builder-open(stateOnly=true)` returns `status:\"stopped\"`, immediately call it once with `stateOnly=false, wait=false`; do not spend a timeout polling an inactive builder.",
       "- If a prompt says Convertigo runtime reveal mode is enabled, pass `reveal:true` only on supported Convertigo mutation/viewer tools; do not add it to read-only calls.",

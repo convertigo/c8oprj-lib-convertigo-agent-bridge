@@ -223,7 +223,7 @@ assert.match(claudeSourceText, /mcp__playwright__browser_tabs/, "Claude instruct
 assert.match(commonSourceText, /Browser\.setDownloadBehavior\\", \{ behavior: \\"allow\\"/, "the Playwright init page must make the viewer save downloads without a dialog");
 assert.equal((claudeSourceText.match(/\.concat\(playwrightViewerInitArgs\(installDir\)\)/g) || []).length, 1, "Claude's npx Playwright launch must load the viewer init page");
 assert.equal((commonSourceText.match(/\.concat\(playwrightViewerInitArgs\(installDir\)\)/g) || []).length, 3, "the direct, Codex and Vibe Playwright launches must load the viewer init page");
-assert.match(claudeSourceText, /\.playwright-mcp\/downloads\//, "Claude instructions must say where viewer downloads land");
+assert.match(claudeSourceText, /claudePlaywrightOutputDir\(options\) \+ "\/downloads\/`/, "Claude instructions must give the absolute path where viewer downloads land");
 assert.match(commonSourceText, /name = "playwright"',\s*\n\s*'transport = "stdio"'/, "Vibe config must declare the Playwright stdio server");
 assert.match(commonSourceText, /"X-Convertigo-Viewer-Debug-Port" = "' \+ String\(viewerDebugPort\)/, "Vibe config must send the viewer debug port header");
 assert.match(vibeSourceText, /ensureManagedViewerDebugPort\(options\)/, "vibeStart must lease a viewer debug port");
