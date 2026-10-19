@@ -1812,7 +1812,9 @@
         command.push(entry.mcpConfigFile);
         command.push("--strict-mcp-config");
       }
-      if (trim(entry.model).length && trim(entry.model).toLowerCase() !== "default") {
+      // A gateway model goes through ANTHROPIC_MODEL only, as in the claude-glm launcher: --model with a name outside
+      // Claude's catalog is refused.
+      if (trim(entry.model).length && trim(entry.model).toLowerCase() !== "default" && !claudeGatewayModel(entry.model)) {
         command.push("--model");
         command.push(trim(entry.model));
       }
@@ -1972,6 +1974,33 @@
     var pinnedModel = trim(options.model || options.agentModel);
     if (/^claude-[a-z]+-\d/.test(pinnedModel)) {
       ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"].forEach(function (name) { env[name] = pinnedModel; });
+    }
+    // A gateway model (provider/model, as mistral/zai-glm-5-3) runs Claude Code on the Convertigo LiteLLM gateway, the
+    // way the claude-glm launcher does: the gateway's Anthropic messages route, the Studio user's gateway key, and every
+    // model alias on that model. Claude's own sign-in is not used for the model calls then.
+    if (claudeGatewayModel(pinnedModel)) {
+      var gatewayKey = convertigoGatewayApiKey(options, "");
+      if (!gatewayKey.length) {
+        return {
+          ok: false,
+          status: "error",
+          phase: "setup",
+          error: "The Convertigo agent key is required to run Claude Code on the gateway model " + pinnedModel + ".",
+          timestamp: now()
+        };
+      }
+      env.ANTHROPIC_BASE_URL = convertigoGatewayUrl(options).replace(/\/v1$/, "");
+      env.ANTHROPIC_AUTH_TOKEN = gatewayKey;
+      // With the Claude subscription login of the managed home, Claude Code refuses a model outside its catalog
+      // (claude-code:unrecognized_model) and sends the subscription token to the gateway (401). It runs in a sibling home
+      // without that login: same instructions, settings and skills.
+      var gatewayHome = claudeGatewayHome(setup.setup.claudeHome);
+      if (gatewayHome.length) {
+        env.CLAUDE_CONFIG_DIR = gatewayHome;
+        env.CLAUDE_SECURESTORAGE_CONFIG_DIR = gatewayHome;
+      }
+      ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
         "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"].forEach(function (name) { env[name] = pinnedModel; });
     }
     var extraEnv = parseObject(options.env, {});
@@ -2988,6 +3017,50 @@
       entry.pending.put(id, { method: "initialize", done: false, error: "" });
       writeJson(entry, { type: "control_request", request_id: id, request: { subtype: "initialize" } });
     } catch (_ignoreCommandsRequest) {}
+  }
+
+  // <conversation>/claude-home-gateway: the managed home's CLAUDE.md, settings and skills, and its .claude.json without the
+  // subscription account. Rewritten at each start, so the instructions and skills follow the managed home.
+  function claudeGatewayHome(homePath) {
+    try {
+      var home = new File(trim(homePath));
+      if (!home.isDirectory()) {
+        return "";
+      }
+      var gateway = new File(home.getParentFile(), home.getName() + "-gateway");
+      ensureDirectory(gateway);
+      ["CLAUDE.md", "settings.json"].forEach(function (name) {
+        var source = new File(home, name);
+        if (source.isFile()) {
+          copyFileBinary(source, new File(gateway, name));
+        }
+      });
+      var skills = new File(home, "skills");
+      if (skills.isDirectory()) {
+        copyDirectoryTree(skills, new File(gateway, "skills"));
+      }
+      var state = {};
+      try {
+        var stateFile = new File(home, ".claude.json");
+        state = stateFile.isFile() ? JSON.parse(String(readTextFile(stateFile))) : {};
+      } catch (_ignoreGatewayState) {}
+      var kept = { hasCompletedOnboarding: true };
+      ["projects", "firstStartTime", "userID", "machineID", "migrationVersion", "seenNotifications"].forEach(function (key) {
+        if (state[key] !== undefined) {
+          kept[key] = state[key];
+        }
+      });
+      writeTextFile(new File(gateway, ".claude.json"), JSON.stringify(kept, null, 2));
+      return filePath(gateway);
+    } catch (_ignoreGatewayHome) {
+      return "";
+    }
+  }
+
+  // A model of the Convertigo gateway is named provider/model (mistral/zai-glm-5-3); Claude models are not.
+  function claudeGatewayModel(model) {
+    var name = trim(model);
+    return name.indexOf("/") > 0 && !/^claude-/.test(name);
   }
 
   function claudeControlRequest(entry, subtype, params, timeoutMs) {

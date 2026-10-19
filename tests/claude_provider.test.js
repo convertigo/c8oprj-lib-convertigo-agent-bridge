@@ -250,6 +250,19 @@ function commonSourceOrClaude() { return fs.readFileSync("js/agent_bridge_claude
   assert.match(commonSourceOrClaude(), /var menuCommand = claudeMenuCommandOf\(entry, promptText\);[\s\S]{0,200}?if \(managedPreflightCurrent && !menuCommand\.length\)/);
 }
 
+// A gateway model (mistral/zai-glm-5-3) runs Claude Code on the Convertigo LiteLLM gateway, like the claude-glm launcher:
+// the gateway key, every model alias on that model, no --model flag, and a home without the subscription login.
+{
+  assert.equal(claudeGatewayModel("mistral/zai-glm-5-3"), true);
+  assert.equal(claudeGatewayModel("claude-sonnet-5-5"), false);
+  assert.equal(claudeGatewayModel("sonnet"), false);
+  const claudeSource = fs.readFileSync("js/agent_bridge_claude.js", "utf8");
+  assert.match(claudeSource, /if \(claudeGatewayModel\(pinnedModel\)\) \{[\s\S]{0,900}env\.ANTHROPIC_AUTH_TOKEN = gatewayKey;[\s\S]{0,900}env\.CLAUDE_CONFIG_DIR = gatewayHome;/);
+  assert.match(claudeSource, /!claudeGatewayModel\(entry\.model\)\) \{\s*command\.push\("--model"\);/);
+  assert.doesNotMatch(claudeSource.match(/function claudeGatewayHome[\s\S]*?\n  \}\n/)[0], /credentials|oauthAccount/,
+    "the gateway home never receives the subscription login");
+}
+
 // Authentication failures surface as turn errors.
 const authEntry = fakeEntry();
 handleClaudeStreamLine(authEntry, JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "Not logged in · Please run /login" }), "stdout");
