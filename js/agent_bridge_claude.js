@@ -1305,16 +1305,24 @@
   function claudeInstructions(options, profile) {
     var capabilityProfile = agentCapabilityProfile({ agentProfile: profile });
     var isNoCode = capabilityProfile.id === "nocode";
+    // A Studio home with Flow available holds both packs: the router picks one per task.
+    var routed = !isNoCode && flowCapabilityAvailable();
     return [
       "# Convertigo Agent Instructions",
       "",
       "You are Claude Code running inside a Convertigo-integrated local agent session (Tigo).",
       "",
-      "- Active authoring policy: `" + capabilityProfile.authoringPolicy + "` (" + capabilityProfile.label + ").",
+      routed
+        ? "- Active authoring policy: Legacy or Flow, routed per task by the `convertigo-studio` skill."
+        : "- Active authoring policy: `" + capabilityProfile.authoringPolicy + "` (" + capabilityProfile.label + ").",
       isNoCode
         ? "- Automatically follow the Convertigo NoCode workflow for C8Oforms / No-Code Studio work: invoke the `convertigo-nocode` skill before the first no-code operation."
-        : "- Invoke the `convertigo-studio` skill first, then the `convertigo-generalist` skill, before the first Convertigo authoring operation of a conversation.",
-      "- Use the `" + capabilityProfile.mcpServerName + "` MCP server (tools named `mcp__" + capabilityProfile.mcpServerName + "__*`) whenever you need to inspect, modify, save, reload, or validate Convertigo projects.",
+        : routed
+          ? "- Invoke the `convertigo-studio` skill first, before the first Convertigo authoring operation of a conversation. It names the one capability pack to read: `convertigo-generalist` for Legacy or NGX work, or `convertigo-flow-mcp` plus only the specialist skill the task needs for Flow work. Do not read the skills of the other pack."
+          : "- Invoke the `convertigo-studio` skill first, then the `convertigo-generalist` skill, before the first Convertigo authoring operation of a conversation.",
+      routed
+        ? "- Use the `convertigo` MCP server (tools named `mcp__convertigo__*`) for Legacy work and the `convertigo-flow` MCP server (tools named `mcp__convertigo-flow__*`) for Flow work, to inspect, modify, save, reload, or validate Convertigo projects."
+        : "- Use the `" + capabilityProfile.mcpServerName + "` MCP server (tools named `mcp__" + capabilityProfile.mcpServerName + "__*`) whenever you need to inspect, modify, save, reload, or validate Convertigo projects.",
       "- The Convertigo MCP server is the only source of truth for Convertigo projects. If it is unavailable, returns an authorization error (HTTP 401/403), or its tools are missing, stop immediately and report the configuration defect to the user. Never browse the workspace filesystem, project folders, or descriptors as a substitute for MCP.",
       "- When `mobile-builder-open` returns `browserDebugUrl`, `browserDevToolsJsonUrl`, or `browserDevToolsWebSocketUrl`, treat it as the visible Studio mobile viewer and prefer inspecting or driving that viewer over opening a separate browser.",
       "- For viewer automation, use the managed `playwright` MCP server tools (`mcp__playwright__browser_tabs`, `mcp__playwright__browser_snapshot`, `mcp__playwright__browser_click`, `mcp__playwright__browser_evaluate`, ...). They are attached to the Studio JxBrowser viewer over CDP. Do not run ad hoc scripts with `require('playwright')`, raw CDP, or a separate browser.",

@@ -61,11 +61,17 @@ assert.ok(flowConfig.convertigo && flowConfig["convertigo-flow"], "a Studio Clau
 assert.match(flowConfig["convertigo-flow"].url, /\/convertigo\/api\/flow-mcp(?:\?|$)/);
 assert.deepEqual(flowConfig["convertigo-flow"].headers, flowConfig.convertigo.headers);
 assert.equal(buildClaudeMcpConfig("http://localhost:18080/convertigo/api/mcp", { userId: "someone", skillProfile: "nocode" }, "").mcpServers["convertigo-flow"], undefined);
+const routedInstructions = claudeInstructions({ userId: "studio" }, "generalist");
+assert.match(routedInstructions, /routed per task by the `convertigo-studio` skill/);
+assert.match(routedInstructions, /Do not read the skills of the other pack/);
+assert.doesNotMatch(routedInstructions, /legacy-only/);
+assert.match(buildConvertigoStudioRouterSkill(false), /Flow work never needs `convertigo-generalist`/);
 // Without Flow, the Claude bundle stays standard Convertigo.
 flowCapabilityAvailability = () => ({ available: false });
 assert.deepEqual(managedSkillBundleSlugs({}, "claude"), ["convertigo-studio", "convertigo-generalist"]);
 assert.doesNotMatch(buildConvertigoStudioRouterSkill(false), /convertigo-flow/);
 assert.equal(buildClaudeMcpConfig("http://localhost:18080/convertigo/api/mcp", { userId: "studio" }, "").mcpServers["convertigo-flow"], undefined);
+assert.match(claudeInstructions({ userId: "studio" }, "generalist"), /then the `convertigo-generalist` skill/);
 flowCapabilityAvailability = () => ({ available: true });
 
 // Effort and command line.
