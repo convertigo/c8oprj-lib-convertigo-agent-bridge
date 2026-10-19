@@ -2034,6 +2034,7 @@
       startProcess(entry, env);
       entry.status = "running";
       entry.phase = "ready";
+      claudeRequestCommands(entry);
       pushEvent(entry, "system/start", {
         handle: handle,
         provider: "claude",
@@ -2221,14 +2222,19 @@
       }
       return C8O.agentBridge.claudePrompt(restartOptions);
     }
+    var menuCommand = claudeMenuCommandOf(entry, promptText);
     var managedPreflightCurrent = entry.home && trim(entry.home.path).length > 0;
-    if (managedPreflightCurrent) {
+    if (managedPreflightCurrent && !menuCommand.length) {
       promptText = withManagedGuidancePreflight(promptText, {
         mcpEndpoint: entry.mcpEndpoint,
         skillBundle: entry.managedSkillBundle
       });
     }
-    promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
+    if (menuCommand.length) {
+      promptText = trim(promptText);
+    } else {
+      promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
+    }
     var cursor = entry.nextIndex;
     var requestId = entry.nextRequestId++;
     entry.status = "running";
@@ -2798,6 +2804,10 @@
       var pending = entry.pending && entry.pending.get(String(reply.request_id));
       if (pending) {
         if (reply.subtype === "success" && pending.method === "get_usage") { recordClaudeUsage(entry,reply.response || {}); }
+        if (pending.method === "initialize") {
+          entry.pending.remove(String(reply.request_id));
+          if (reply.subtype === "success") { claudePushCommands(entry, (reply.response || {}).commands); }
+        }
         pending.error = reply.subtype === "success" ? "" : "Control request unavailable";
         pending.done = true;
       }
@@ -2816,6 +2826,10 @@
           if (String(servers[i] && servers[i].status || "") !== "connected") {
             failedServers.push(String(servers[i] && servers[i].name || "") + ":" + String(servers[i] && servers[i].status || ""));
           }
+        }
+        if (entry.claudeCommandsKnown !== true) {
+          // initialize did not answer (older Claude Code): the built-in commands of the menu, from the names alone.
+          claudePushCommands(entry, (message.slash_commands || []).map(function (name) { return { name: name, builtin: true }; }));
         }
         pushEvent(entry, "claude/init", {
           sessionId: String(message.session_id || ""),
@@ -2840,6 +2854,10 @@
             stopEntry(entry, false);
           } catch (_ignoreStopAfterMcpFailure) {}
         }
+        return;
+      }
+      if (subtype === "commands_changed") {
+        claudePushCommands(entry, message.commands);
         return;
       }
       pushEvent(entry, "claude/event", { method: "system/" + subtype, params: message, provider: "claude" });
@@ -2869,6 +2887,87 @@
       return;
     }
     pushEvent(entry, "claude/event", { method: type, params: message, provider: "claude" });
+  }
+
+  // Tigo's "/" menu: Claude Code lists its commands only in answer to the SDK's initialize request, then in
+  // system/commands_changed; the Bridge never asked, so Tigo offered only its own /mesures and /metrics with Claude.
+  // The menu takes the managed Convertigo skills and the built-in commands that answer in this stream-json mode
+  // without touching what the Bridge drives: /clear, /model, /effort or /mcp would put the conversation out of step
+  // with Tigo. The account's other skills (pptx, morning...) stay usable by the agent but are left out of the menu.
+  var CLAUDE_MENU_BUILTINS = {
+    compact: "Free up context by summarizing the conversation so far",
+    context: "Show current context usage",
+    cost: "Show the total cost and duration of the current session"
+  };
+
+  function claudeMenuCommands(list, skillSlugs) {
+    var skills = {};
+    for (var s = 0; skillSlugs && s < skillSlugs.length; s++) {
+      skills[String(skillSlugs[s])] = true;
+    }
+    var out = [];
+    for (var i = 0; list && i < list.length && out.length < 40; i++) {
+      var command = list[i] || {};
+      var name = trim(command.name).replace(/^\//, "");
+      if (!/^[A-Za-z0-9_:-]+$/.test(name) || name.indexOf("__") === 0) {
+        continue;
+      }
+      if (command.builtin === true ? !Object.prototype.hasOwnProperty.call(CLAUDE_MENU_BUILTINS, name)
+        : (skillSlugs && skillSlugs.length && skills[name] !== true)) {
+        continue;
+      }
+      var item = { name: name, description: trim(command.description) || CLAUDE_MENU_BUILTINS[name] || "" };
+      if (trim(command.argumentHint).length) {
+        item.input = { hint: trim(command.argumentHint) };
+      }
+      out.push(item);
+    }
+    return out;
+  }
+
+  function claudeManagedSkillSlugs(entry) {
+    var slugs = entry && entry.managedSkillBundle && entry.managedSkillBundle.slugs;
+    return slugs && slugs.length ? slugs : [];
+  }
+
+  function claudePushCommands(entry, list) {
+    var commands = claudeMenuCommands(list, claudeManagedSkillSlugs(entry));
+    if (!commands.length) {
+      return;
+    }
+    entry.claudeCommandNames = {};
+    for (var c = 0; c < commands.length; c++) {
+      entry.claudeCommandNames[commands[c].name] = true;
+    }
+    if (list && list.length && list[0] && typeof list[0].description !== "undefined") {
+      entry.claudeCommandsKnown = true;
+    }
+    pushEvent(entry, "commands/update", { update: { availableCommands: commands }, provider: "claude" });
+  }
+
+  // A prompt that starts with a command of the menu ("/compact keep the SQL decisions"): Claude Code runs it only
+  // when the message starts with it, so it goes without the preflight or reveal preamble. Before the menu is known
+  // (first turn), the built-ins of the menu and the managed skills count.
+  function claudeMenuCommandOf(entry, text) {
+    var match = /^\/([A-Za-z0-9_:-]+)(\s|$)/.exec(trim(text));
+    if (!match) {
+      return "";
+    }
+    var name = match[1];
+    var known = entry.claudeCommandNames
+      ? entry.claudeCommandNames[name] === true
+      : Object.prototype.hasOwnProperty.call(CLAUDE_MENU_BUILTINS, name) || claudeManagedSkillSlugs(entry).indexOf(name) >= 0;
+    return known ? name : "";
+  }
+
+  // Sent once at start, like the SDK, without waiting: the reader thread takes the answer. Nothing else of it
+  // (account, models) is kept.
+  function claudeRequestCommands(entry) {
+    try {
+      var id = "metadata-" + String(UUID.randomUUID());
+      entry.pending.put(id, { method: "initialize", done: false, error: "" });
+      writeJson(entry, { type: "control_request", request_id: id, request: { subtype: "initialize" } });
+    } catch (_ignoreCommandsRequest) {}
   }
 
   function claudeControlRequest(entry, subtype, params, timeoutMs) {

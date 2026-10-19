@@ -186,6 +186,55 @@ assert.equal(entry.status, "completed");
   }
 }
 
+function commonSourceOrClaude() { return fs.readFileSync("js/agent_bridge_claude.js", "utf8"); }
+
+// Tigo's "/" menu gets Claude's commands: the skills and the built-ins that keep the conversation in step with Tigo.
+{
+  const commandEntry = fakeEntry();
+  const written = [];
+  commandEntry.writer = { write: (text) => written.push(JSON.parse(text)), newLine() {}, flush() {} };
+  const pending = new Map();
+  commandEntry.pending = { put: (k, v) => pending.set(k, v), get: (k) => pending.get(k), remove: (k) => pending.delete(k) };
+  claudeRequestCommands(commandEntry);
+  assert.equal(written[0].type, "control_request");
+  assert.equal(written[0].request.subtype, "initialize");
+  handleClaudeStreamLine(commandEntry, JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: written[0].request_id, response: {
+    account: { email: "someone@example.com" }, commands: [
+      { name: "compact", description: "Free up context", argumentHint: "<optional custom summarization instructions>", builtin: true },
+      { name: "clear", description: "Start a new session", builtin: true },
+      { name: "model", description: "Set the AI model", builtin: true },
+      { name: "convertigo-generalist", description: "Bootstrap Claude Code for general Convertigo work. (user)", argumentHint: "" },
+      { name: "__remote-workflow", description: "internal" }] } } }), "stdout");
+  const update = commandEntry._events.find((event) => event.type === "commands/update");
+  assert.deepEqual(update.data.update.availableCommands.map((c) => c.name), ["compact", "convertigo-generalist"],
+    "/clear and /model would put the conversation out of step with Tigo");
+  assert.equal(update.data.update.availableCommands[0].input.hint, "<optional custom summarization instructions>");
+  assert.equal(pending.size, 0);
+  assert.doesNotMatch(JSON.stringify(commandEntry._events), /someone@example\.com/, "account metadata stays out of the events");
+  // A later system/init does not replace the described list; system/commands_changed does.
+  handleClaudeStreamLine(commandEntry, JSON.stringify({ type: "system", subtype: "init", session_id: "s1", mcp_servers: [], slash_commands: ["compact", "context", "clear"] }), "stdout");
+  assert.equal(commandEntry._events.filter((event) => event.type === "commands/update").length, 1);
+  handleClaudeStreamLine(commandEntry, JSON.stringify({ type: "system", subtype: "commands_changed", commands: [{ name: "context", description: "Show context", builtin: true }] }), "stdout");
+  assert.deepEqual(commandEntry._events.filter((event) => event.type === "commands/update").pop().data.update.availableCommands.map((c) => c.name), ["context"]);
+  // Without an initialize answer, system/init still offers the built-ins of the menu.
+  const olderEntry = fakeEntry();
+  handleClaudeStreamLine(olderEntry, JSON.stringify({ type: "system", subtype: "init", session_id: "s2", mcp_servers: [], slash_commands: ["compact", "context", "cost", "clear", "convertigo-generalist"] }), "stdout");
+  assert.deepEqual(olderEntry._events.find((event) => event.type === "commands/update").data.update.availableCommands.map((c) => c.name), ["compact", "context", "cost"]);
+  // With a managed skill bundle, the account's other skills stay out of the menu.
+  const managedEntry = fakeEntry();
+  managedEntry.managedSkillBundle = { slugs: ["convertigo-generalist", "convertigo-studio"] };
+  handleClaudeStreamLine(managedEntry, JSON.stringify({ type: "system", subtype: "commands_changed", commands: [
+    { name: "convertigo-studio", description: "Studio" }, { name: "pptx", description: "Slides" }, { name: "compact", description: "Compact", builtin: true }] }), "stdout");
+  assert.deepEqual(managedEntry._events.find((event) => event.type === "commands/update").data.update.availableCommands.map((c) => c.name), ["convertigo-studio", "compact"]);
+  // A prompt that starts with a menu command goes as is: Claude Code runs it only at the start of the message.
+  assert.equal(claudeMenuCommandOf(managedEntry, "/compact keep the SQL decisions"), "compact");
+  assert.equal(claudeMenuCommandOf(managedEntry, "/pptx"), "", "not in the menu");
+  assert.equal(claudeMenuCommandOf(managedEntry, "/clear"), "");
+  assert.equal(claudeMenuCommandOf(managedEntry, "Lis /compact dans le guide"), "");
+  assert.equal(claudeMenuCommandOf(fakeEntry(), "/context"), "context", "before the menu is known, the built-ins count");
+  assert.match(commonSourceOrClaude(), /var menuCommand = claudeMenuCommandOf\(entry, promptText\);\s*var managedPreflightCurrent = [^;]+;\s*if \(managedPreflightCurrent && !menuCommand\.length\)/);
+}
+
 // Authentication failures surface as turn errors.
 const authEntry = fakeEntry();
 handleClaudeStreamLine(authEntry, JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "Not logged in · Please run /login" }), "stdout");
