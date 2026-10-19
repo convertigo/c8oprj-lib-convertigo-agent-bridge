@@ -230,9 +230,24 @@ function commonSourceOrClaude() { return fs.readFileSync("js/agent_bridge_claude
   assert.equal(claudeMenuCommandOf(managedEntry, "/compact keep the SQL decisions"), "compact");
   assert.equal(claudeMenuCommandOf(managedEntry, "/pptx"), "", "not in the menu");
   assert.equal(claudeMenuCommandOf(managedEntry, "/clear"), "");
+  assert.equal(claudeMenuCommandOf(managedEntry, "/cost"), "cost", "a built-in of the menu that Claude does not list for a subscription");
+  // A local command calls no model: its zero usage keeps the last measure. /compact does not answer with the
+  // output of the command before it.
+  const localEntry = fakeEntry();
+  localEntry.claudeTurnCommand = "context";
+  handleClaudeStreamLine(localEntry, JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 0, result: "## Context Usage",
+    usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }), "stdout");
+  assert.equal(localEntry._events.filter((event) => event.type === "usage/update").length, 0);
+  assert.equal(localEntry._events.find((event) => event.type === "answer/chunk").data.text, "## Context Usage");
+  const compactEntry = fakeEntry();
+  compactEntry.claudeTurnCommand = "compact";
+  handleClaudeStreamLine(compactEntry, JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 0, result: "## Context Usage (previous command)" }), "stdout");
+  assert.equal(compactEntry._events.filter((event) => event.type === "answer/chunk").length, 0);
+  assert.equal(compactEntry._events.pop().type, "turn/end");
+  assert.equal(compactEntry.claudeTurnCommand, "");
   assert.equal(claudeMenuCommandOf(managedEntry, "Lis /compact dans le guide"), "");
   assert.equal(claudeMenuCommandOf(fakeEntry(), "/context"), "context", "before the menu is known, the built-ins count");
-  assert.match(commonSourceOrClaude(), /var menuCommand = claudeMenuCommandOf\(entry, promptText\);\s*var managedPreflightCurrent = [^;]+;\s*if \(managedPreflightCurrent && !menuCommand\.length\)/);
+  assert.match(commonSourceOrClaude(), /var menuCommand = claudeMenuCommandOf\(entry, promptText\);[\s\S]{0,200}?if \(managedPreflightCurrent && !menuCommand\.length\)/);
 }
 
 // Authentication failures surface as turn errors.

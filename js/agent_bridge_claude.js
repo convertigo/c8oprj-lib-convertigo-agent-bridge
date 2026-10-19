@@ -2223,6 +2223,7 @@
       return C8O.agentBridge.claudePrompt(restartOptions);
     }
     var menuCommand = claudeMenuCommandOf(entry, promptText);
+    entry.claudeTurnCommand = menuCommand;
     var managedPreflightCurrent = entry.home && trim(entry.home.path).length > 0;
     if (managedPreflightCurrent && !menuCommand.length) {
       promptText = withManagedGuidancePreflight(promptText, {
@@ -2701,6 +2702,16 @@
       lower.indexOf("oauth authentication") !== -1;
   }
 
+  function claudeUsageIsEmpty(usage) {
+    var keys = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
+    for (var i = 0; i < keys.length; i++) {
+      if (Number(usage[keys[i]] || 0) > 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   function claudeHandleResult(entry, message) {
     var subtype = String(message.subtype || "");
     var text = String(message.result || "");
@@ -2715,7 +2726,9 @@
         }
       }
     } catch (_ignoreModelUsage) {}
-    if (message.usage) {
+    // A local command (/context, /cost) calls no model: its usage is all zeros, which would drop Tigo's context gauge
+    // and session totals to 0. Keep the last measure.
+    if (message.usage && !claudeUsageIsEmpty(message.usage)) {
       // usage is the turn's total (all its model calls); update carries the context of the last call, as for Vibe.
       claudePushContextUsage(entry, { usage: message.usage, totalCostUsd: message.total_cost_usd || 0 });
       if (message.total_cost_usd) {
@@ -2737,6 +2750,12 @@
     }
     var finalText = trim(text).length ? text : String(entry.claudePendingNarration || "");
     entry.claudePendingNarration = "";
+    if (entry.claudeTurnCommand === "compact") {
+      // The result of /compact repeats the output of the command before it (a /context table): Tigo says the
+      // context was compacted instead.
+      finalText = "";
+    }
+    entry.claudeTurnCommand = "";
     if (trim(finalText).length) {
       pushEvent(entry, "answer/chunk", { text: finalText, phase: "final_answer", source: "result", provider: "claude" });
     }
@@ -2954,9 +2973,10 @@
       return "";
     }
     var name = match[1];
-    var known = entry.claudeCommandNames
+    // The built-ins of the menu always count: Claude Code runs /cost without listing it for a subscription.
+    var known = Object.prototype.hasOwnProperty.call(CLAUDE_MENU_BUILTINS, name) || (entry.claudeCommandNames
       ? entry.claudeCommandNames[name] === true
-      : Object.prototype.hasOwnProperty.call(CLAUDE_MENU_BUILTINS, name) || claudeManagedSkillSlugs(entry).indexOf(name) >= 0;
+      : claudeManagedSkillSlugs(entry).indexOf(name) >= 0);
     return known ? name : "";
   }
 
