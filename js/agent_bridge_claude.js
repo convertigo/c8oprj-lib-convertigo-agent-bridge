@@ -811,6 +811,12 @@
     }
   }
 
+  function claudeAuthProbeCacheKey(homePath, commandPath) {
+    // Presence-only discovery resolves symlinks; full discovery may keep the
+    // Homebrew link. Both must read and refresh the same authentication verdict.
+    return "claude-auth:" + hashShort(filePath(new File(trim(commandPath))) + ":" + filePath(new File(effectiveClaudeHomePath(homePath))));
+  }
+
   function claudeAuthProbeFileRead(options, key) {
     try {
       var file = claudeAuthProbeCacheFile(options);
@@ -849,7 +855,11 @@
           delete current.checks[existing];
         }
       }
-      current.checks[key] = value;
+      if (value === null) {
+        delete current.checks[key];
+      } else {
+        current.checks[key] = value;
+      }
       writeTextFile(file, JSON.stringify(current));
     } catch (_ignoreClaudeAuthProbeFileWrite) {
     } finally {
@@ -878,6 +888,26 @@
         cache[key] = raw;
       }
     } catch (_ignoreClaudeAuthProbeWrite) {}
+  }
+
+  function invalidateClaudeAuthenticationProbe(options, homePath, commandPath) {
+    var key;
+    try {
+      key = claudeAuthProbeCacheKey(homePath, commandPath);
+    } catch (_ignoreClaudeAuthProbeKey) {
+      return;
+    }
+    try {
+      var cache = claudeAuthProbeCacheMap();
+      if (typeof cache.remove === "function") {
+        cache.remove(key);
+      } else {
+        delete cache[key];
+      }
+    } catch (_ignoreClaudeAuthProbeRemove) {}
+    // Both layers must be cleared: the persisted verdict can outlive this
+    // sequence's server store. Keep other CLI/home cache entries intact.
+    claudeAuthProbeFileWrite(options, key, null);
   }
 
   function claudeCachedAuthenticationProbe(key, options, loader) {
@@ -1009,14 +1039,12 @@
     if (forceCheck === true) {
       probeOptions.refreshClaudeAuthCheck = true;
     }
-    // The cache key carries the credentials timestamps: a refreshed or re-imported session
-    // invalidates it on its own, so a stale copy still costs at most one probe per window.
-    // The key stays on the CLI and the home: `claude auth status` itself refreshes and
-    // rewrites the credentials file, so keying on its timestamps would miss the cache on
-    // every single call. The short window plus the forced check on login covers freshness.
-    var cacheKey = "claude-auth:" + hashShort(command + ":" + filePath(new File(effectiveClaudeHomePath(homePath))));
+    // Keep the key on canonical CLI/home paths, not credentials timestamps:
+    // `claude auth status` itself refreshes and rewrites the credentials file.
+    // Login forces a real check and clears both cache layers after success.
     var probe = null;
     try {
+      var cacheKey = claudeAuthProbeCacheKey(homePath, command);
       probe = claudeCachedAuthenticationProbe(cacheKey, probeOptions, function () {
         return claudeAuthenticationProbe(probeOptions, homePath, command);
       });
@@ -1142,6 +1170,9 @@
       if (!entry.authentication) {
         // The CLI is the source of truth once the login process has exited.
         entry.authentication = claudeDoctorAuthentication(options, entry.home, entry.commandPath, true);
+        if (entry.authentication.configured === true) {
+          invalidateClaudeAuthenticationProbe(options, entry.home, entry.commandPath);
+        }
       }
       authentication = entry.authentication;
     }
@@ -1220,6 +1251,7 @@
     }
     var authentication = claudeDoctorAuthentication(loginOptions, setup.claudeHome, setup.claude.path, loginBootstrap.authenticationImported === true);
     if (authentication.configured === true && !boolValue(options && options.forceLogin, false)) {
+      invalidateClaudeAuthenticationProbe(loginOptions, setup.claudeHome, setup.claude.path);
       return {
         ok: true,
         status: "authenticated",
