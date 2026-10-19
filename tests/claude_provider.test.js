@@ -45,14 +45,22 @@ assert.equal(providerLabel("claude"), "Claude");
 assert.equal(agentProxyTargetUrl("claude", {}), "https://api.anthropic.com");
 assert.ok(AGENT_CAPABILITY_PROFILES.generalist.supportedProviders.indexOf("claude") >= 0);
 assert.ok(AGENT_CAPABILITY_PROFILES.nocode.supportedProviders.indexOf("claude") >= 0);
-assert.ok(AGENT_CAPABILITY_PROFILES.flow.supportedProviders.indexOf("claude") < 0, "Flow stays Codex-only");
+assert.ok(AGENT_CAPABILITY_PROFILES.flow.supportedProviders.indexOf("claude") >= 0, "Flow is available to Claude");
 
-// Managed skill bundle never expects Flow skills for Claude, even when Flow is available.
+// When Flow is available, Claude receives the Flow skills and the Legacy/Flow router like Codex.
 flowCapabilityAvailability = () => ({ available: true });
-assert.deepEqual(managedSkillBundleSlugs({}, "claude"), ["convertigo-studio", "convertigo-generalist"]);
+assert.deepEqual(managedSkillBundleSlugs({}, "claude"), ["convertigo-studio", "convertigo-generalist",
+  "convertigo-flow-mcp", "convertigo-flow-backend", "convertigo-flow-frontend-svelte"]);
 assert.ok(managedSkillBundleSlugs({}, "codex").indexOf("convertigo-flow-mcp") >= 0);
+assert.match(buildConvertigoStudioRouterSkill(false), /convertigo-flow/);
+assert.match(buildConvertigoStudioRouterSkill(false), /same agent home/);
 assert.doesNotMatch(buildConvertigoStudioRouterSkill(true), /convertigo-flow/);
 assert.match(buildConvertigoStudioRouterSkill(true), /agent home/);
+// Without Flow, the Claude bundle stays standard Convertigo.
+flowCapabilityAvailability = () => ({ available: false });
+assert.deepEqual(managedSkillBundleSlugs({}, "claude"), ["convertigo-studio", "convertigo-generalist"]);
+assert.doesNotMatch(buildConvertigoStudioRouterSkill(false), /convertigo-flow/);
+flowCapabilityAvailability = () => ({ available: true });
 
 // Effort and command line.
 assert.equal(normalizeClaudeEffort("very-high"), "xhigh");

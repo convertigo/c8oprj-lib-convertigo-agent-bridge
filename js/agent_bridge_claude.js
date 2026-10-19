@@ -1519,7 +1519,22 @@
           report.message = "Convertigo Generalist skill configured";
         }
         (report.skillStatus === "unchanged" ? report.reused : report.generated).push("skills/convertigo-generalist/SKILL.md");
-        var router = installStudioRouterSkill(homePath, dryRun, true);
+        // Flow (alpha, Convertigo 8.5.0 with lib_flow_engine and lib_flow_mcp loaded): its MCP server comes with
+        // lib_ConvertigoMCP._setupClaude, its orchestrator and specialist skills from lib_flow_mcp.
+        var flowAvailable = flowCapabilityAvailable();
+        if (flowAvailable) {
+          var flowSlugs = [AGENT_CAPABILITY_PROFILES.flow.skillSlug].concat(AGENT_CAPABILITY_PROFILES.flow.specialistSkillSlugs);
+          for (var flowIndex = 0; flowIndex < flowSlugs.length; flowIndex++) {
+            var flowSource = flowSkillSourceFile(options, flowSlugs[flowIndex]);
+            if (flowSource === null) {
+              throw new Error("Missing managed Flow skill: " + flowSlugs[flowIndex]);
+            }
+            var flowSkillFile = new File(new File(new File(homeDir, "skills"), flowSlugs[flowIndex]), "SKILL.md");
+            var flowWrite = writeManagedTextFile(flowSkillFile, readTextFile(flowSource), dryRun);
+            (flowWrite.status === "unchanged" ? report.reused : report.copied).push("skills/" + flowSlugs[flowIndex] + "/SKILL.md");
+          }
+        }
+        var router = installStudioRouterSkill(homePath, dryRun, !flowAvailable);
         report.routerSkillStatus = router.status;
         report.routerSkillPath = router.path;
         (router.status === "unchanged" ? report.reused : report.generated).push("skills/" + STUDIO_ROUTER_SKILL_SLUG + "/SKILL.md");

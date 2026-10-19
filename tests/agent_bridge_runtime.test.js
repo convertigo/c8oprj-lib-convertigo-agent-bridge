@@ -623,7 +623,7 @@ assert.match(flowRevealModePrompt, /`browserControlReady:true`/);
 const flowProfile = agentCapabilityProfile({ agentProfile: "flow", userId: "studio" });
 assert.equal(flowProfile.id, "flow");
 assert.equal(flowProfile.mcpServerName, "convertigo-flow");
-assert.deepEqual(flowProfile.supportedProviders, ["codex"]);
+assert.deepEqual(flowProfile.supportedProviders, ["codex", "claude"]);
 const flowCodexConfig = patchCodexMcpConfigText(
   compactCodexConfig.text,
   "http://localhost:18082/convertigo/api/flow-mcp",

@@ -21,7 +21,8 @@ strictly NoCode.
 
 ## Studio routing
 
-The `studio` user has one Codex home and one conversation history. Its setup
+The `studio` user has one agent home (Codex or Claude) and one conversation
+history. Its setup
 installs both capability packs:
 
 - Legacy: `convertigo`, owned by `lib_ConvertigoMCP`, with
@@ -74,6 +75,9 @@ Capability projects own their knowledge and installation:
 
 - `lib_ConvertigoMCP._setupCodex` installs Legacy and NoCode packs.
 - `lib_flow_mcp._setupCodex` installs the Flow MCP configuration and skills.
+- For Claude, `lib_ConvertigoMCP._setupClaude` adds the `convertigo-flow` MCP
+  server and AgentBridge copies the Flow skills unchanged from
+  `lib_flow_mcp/_flow/resources/skills` into the Claude home.
 
 Missing required Flow setup is a configuration error. AgentBridge must not
 generate a substitute Flow skill, call MCP through `curl`, or edit project files

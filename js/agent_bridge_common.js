@@ -793,7 +793,7 @@
       authoringPolicy: "flow-only",
       aliases: ["flow", "flowscript", "flow-svelte", "frontbuilder-svelte"],
       capabilityIds: ["convertigo-flow", "flow-backend", "flow-frontend-svelte"],
-      supportedProviders: ["codex"],
+      supportedProviders: ["codex", "claude"],
       mcpPath: FALLBACK_FLOW_MCP_PATH,
       mcpServerName: "convertigo-flow",
       setupProject: "lib_flow_mcp",
@@ -1607,7 +1607,7 @@
       STUDIO_ROUTER_SKILL_SLUG,
       "convertigo-generalist"
     ];
-    if (normalizeProvider(provider || (options && options.provider)) !== "claude" && flowCapabilityAvailable()) {
+    if (flowCapabilityAvailable()) {
       slugs.push("convertigo-flow-mcp");
       slugs.push("convertigo-flow-backend");
       slugs.push("convertigo-flow-frontend-svelte");
@@ -2441,13 +2441,17 @@
         candidates.push(new File(explicitFile, "SKILL.md"));
       }
       candidates.push(new File(new File(explicitFile, skillSlug), "SKILL.md"));
+      candidates.push(new File(explicitFile, "_flow/resources/skills/" + skillSlug + "/SKILL.md"));
       candidates.push(new File(new File(new File(new File(explicitFile, "libs"), "flow"), "resources"), "skills/" + skillSlug + "/SKILL.md"));
     }
+    // lib_flow_mcp serves its skills from _flow/resources/skills; libs/flow/resources/skills is the former layout
     var projectDir = projectDirectoryByName("lib_flow_mcp");
     if (projectDir !== null) {
+      candidates.push(new File(projectDir, "_flow/resources/skills/" + skillSlug + "/SKILL.md"));
       candidates.push(new File(projectDir, "libs/flow/resources/skills/" + skillSlug + "/SKILL.md"));
     }
     var home = String(System.getProperty("user.home"));
+    candidates.push(new File(home, "git/lib_flow_mcp/_flow/resources/skills/" + skillSlug + "/SKILL.md"));
     candidates.push(new File(home, "git/lib_flow_mcp/libs/flow/resources/skills/" + skillSlug + "/SKILL.md"));
     for (var i = 0; i < candidates.length; i++) {
       if (candidates[i] !== null && candidates[i].isFile()) {
@@ -3612,7 +3616,7 @@
       "",
       "# Convertigo Studio router",
       "",
-      "This is a Low Code Studio session. Both the `convertigo` and `convertigo-flow` MCP servers are installed in the same Codex home.",
+      "This is a Low Code Studio session. Both the `convertigo` and `convertigo-flow` MCP servers are installed in the same agent home.",
       "The No Code capability is unavailable to the Studio user and must never be used from this session.",
       "",
       "## Route once before authoring",
