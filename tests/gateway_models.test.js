@@ -28,6 +28,8 @@ assert.equal(specs.find(s=>s.alias==='glm-5-3').supportsImages,false);
 let config='';writeTextFile=(_file,text)=>{config=String(text);};ensureDirectory=()=>{};
 writeLocalVibeConfig('/managed/home','http://localhost:18082/convertigo/api/mcp','mistral-large-4',{vibeProfile:'convertigo',gatewayModelIds:catalog});
 assert.match(config,/name = "mistral\/mistral-large-4"[\s\S]*?supports_images = true/);
+assert.match(config,/name = "mistral\/mistral-large-4"[^\[]*max_output_tokens = 262144/,'Vibe 3 asks the room left in the window without a cap, more than ML4 accepts');
+assert.doesNotMatch(config.split('[[models]]').find(b=>b.includes('zai-glm-5-3'))||'',/max_output_tokens/,'GLM keeps no cap');
 // The outbound ACP prompt must carry image bytes for ML4, and keep GLM text-only.
 File=function(path){this.isFile=()=>true;this.length=()=>3;this.toPath=()=>path;this.toURI=()=>({toString:()=> 'file:/test.png'});};
 Files={readAllBytes:()=>[1,2,3]};Base64={getEncoder:()=>({encodeToString:()=> 'AQID'})};

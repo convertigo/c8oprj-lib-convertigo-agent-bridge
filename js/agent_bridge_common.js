@@ -21,6 +21,12 @@
     "mistral/zai-glm-5-3": 1000000,
     "mistral/mistral-large-4": 1000000
   };
+  // Output cap per request (Vibe max_output_tokens), when the model has one below its context window. Vibe 3 sends
+  // max_tokens = the room left in max_context_length when no cap is declared, and Mistral Large 4 refuses more than
+  // 262,144 completion tokens ("max_tokens is too large: 985451", 2026-10-20). Vibe 2 already reads the key.
+  var VIBE_MODEL_MAX_OUTPUT_TOKENS = {
+    "mistral/mistral-large-4": 262144
+  };
   // Prices per million tokens of the gateway models ($: input, cached input, output), used for the cost of a Vibe session.
   // mistral/mistral-large-4 was fitted on 40 calls the gateway billed (2026-10-18): every one matches to the cent.
   // Other models keep the GLM 5.3 prices.
@@ -428,7 +434,8 @@
     return preset !== null && preset.genericBackend === true;
   }
 
-  var VIBE_MODEL_CONFIG_REVISION = "gateway-vision-v2";
+  // Bumped when the generated model blocks change: existing homes rewrite config.toml, resident sessions restart.
+  var VIBE_MODEL_CONFIG_REVISION = "gateway-output-cap-v3";
 
   function gatewayModelCatalogRefreshRequested(options) {
     options = options || {};
@@ -511,6 +518,22 @@
     for (var name in VIBE_MODEL_CONTEXT_WINDOWS) {
       if (Object.prototype.hasOwnProperty.call(VIBE_MODEL_CONTEXT_WINDOWS, name) && gatewayModelAlias(name) === key) {
         return VIBE_MODEL_CONTEXT_WINDOWS[name];
+      }
+    }
+    return 0;
+  }
+
+  function vibeMaxOutputTokensFor(model) {
+    var key = trim(model);
+    if (!key.length) {
+      return 0;
+    }
+    if (Object.prototype.hasOwnProperty.call(VIBE_MODEL_MAX_OUTPUT_TOKENS, key)) {
+      return VIBE_MODEL_MAX_OUTPUT_TOKENS[key];
+    }
+    for (var name in VIBE_MODEL_MAX_OUTPUT_TOKENS) {
+      if (Object.prototype.hasOwnProperty.call(VIBE_MODEL_MAX_OUTPUT_TOKENS, name) && gatewayModelAlias(name) === key) {
+        return VIBE_MODEL_MAX_OUTPUT_TOKENS[name];
       }
     }
     return 0;
@@ -7449,6 +7472,7 @@
         'supports_images = ' + (modelSpec.supportsImages === true ? 'true' : 'false'),
         'auto_compact_threshold = ' + (modelSpec.compactThreshold || vibeCompactThresholdFor(modelSpec.name)),
         (modelSpec.contextWindow || vibeContextWindowFor(modelSpec.name)) ? 'max_context_length = ' + (modelSpec.contextWindow || vibeContextWindowFor(modelSpec.name)) : '',
+        vibeMaxOutputTokensFor(modelSpec.name) ? 'max_output_tokens = ' + vibeMaxOutputTokensFor(modelSpec.name) : '',
         ''
       );
     }
