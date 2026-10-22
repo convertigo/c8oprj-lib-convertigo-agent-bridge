@@ -2643,7 +2643,7 @@
       return [
         "# Convertigo No Code Agent Instructions",
         "You are embedded in C8Oforms, not Eclipse Studio. Follow skills/convertigo-nocode/SKILL.md before working.",
-        "Use only nocode-form-* and nocode-baserow-* tools allowed by that skill, plus log-view for narrowly scoped diagnostics.",
+        "Use only the no-code tools that skill allows: nocode-form-*, nocode-baserow-*, and nocode-report-create when it is listed. A No Code session has no log-view and no other Convertigo tool.",
         "Never fall back to requestable-execute, databaseobject-*, project tools, batch wrappers, shell, raw HTTP, or filesystem access to read or modify forms.",
         "Read an existing form with nocode-form-get using its document id before auditing, proposing improvements, or editing. Tool names may use underscores instead of hyphens.",
         "Use the current form/page/element context as the default target. Never infer content from the form name alone. Read results describe the saved version, not unsaved editor changes.",
