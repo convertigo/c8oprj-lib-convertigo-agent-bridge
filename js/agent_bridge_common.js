@@ -537,8 +537,9 @@
     return childPath(childPath(filePath(new File(vibeHome).getParentFile()), "scratch"), stableId("conversation", key));
   }
 
-  // The folders a confined vibe-acp reads besides the system: its runtime (the managed Vibe, the Python of its venv,
-  // Node).
+  // The folders a confined vibe-acp reads besides the system: its runtime (the venv of the managed Vibe, the Python
+  // of that venv, Node). The venv only: the Vibe install folder also holds every user's VIBE_HOME (test-nocode: with
+  // it read only, a confined agent listed another user's home).
   function noCodeRuntimeFolders(setup, options) {
     var folders = [];
     var add = function (path) {
@@ -547,7 +548,9 @@
         folders.push(value);
       }
     };
-    add(setup && setup.installDir);
+    if (setup && trim(setup.installDir).length) {
+      add(childPath(setup.installDir, ".venv"));
+    }
     try {
       var config = readTextFile(new File(new File(setup.installDir, ".venv"), "pyvenv.cfg"));
       var home = /^home\s*=\s*(.+)$/m.exec(config);

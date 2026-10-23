@@ -113,7 +113,8 @@ test('a No Code session works in its own folder; where the engine confines, vibe
   withEngine('sandboxed-shell', wrapped => {
     const shell = noCodeSessionSandbox(noCode, { installDir: '/workspace/agents/vibe' }, home);
     assert.equal(shell.confined, true);
-    assert.deepEqual(shell.readOnly, ['/workspace/agents/vibe', '/workspace/agents/python/cpython-3.12', '/workspace/nodes/node-v22/bin', '/workspace/nodes/node-v22']);
+    // the venv, not the install folder that holds every user's VIBE_HOME
+    assert.deepEqual(shell.readOnly, ['/workspace/agents/vibe/.venv', '/workspace/agents/python/cpython-3.12', '/workspace/nodes/node-v22/bin', '/workspace/nodes/node-v22']);
     assert.deepEqual(shell.wrap(['vibe-acp']), ['/usr/local/bin/c8o-agent-sandbox', '--', 'vibe-acp']);
     assert.deepEqual(wrapped[0], { command: ['vibe-acp'], ro: shell.readOnly, rw: [home, shell.cwd] });
   }, { pyvenv: 'home = /workspace/agents/python/cpython-3.12/bin\nversion = 3.12.8\n', nodePath: '/workspace/nodes/node-v22/bin:/workspace/nodes/node-v22' });
