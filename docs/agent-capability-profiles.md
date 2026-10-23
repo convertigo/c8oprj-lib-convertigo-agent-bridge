@@ -58,14 +58,24 @@ passing another profile id or by running inside a Studio surface.
 The Studio setup removes `convertigo-nocode` from the `studio` home so the
 low-code agent cannot accidentally mutate a NoCode application.
 
-A NoCode agent runs on the server, in the engine's container, so it gets no
-shell, file or web tool of its runtime. For Vibe, the NoCode `config.toml`
-lists them in `disabled_tools` (`bash*`, `git_bash*`, `powershell*`,
-`read_file`, `write_file`, `edit`, `grep`, `web_fetch`, `web_search`, `task`)
-and turns off `run_typescript`'s background processes and subagents; a
-resident NoCode process started before restarts on the same session. The
-Bridge also refuses any permission a NoCode session asks for a tool that is
-not a Convertigo MCP one, instead of approving it.
+A NoCode agent runs in the engine's container, as the engine's user. What it
+may do besides the Convertigo MCP is the engine property `agents.tool_policy`
+(`engine.util.AgentSandbox`; `files` on an engine without it):
+
+| Policy | The NoCode agent gets |
+| --- | --- |
+| `mcp-only` | the Convertigo MCP tools only |
+| `files` (`auto`, the default) | `read_file`, `write_file` and `edit` in the session's own folder (`scratch/<conversation>` beside the user's `VIBE_HOME`, its cwd and `TMPDIR`) and the tool results Vibe saved; no shell, `grep`, web or subagent |
+| `sandboxed-shell` | files and the shell, `vibe-acp` and every process it starts confined by the engine's Landlock helper to the runtime (read only), the user's `VIBE_HOME` and the session's folder; the engine gives `files` where it cannot confine |
+| `full` | what a Studio session gets |
+
+For Vibe, the NoCode `config.toml` lists the tools a policy leaves out in
+`disabled_tools` and turns off `run_typescript`'s background processes (but
+under `sandboxed-shell`) and subagents; a resident NoCode process started
+under another policy restarts on the same session. Under `mcp-only` and
+`files` the Bridge also refuses any permission the session asks for a tool
+that is not a Convertigo MCP one, instead of approving it. The Studio's own
+session (`studio`) is never limited.
 
 ## Ownership
 

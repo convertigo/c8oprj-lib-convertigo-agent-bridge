@@ -517,6 +517,20 @@
     var cwd = normalizeDirectory(options.cwd, setup.setup.workspaceRoot, setup.setup.workspaceRoot);
     var mcpEndpoint = trim(options.mcpEndpoint) || setup.setup.mcpEndpoint || resolveMcpEndpoint(options);
     var command = parseCommand(options.command, [setup.setup.vibeAcp.path || "vibe-acp"]);
+    // A No Code session works in its own folder; under sandboxed-shell the engine's helper confines vibe-acp to it.
+    var noCodeSandbox = null;
+    try {
+      noCodeSandbox = noCodeSessionSandbox(options, setup.setup, vibeHome);
+      if (noCodeSandbox !== null) {
+        cwd = noCodeSandbox.cwd;
+        env.TMPDIR = noCodeSandbox.tmp;
+        if (noCodeSandbox.confined) {
+          command = noCodeSandbox.wrap(command);
+        }
+      }
+    } catch (sandboxError) {
+      return { ok: false, status: "error", phase: "sandbox", error: String(sandboxError), timestamp: now() };
+    }
     var ttlMillis = intValue(options.ttlSeconds, DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
     var entry = createEntry(handle, "vibe", "acp", command, cwd, env, ttlMillis, setup.setup.home, credentials, requestedModel || setup.setup.model);
     entry.modelConfigRevision = VIBE_MODEL_CONFIG_REVISION;
@@ -527,6 +541,7 @@
     entry.convertigoRevealMode = revealModeEnabled(options, null);
     entry.mcpCatalogKey = trim(options.mcpCatalogKey);
     entry.toolPolicy = vibeToolPolicy(options);
+    entry.noCodePolicy = noCodeSandbox !== null ? noCodeSandbox.policy : noCodeToolPolicyName(options);
     entry.viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
     entry.browserDebugUrl = trim(options.browserDebugUrl);
     entry.playwrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);

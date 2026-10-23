@@ -437,32 +437,143 @@
   // Bumped when the generated model blocks change: existing homes rewrite config.toml, resident sessions restart.
   var VIBE_MODEL_CONFIG_REVISION = "gateway-output-cap-v3";
 
-  // A No Code session works through the Convertigo MCP only. Vibe's own shell, file and web tools ran in the engine
-  // container with the engine's rights, its cwd the whole workspace (test-nocode, Mistral run: `bash: jq ...`
-  // approved by choosePermissionOption). Its config.toml removes them from the catalog (Vibe denies their runtime
-  // builtins too), and the Bridge refuses any permission asked for another tool. Bumped when the list changes:
-  // No Code homes rewrite config.toml, resident No Code sessions restart.
-  var VIBE_NOCODE_TOOL_POLICY = "nocode-builtins-off-v1";
-  var VIBE_NOCODE_DISABLED_TOOLS = ["bash*", "git_bash*", "powershell*", "read_file", "write_file", "edit", "grep", "web_fetch", "web_search", "task"];
+  // What a No Code session may do besides the Convertigo MCP: the engine's agents.tool_policy (engine.util.AgentSandbox),
+  // files on an engine without it. Vibe's own shell, file and web tools ran in the engine container with the engine's
+  // rights, its cwd the whole workspace (test-nocode, Mistral run: `bash: jq ...` approved by choosePermissionOption).
+  // - mcp-only: none of them;
+  // - files: read_file, write_file and edit in the session's own folder (its cwd) and the tool results Vibe saved,
+  //   no shell, grep, web or subagent;
+  // - sandboxed-shell: files and the shell, vibe-acp and every process it starts confined by the engine's Landlock
+  //   helper to the runtime (read only), the user's VIBE_HOME and the session's folder;
+  // - full: as a Studio session.
+  // The config.toml removes the tools a policy leaves out (Vibe denies their runtime builtins too); under mcp-only and
+  // files the Bridge also refuses any permission asked for another tool than a Convertigo MCP one. The Studio's own
+  // session (user studio) is never limited. Bumped when a policy changes: No Code homes rewrite config.toml, resident
+  // No Code sessions restart.
+  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v2";
+  var VIBE_NOCODE_POLICIES = ["mcp-only", "files", "sandboxed-shell", "full"];
+  var VIBE_NOCODE_SHELL_TOOLS = ["bash*", "git_bash*", "powershell*"];
+  var VIBE_NOCODE_FILE_TOOLS = ["read_file", "write_file", "edit"];
+  var VIBE_NOCODE_OTHER_TOOLS = ["grep", "web_fetch", "web_search", "task"];
 
-  function vibeToolPolicy(options) {
-    return normalizeSkillProfile(options || {}) === "nocode" ? VIBE_NOCODE_TOOL_POLICY : "";
+  function engineAgentSandbox() {
+    return Packages.com.twinsoft.convertigo.engine.util.AgentSandbox;
   }
 
-  // run_typescript reaches background processes (tools.process) and subagents (tools.subagent) on its own switches.
+  // The policy the engine gives its No Code agents: its effective one (sandboxed-shell is files where the engine cannot
+  // confine). An engine older than agents.tool_policy gives files.
+  function engineNoCodeToolPolicy() {
+    try {
+      var described = JSON.parse(String(engineAgentSandbox().describe()));
+      var policy = trim(described.effective);
+      return VIBE_NOCODE_POLICIES.indexOf(policy) >= 0 ? policy : "files";
+    } catch (_ignoreOlderEngine) {
+      return "files";
+    }
+  }
+
+  // "" for a Studio session, else the policy of this No Code session
+  function noCodeToolPolicyName(options) {
+    return normalizeSkillProfile(options || {}) === "nocode" ? engineNoCodeToolPolicy() : "";
+  }
+
+  function vibeToolPolicy(options) {
+    var policy = noCodeToolPolicyName(options);
+    return policy.length ? "nocode-" + policy + "-" + VIBE_NOCODE_TOOL_POLICY_REVISION : "";
+  }
+
+  // The top-level keys of a No Code config.toml. run_typescript reaches background processes (tools.process) and
+  // subagents (tools.subagent) on their own switches.
   function vibeToolPolicyLines(options) {
-    if (!vibeToolPolicy(options).length) {
+    var policy = noCodeToolPolicyName(options);
+    if (!policy.length || policy === "full") {
       return [];
     }
+    var disabled = VIBE_NOCODE_OTHER_TOOLS.slice(0);
+    if (policy !== "sandboxed-shell") {
+      disabled = VIBE_NOCODE_SHELL_TOOLS.concat(disabled);
+    }
+    if (policy === "mcp-only") {
+      disabled = disabled.concat(VIBE_NOCODE_FILE_TOOLS);
+    }
     return [
-      "disabled_tools = [" + VIBE_NOCODE_DISABLED_TOOLS.map(function (name) { return '"' + tomlString(name) + '"'; }).join(", ") + "]",
-      "enable_background_processes = false",
+      "disabled_tools = " + tomlArray(disabled),
+      "enable_background_processes = " + (policy === "sandboxed-shell" ? "true" : "false"),
       "enable_subagents = false"
     ];
   }
 
-  // The only tools a No Code session may be asked to run: the Convertigo MCP ones (`mcp_Convertigo.nocode_app_create`
-  // from run_typescript, `Convertigo_nocode-form-get` called directly).
+  // Its tables: writes in the session's folder need no permission; outside it Vibe asks, and the Bridge refuses.
+  function vibeToolPolicyTables(options) {
+    var policy = noCodeToolPolicyName(options);
+    if (policy !== "files" && policy !== "sandboxed-shell") {
+      return [];
+    }
+    return ["[tools.write_file]", 'permission = "always"', "", "[tools.edit]", 'permission = "always"', ""];
+  }
+
+  // The session's own folder, beside the user's VIBE_HOME: its cwd, its TMPDIR (Vibe's scratchpad) and, confined,
+  // the only folder it writes with that home.
+  function noCodeScratchDir(options, vibeHome) {
+    var key = trim(options && options.conversationId) || trim(options && options.handle) || "session";
+    return childPath(childPath(filePath(new File(vibeHome).getParentFile()), "scratch"), stableId("conversation", key));
+  }
+
+  // The folders a confined vibe-acp reads besides the system: its runtime (the managed Vibe, the Python of its venv,
+  // Node).
+  function noCodeRuntimeFolders(setup, options) {
+    var folders = [];
+    var add = function (path) {
+      var value = trim(path);
+      if (value.length && folders.indexOf(value) < 0) {
+        folders.push(value);
+      }
+    };
+    add(setup && setup.installDir);
+    try {
+      var config = readTextFile(new File(new File(setup.installDir, ".venv"), "pyvenv.cfg"));
+      var home = /^home\s*=\s*(.+)$/m.exec(config);
+      if (home) {
+        add(filePath(new File(trim(home[1])).getParentFile()));
+      }
+    } catch (_ignoreNoVenvConfig) {}
+    var nodePath = nodeRuntimeSearchPath(options || {});
+    if (nodePath.length) {
+      nodePath.split(String(File.pathSeparator)).forEach(add);
+    }
+    return folders;
+  }
+
+  // null for a Studio session or under full; else where the session works and, confined, its command run through
+  // engine.util.AgentSandbox.wrap (which refuses where the engine cannot confine, so it is never run unconfined).
+  function noCodeSessionSandbox(options, setup, vibeHome) {
+    var policy = noCodeToolPolicyName(options);
+    if (!policy.length || policy === "full" || !trim(vibeHome).length) {
+      return null;
+    }
+    var scratch = noCodeScratchDir(options, vibeHome);
+    var tmp = childPath(scratch, ".tmp");
+    ensureDirectory(new File(tmp));
+    return {
+      policy: policy,
+      cwd: scratch,
+      tmp: tmp,
+      confined: policy === "sandboxed-shell",
+      readOnly: noCodeRuntimeFolders(setup, options),
+      readWrite: [trim(vibeHome), scratch],
+      wrap: function (command) {
+        var wrapped = engineAgentSandbox().wrap(toJavaList(command), toJavaList(this.readOnly), toJavaList(this.readWrite));
+        var args = [];
+        for (var i = 0; i < wrapped.size(); i++) {
+          args.push(String(wrapped.get(i)));
+        }
+        return args;
+      }
+    };
+  }
+
+  // The only tools a No Code session may be asked to run under mcp-only and files: the Convertigo MCP ones
+  // (`mcp_Convertigo.nocode_app_create` from run_typescript, `Convertigo_nocode-form-get` called directly).
   function isConvertigoMcpToolTitle(title) {
     return /^(mcp_convertigo\.|convertigo_)/i.test(trim(title));
   }
@@ -479,8 +590,10 @@
     return title;
   }
 
+  // Under sandboxed-shell the kernel confines what the agent runs, under full nothing is limited.
   function noCodePermissionRefused(entry, params) {
-    if (!entry || trim(entry.toolPolicy) !== VIBE_NOCODE_TOOL_POLICY) {
+    var policy = trim(entry && entry.noCodePolicy);
+    if (policy !== "mcp-only" && policy !== "files") {
       return false;
     }
     var title = permissionToolTitle(entry, (params || {}).toolCall || (params || {}).tool_call);
@@ -7608,6 +7721,7 @@
         ''
       );
     }
+    Array.prototype.push.apply(lines, vibeToolPolicyTables(options));
     var text = migrateManagedVibeModelPresets(lines.join("\n")).text;
     writeVibeCompactionPrompt(configDir);
     return {
