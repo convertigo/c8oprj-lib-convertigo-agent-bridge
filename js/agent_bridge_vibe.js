@@ -341,7 +341,8 @@
     var timer = startupTimer("start", {
       handle: trim(options && options.handle),
       conversationId: trim(options && options.conversationId),
-      agentProfile: trim(options && (options.agentProfile || options.skillProfile))
+      agentProfile: trim(options && (options.agentProfile || options.skillProfile)),
+      prewarm: boolValue(options && options.prewarm, false)
     });
     var outer = activeStartupTimer;
     activeStartupTimer = timer;
@@ -355,6 +356,15 @@
       writeStartupTimings(timer, trim(options && options.workspaceRoot), result ? trim(result.status) : "exception");
     }
   };
+
+  // false when the entry is still starting after maxMs
+  function waitWhileStarting(entry, maxMs) {
+    var deadline = now() + maxMs;
+    while (entry.status === "starting" && now() < deadline) {
+      Thread.sleep(100);
+    }
+    return entry.status !== "starting";
+  }
 
   function vibeStartSteps(options) {
     options = optionsWithRequestFallbacks(options || {});
@@ -370,8 +380,19 @@
       options.homeScope = "conversation";
     }
     var registry = getRegistry();
+    ensureAgentReaper();
+    try {
+      sweepIfDue(registry, sweepClock(), 0, {});
+    } catch (_ignoreStartSweep) {}
     var existing = registry.get(handle);
     var timeoutMs = intValue(options.requestTimeoutMs, 60000, 1000, 600000);
+    // The prewarm of this conversation may still be starting its process: wait for it rather than start a second one.
+    if (existing !== null && typeof existing !== "undefined" && existing.status === "starting") {
+      if (!waitWhileStarting(existing, STARTING_GRACE_MILLIS)) {
+        return { ok: false, status: "error", phase: "starting", handle: handle, error: "Vibe is still starting this conversation", timestamp: now() };
+      }
+      existing = registry.get(handle);
+    }
     if (existing !== null && typeof existing !== "undefined" && processAlive(existing.process)) {
       var requestedMcpTokenFingerprint = mcpBearerTokenFingerprint(options);
       var requestedPlaywrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
@@ -450,6 +471,10 @@
       }
     }
     if (existing !== null && typeof existing !== "undefined" && processAlive(existing.process)) {
+      if (existing.prewarm === true && !boolValue(options.prewarm, false)) {
+        // the conversation's first message takes its prewarmed process: the conversation's TTL applies from now on
+        existing.prewarm = false;
+      }
       try {
         configureVibeSession(existing, options, timeoutMs);
       } catch (configureExistingError) {
@@ -562,8 +587,13 @@
       return { ok: false, status: "error", phase: "sandbox", error: String(sandboxError), timestamp: now() };
     }
     startupMark("sandbox");
-    var ttlMillis = intValue(options.ttlSeconds, DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
+    var noCode = normalizeSkillProfile(options) === "nocode";
+    var ttlMillis = intValue(options.ttlSeconds, noCode ? NOCODE_TTL_SECONDS : DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
     var entry = createEntry(handle, "vibe", "acp", command, cwd, env, ttlMillis, setup.setup.home, credentials, requestedModel || setup.setup.model);
+    // a settings probe (discoverVibeSettings) closes at once and does not count toward the user's limit
+    entry.ownerKey = boolValue(options.settingsProbe, false) ? "" : trim(options.userId);
+    entry.noCode = noCode;
+    entry.prewarm = boolValue(options.prewarm, false);
     entry.modelConfigRevision = VIBE_MODEL_CONFIG_REVISION;
     entry.vibeHome = vibeHome;
     entry.vibeProfile = resolveVibeProfile(options);
@@ -580,6 +610,9 @@
     entry.viewerCdpEndpoint = trim(options.viewerCdpEndpoint || entry.playwrightCdpEndpoint);
     entry.playwrightMcpEnabled = trim(setup.setup.config && setup.setup.config.selected && setup.setup.config.selected.playwrightEndpoint).length > 0;
     registry.put(handle, entry);
+    try {
+      enforceUserLimit(registry, entry);
+    } catch (_ignoreUserLimit) {}
     startupMark("entry");
 
     try {
@@ -750,6 +783,7 @@
         autoConfigure: true,
         disableViewerDebugPortReservation: true,
         disablePlaywrightMcp: true,
+        settingsProbe: true,
         requestTimeoutMs: options.settingsTimeoutMs || options.requestTimeoutMs || 60000
       });
       if (started && started.ok !== false && started.providerSettings) {
@@ -791,6 +825,7 @@
       return { ok: false, status: "not_running", handle: handle, state: statusOf(entry), timestamp: now() };
     }
     writeStartupTimings(startupTimer("prompt", { handle: handle }), entry.workspaceRoot, "received");
+    entry.prewarm = false;
 
     entry.convertigoRevealMode = revealModeEnabled(options, entry);
     var promptText = String(options.prompt || "");

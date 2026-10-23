@@ -1307,6 +1307,9 @@ Start a long-running vibe-acp process and create an ACP session.
 <td>nocodeMcpTokenHandle</td><td>Opaque server-memory handle for the C8Oforms NoCode MCP bearer token.</td>
 </tr>
 <tr>
+<td>prewarm</td><td>Set true to start the process of a conversation before its first message (the Assistant, when the No Code panel opens). It stops after 3 min idle without a message, and a user keeps one prewarm. The first start or prompt of the conversation takes it.</td>
+</tr>
+<tr>
 <td>projectId</td><td>Optional project identifier included in user or conversation scoped homes.</td>
 </tr>
 <tr>

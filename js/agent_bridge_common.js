@@ -53,6 +53,17 @@
   var VIBE_COMPACTION_PROMPT_ID = "convertigo_compact";
   var FALLBACK_FLOW_MCP_PATH = "/api/flow-mcp";
   var DEFAULT_TTL_SECONDS = 3600;
+  // How long agent processes live and how many Vibe processes a No Code user keeps (see sweepRegistry).
+  var NOCODE_TTL_SECONDS = 1200;
+  var PREWARM_TTL_MILLIS = 180000;
+  var NOCODE_MAX_VIBE_PER_USER = 3;
+  var STARTING_GRACE_MILLIS = 150000;
+  var SWEEP_MIN_INTERVAL_MILLIS = 10000;
+  var SWEEP_CLOCK_KEY = "lib_ConvertigoAgentBridge.sweepClock.v1";
+  var REAPER_PROPERTY = "lib_ConvertigoAgentBridge.reaper";
+  // Bump it when the sweep changes: the reaper thread of an older revision then stops at its next tick.
+  var REAPER_REVISION = "1";
+  var REAPER_PERIOD_MILLIS = 60000;
   var RUNTIME_UPDATE_CACHE_KEY = "lib_ConvertigoAgentBridge.runtimeUpdateCache.v1";
   var RUNTIME_UPDATE_CACHE_FILE = "runtime-update-checks.json";
   var DEFAULT_RUNTIME_UPDATE_CACHE_MS = 21600000;
@@ -1058,6 +1069,7 @@
   var Base64 = Packages.java.util.Base64;
   var Collections = Packages.java.util.Collections;
   var TimeUnit = Packages.java.util.concurrent.TimeUnit;
+  var AtomicLong = Packages.java.util.concurrent.atomic.AtomicLong;
   var Files = Packages.java.nio.file.Files;
   var StandardCharsets = Packages.java.nio.charset.StandardCharsets;
   var StandardCopyOption = Packages.java.nio.file.StandardCopyOption;
@@ -11917,6 +11929,10 @@
     if (!handle.length) {
       return { ok: false, status: "error", error: "handle is required", timestamp: now() };
     }
+    ensureAgentReaper();
+    try {
+      sweepIfDue(getRegistry(), sweepClock(), SWEEP_MIN_INTERVAL_MILLIS, { keep: handle });
+    } catch (_ignoreEventsSweep) {}
     var entry = getRegistry().get(handle);
     if (entry === null || typeof entry === "undefined") {
       return { ok: false, status: "not_found", handle: handle, events: [], timestamp: now() };
@@ -12020,45 +12036,235 @@
     }
   }
 
+  // The sweep of the agent processes, at each Vibe start, at most every 10 s on event reads and every minute on the
+  // reaper thread. Vibe processes used to live until the engine stopped: only Codex and Claude starts swept, and the No
+  // Code server kept every conversation's vibe-acp (165 MB each). A process stops when it is dead, idle longer than its
+  // TTL (1 h, 20 min in No Code, never less than 1 h during a turn), or prewarmed and idle 3 min without its first
+  // message; a No Code user keeps at most 3 Vibe processes, the least recently used idle one stopping first, never one
+  // in a turn. Each stop writes a "stop" line in agents/vibe/startup-timings.ndjson.
   C8O.agentBridge.sweepExpired = function (options) {
+    return sweepRegistry(getRegistry(), options);
+  };
+
+  // why the sweep stops an entry, or null to keep it
+  function sweepVerdict(entry, current, hardIdle) {
+    if (entry.status === "starting" && current - Number(entry.createdAt || 0) < STARTING_GRACE_MILLIS) {
+      return null;
+    }
+    if (!processAlive(entry.process)) {
+      return "dead";
+    }
+    var idle = current - Number(entry.lastAccess || 0);
+    if (entry.prewarm === true && idle > PREWARM_TTL_MILLIS) {
+      return "prewarm_expired";
+    }
+    var ttl = Number(entry.ttlMillis || 0);
+    if (entry.turnActive === true && ttl > 0) {
+      ttl = Math.max(ttl, DEFAULT_TTL_SECONDS * 1000);
+    }
+    if ((ttl > 0 && idle > ttl) || (hardIdle > 0 && idle > hardIdle)) {
+      return "idle";
+    }
+    return null;
+  }
+
+  // a No Code user's Vibe process, which counts toward the limit of the user (not a settings probe)
+  function countsTowardUserLimit(entry) {
+    return entry.provider === "vibe" && entry.noCode === true && trim(entry.ownerKey).length > 0
+      && (entry.status === "starting" || entry.status === "running");
+  }
+
+  // the entries to stop for a user above the limit: least recently used first, never one in a turn, starting or kept
+  function userLimitVictims(entries, keep) {
+    var count = entries.length;
+    var candidates = entries.filter(function (entry) {
+      return entry !== keep && entry.status === "running" && entry.turnActive !== true;
+    }).sort(function (a, b) {
+      return Number(a.lastAccess || 0) - Number(b.lastAccess || 0);
+    });
+    var victims = [];
+    for (var i = 0; i < candidates.length && count > NOCODE_MAX_VIBE_PER_USER; i++) {
+      victims.push(candidates[i]);
+      count--;
+    }
+    return victims;
+  }
+
+  function registryEntries(registry) {
+    var entries = [];
+    var iterator = registry.keySet().iterator();
+    while (iterator.hasNext() === true) {
+      var entry = registry.get(String(iterator.next()));
+      if (entry !== null && typeof entry !== "undefined") {
+        entries.push(entry);
+      }
+    }
+    return entries;
+  }
+
+  function stopSweptEntry(registry, entry, reason, current) {
+    var idle = current - Number(entry.lastAccess || 0);
+    var state = null;
+    try {
+      state = statusOf(entry);
+    } catch (_ignoreSweptState) {}
+    try {
+      stopEntry(entry, false);
+    } catch (_ignoreSweptStop) {}
+    registry.remove(entry.handle);
+    forgetSessionHandle(entry.handle);
+    writeStartupTimings(startupTimer("stop", {
+      handle: entry.handle,
+      provider: entry.provider,
+      reason: reason,
+      idleMs: idle,
+      aliveMs: current - Number(entry.createdAt || current)
+    }), entry.workspaceRoot, reason);
+    return { handle: entry.handle, reason: reason, idleMs: idle, state: state };
+  }
+
+  // options.keep: the handle of the caller, never stopped by this sweep (its events are being read)
+  function sweepRegistry(registry, options) {
     options = options || {};
     var hardIdle = intValue(options.maxIdleSeconds, 0, 0, 86400) * 1000;
-    var registry = getRegistry();
+    var keepHandle = trim(options.keep);
+    var current = now();
     var stopped = [];
     var kept = [];
-    var iterator = registry.keySet().iterator();
-    var current = now();
-    while (iterator.hasNext()) {
-      var handle = String(iterator.next());
-      var entry = registry.get(handle);
-      if (entry === null || typeof entry === "undefined") {
+    var byUser = {};
+    var entries = registryEntries(registry);
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      var reason = String(entry.handle) === keepHandle ? null : sweepVerdict(entry, current, hardIdle);
+      if (reason !== null) {
+        stopped.push(stopSweptEntry(registry, entry, reason, current));
         continue;
       }
-      var idle = current - entry.lastAccess;
-      var expiredByTtl = entry.ttlMillis > 0 && idle > entry.ttlMillis;
-      var expiredByHardIdle = hardIdle > 0 && idle > hardIdle;
-      var dead = !processAlive(entry.process);
-      if (expiredByTtl || expiredByHardIdle || dead) {
-        var state = statusOf(entry);
-        stopEntry(entry, true);
-        stopped.push({
-          handle: handle,
-          reason: dead ? "dead" : "idle",
-          idleMs: idle,
-          state: state
-        });
-      } else {
-        kept.push(statusOf(entry));
+      kept.push(entry);
+      if (countsTowardUserLimit(entry)) {
+        (byUser[entry.ownerKey] = byUser[entry.ownerKey] || []).push(entry);
+      }
+    }
+    for (var owner in byUser) {
+      if (Object.prototype.hasOwnProperty.call(byUser, owner)) {
+        var keep = null;
+        for (var k = 0; k < byUser[owner].length; k++) {
+          if (String(byUser[owner][k].handle) === keepHandle) {
+            keep = byUser[owner][k];
+          }
+        }
+        var victims = userLimitVictims(byUser[owner], keep);
+        for (var v = 0; v < victims.length; v++) {
+          stopped.push(stopSweptEntry(registry, victims[v], "user_limit", current));
+          kept.splice(kept.indexOf(victims[v]), 1);
+        }
       }
     }
     return {
       ok: true,
       status: "ok",
       stopped: stopped,
-      kept: kept,
+      kept: kept.map(function (entry) { return statusOf(entry); }),
       timestamp: current
     };
-  };
+  }
+
+  // A new Vibe process of a No Code user: the user's other prewarm, if this one is a prewarm, and the least recently
+  // used idle processes above the limit stop.
+  function enforceUserLimit(registry, entry) {
+    if (!countsTowardUserLimit(entry)) {
+      return [];
+    }
+    var current = now();
+    var stopped = [];
+    var mine = [];
+    var entries = registryEntries(registry);
+    for (var i = 0; i < entries.length; i++) {
+      var other = entries[i];
+      if (other === entry || !countsTowardUserLimit(other) || String(other.ownerKey) !== String(entry.ownerKey)) {
+        continue;
+      }
+      if (entry.prewarm === true && other.prewarm === true && other.status === "running") {
+        stopped.push(stopSweptEntry(registry, other, "prewarm_replaced", current));
+        continue;
+      }
+      mine.push(other);
+    }
+    mine.push(entry);
+    var victims = userLimitVictims(mine, entry);
+    for (var v = 0; v < victims.length; v++) {
+      stopped.push(stopSweptEntry(registry, victims[v], "user_limit", current));
+    }
+    return stopped;
+  }
+
+  function sweepClock() {
+    var store = getServerStore();
+    if (store === null) {
+      C8O.agentBridge._sweepClock = C8O.agentBridge._sweepClock || new AtomicLong(0);
+      return C8O.agentBridge._sweepClock;
+    }
+    var clock = store.get(SWEEP_CLOCK_KEY);
+    if (clock === null || typeof clock === "undefined") {
+      clock = new AtomicLong(0);
+      store.set(SWEEP_CLOCK_KEY, clock);
+    }
+    return clock;
+  }
+
+  // a sweep, unless one ran less than minIntervalMs ago; one caller at a time wins the clock
+  function sweepIfDue(registry, clock, minIntervalMs, options) {
+    var current = Number(now());
+    var last = Number(clock.get());
+    if (current - last < minIntervalMs || clock.compareAndSet(last, current) !== true) {
+      return null;
+    }
+    return sweepRegistry(registry, options);
+  }
+
+  // One reaper thread per engine sweeps every minute, so idle processes stop even when nobody uses the agents. A
+  // newer revision of this code replaces it: the thread stops when the property no longer names it.
+  function ensureAgentReaper() {
+    try {
+      var current = String(System.getProperty(REAPER_PROPERTY) || "").split("|");
+      if (current.length === 3 && current[0] === REAPER_REVISION && Number(now()) - Number(current[2]) < 3 * REAPER_PERIOD_MILLIS) {
+        return false;
+      }
+      var id = String(UUID.randomUUID());
+      System.setProperty(REAPER_PROPERTY, REAPER_REVISION + "|" + id + "|" + Number(now()));
+      var registry = getRegistry();
+      var clock = sweepClock();
+      var thread = new Thread(new Runnable({
+        run: function () {
+          while (reaperTick(id, registry, clock)) {
+            // one sweep a minute
+          }
+        }
+      }), "c8o-agent-bridge-reaper");
+      thread.setDaemon(true);
+      thread.start();
+      return true;
+    } catch (_ignoreReaper) {
+      return false;
+    }
+  }
+
+  // a minute of the reaper; false once another reaper replaced it
+  function reaperTick(id, registry, clock) {
+    try {
+      Thread.sleep(REAPER_PERIOD_MILLIS);
+    } catch (_reaperInterrupted) {
+      return false;
+    }
+    if (String(System.getProperty(REAPER_PROPERTY) || "").split("|")[1] !== id) {
+      return false;
+    }
+    System.setProperty(REAPER_PROPERTY, REAPER_REVISION + "|" + id + "|" + Number(now()));
+    try {
+      sweepIfDue(registry, clock, REAPER_PERIOD_MILLIS / 2);
+    } catch (_ignoreReaperSweep) {}
+    return true;
+  }
 
   // Session measures of a Vibe conversation, for reports: usage totals, session measures and per-turn detail, read
   // from its journal. The conversation is the Assistant thread id (agent-…) or the Vibe session id.

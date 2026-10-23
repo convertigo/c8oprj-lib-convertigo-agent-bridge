@@ -379,6 +379,16 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   prewarm the resident app-server before the first prompt. This prewarm is
   best-effort and should still rely on `agent_codex_prompt` start fallback if the
   process is not ready.
+- Agent processes are swept (`sweepRegistry`) at each Vibe start, at most every
+  10 s on event reads, and every minute by one daemon reaper thread per engine
+  (`ensureAgentReaper`; bump `REAPER_REVISION` when the sweep changes). A process
+  stops when dead, idle beyond its TTL (1 h, 20 min in No Code, at least 1 h in a
+  turn), or prewarmed (`prewarm` on agent_vibe_start, one per user) and idle
+  3 min without its first message. A No Code user keeps at most 3 Vibe
+  processes, least recently used idle one first, never one in a turn. Each stop
+  writes a "stop" line in `agents/vibe/startup-timings.ndjson`. A start finding
+  its conversation's process still starting waits for it. Cover with
+  `node --test tests/vibe_process_guards.test.js`.
 - Python/Vibe setup is separate from Codex setup. Keep the shared helper logic in
   `agent_bridge_common.js` and provider-specific behavior in the provider files.
 
