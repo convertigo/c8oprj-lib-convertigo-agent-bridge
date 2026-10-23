@@ -45,7 +45,8 @@ responseTimeout: 900
       forcePythonInstall: typeof forcePythonInstall === "undefined" ? false : forcePythonInstall,
       forceVibeInstall: typeof forceVibeInstall === "undefined" ? false : forceVibeInstall,
       mcpSkillsSourceDir: typeof mcpSkillsSourceDir === "undefined" ? "" : mcpSkillsSourceDir,
-      skipSkillsInstall: typeof skipSkillsInstall === "undefined" ? "" : skipSkillsInstall
+      skipSkillsInstall: typeof skipSkillsInstall === "undefined" ? "" : skipSkillsInstall,
+      startupPresenceOnly: typeof startupPresenceOnly === "undefined" ? false : startupPresenceOnly
     });'
 ↓result [steps.JsonToXmlStep-1781600000102]: 
   jsonObject: 
@@ -190,3 +191,7 @@ responseTimeout: 900
 ↓gatewayApiKey [variables.RequestableVariable-1789560000009]: 
   comment: 'Convertigo profile only: stores the user''s LiteLLM virtual key in the user scoped VIBE_HOME .env (never returned).'
   description: 'Convertigo profile only: stores the user''s LiteLLM virtual key in the user scoped VIBE_HOME .env (never returned).'
+↓startupPresenceOnly [variables.RequestableVariable-1792770000001]: 
+  comment: Set true to only check that Vibe is installed, without running it (ignored with install). The Assistant asks it before each message, agent_vibe_start checking it again. The full check runs vibe-acp --version twice, 7 to 10 s.
+  description: Set true to only check that Vibe is installed, without running it (ignored with install). The Assistant asks it before each message, agent_vibe_start checking it again. The full check runs vibe-acp --version twice, 7 to 10 s.
+  schemaType: xsd:boolean

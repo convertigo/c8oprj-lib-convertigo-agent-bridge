@@ -1211,6 +1211,9 @@ Check or install the local Vibe CLI runtime used by the agent bridge.
 <td>skipSkillsInstall</td><td>When true, skips synchronization of the lib_ConvertigoMCP skill pack into the agent home.</td>
 </tr>
 <tr>
+<td>startupPresenceOnly</td><td>Set true to only check that Vibe is installed, without running it (ignored with install). The Assistant asks it before each message, agent_vibe_start checking it again. The full check runs vibe-acp --version twice, 7 to 10 s.</td>
+</tr>
+<tr>
 <td>userId</td><td>User identifier used for user or conversation scoped homes. The value is hashed in filesystem paths.</td>
 </tr>
 <tr>
