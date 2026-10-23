@@ -10262,11 +10262,18 @@
       data: data || {}
     };
     // Every provider reports its turns with these three events: keep a common "turn running"
-    // flag so interrupt() needs no provider-specific state.
+    // flag so interrupt() needs no provider-specific state. Only the end of the running turn's request ends it: a second
+    // prompt refused by the agent ("A turn is already running") left the flag down while the first turn went on.
+    var requestId = event.data && event.data.requestId != null ? String(event.data.requestId) : "";
     if (event.type === "turn/start") {
+      if (entry.turnActive !== true) {
+        entry.turnRequestId = requestId;
+      }
       entry.turnActive = true;
-    } else if (event.type === "turn/end" || event.type === "turn/error" || event.type === "system/closed") {
+    } else if (event.type === "system/closed" || ((event.type === "turn/end" || event.type === "turn/error") &&
+        (!requestId.length || !trim(entry.turnRequestId).length || requestId === entry.turnRequestId))) {
       entry.turnActive = false;
+      entry.turnRequestId = "";
     }
     entry.events.add(event);
     while (entry.events.size() > MAX_EVENT_BUFFER) {

@@ -754,6 +754,10 @@
     if (messageId.length) {
       params.messageId = messageId;
     }
+    // Vibe runs one turn at a time and refuses a prompt sent during a turn: it is not sent, and the turn goes on.
+    if (entry.turnActive === true) {
+      return { ok: false, status: "busy", handle: handle, error: "A turn is already running in this conversation", state: statusOf(entry), timestamp: now() };
+    }
 
     try {
       var pending = sendAcpRequest(entry, "session/prompt", params);

@@ -234,6 +234,11 @@ repond a tout appel qu'il n'a pas pu mener par le meme message, "The provided
 tool call failed" : la cause est le code (`mcp_transport_failed`,
 `mcp_timeout`, `mcp_authorization_required`...).
 
+Un process ne mene qu'un tour a la fois : tant qu'un tour tourne,
+`agent_vibe_prompt` repond `status: "busy"` sans rien envoyer a Vibe. Seule la
+fin de la requete du tour en cours (`turn/end` ou `turn/error` du meme
+`requestId`) le termine : le refus d'un second prompt ne le termine pas.
+
 Dans ce prototype, les demandes ACP `session/request_permission` sont traitees
 automatiquement en selectionnant l'option `allow_once` ou une option
 equivalente quand elle existe.
