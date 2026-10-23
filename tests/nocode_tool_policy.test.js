@@ -65,7 +65,7 @@ test('a No Code session takes the effective policy of its engine, files on an en
   assert.equal(withEngine(undefined, () => noCodeToolPolicyName(noCode)), 'files');
   for (const policy of ['mcp-only', 'files', 'sandboxed-shell', 'full']) {
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(noCode)), policy);
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + '-v2');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + '-v3');
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(studio)), '', 'the Studio session is never limited');
     assert.equal(withEngine(policy, () => vibeToolPolicy(studio)), '');
   }
@@ -83,6 +83,8 @@ test('each policy writes what its config.toml leaves out, before the first table
   assert.ok(files.includes('enable_background_processes = false'));
   // writes in the session's folder need no permission; outside it Vibe asks and the Bridge refuses
   assert.match(filesText, /\n\[tools\.write_file\]\npermission = "always"\n\n\[tools\.edit\]\npermission = "always"\n/);
+  // a tool result Vibe saved to a file lies in VIBE_HOME, outside the session's folder: read_file reads it without asking
+  assert.match(filesText, /\n\[tools\.read_file\]\nallowlist = \["\/tmp\/vibe-home\/logs\/session\/unified\/\*\/tool-results\/\*"\]\n/);
 
   const shell = withEngine('sandboxed-shell', () => topLevel(writtenConfig(noCode)));
   assert.ok(shell.includes('disabled_tools = ["grep", "web_fetch", "web_search", "task"]'), shell.join('\n'));

@@ -441,16 +441,17 @@
   // files on an engine without it. Vibe's own shell, file and web tools ran in the engine container with the engine's
   // rights, its cwd the whole workspace (test-nocode, Mistral run: `bash: jq ...` approved by choosePermissionOption).
   // - mcp-only: none of them;
-  // - files: read_file, write_file and edit in the session's own folder (its cwd) and the tool results Vibe saved,
-  //   no shell, grep, web or subagent;
+  // - files: read_file, write_file and edit in the session's own folder (its cwd), read_file on the tool results Vibe
+  //   saved in the user's VIBE_HOME, no shell, grep, web or subagent;
   // - sandboxed-shell: files and the shell, vibe-acp and every process it starts confined by the engine's Landlock
   //   helper to the runtime (read only), the user's VIBE_HOME and the session's folder;
   // - full: as a Studio session.
-  // The config.toml removes the tools a policy leaves out (Vibe denies their runtime builtins too); under mcp-only and
+  // The config.toml removes the tools a policy leaves out; Vibe's runtime builtins (bash, read_file...) stay in the
+  // model's tool list and Vibe refuses to run them (test-nocode: `bash` answered "denied by approval policy"); under mcp-only and
   // files the Bridge also refuses any permission asked for another tool than a Convertigo MCP one. The Studio's own
   // session (user studio) is never limited. Bumped when a policy changes: No Code homes rewrite config.toml, resident
   // No Code sessions restart.
-  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v2";
+  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v3";
   var VIBE_NOCODE_POLICIES = ["mcp-only", "files", "sandboxed-shell", "full"];
   var VIBE_NOCODE_SHELL_TOOLS = ["bash*", "git_bash*", "powershell*"];
   var VIBE_NOCODE_FILE_TOOLS = ["read_file", "write_file", "edit"];
@@ -504,12 +505,18 @@
   }
 
   // Its tables: writes in the session's folder need no permission; outside it Vibe asks, and the Bridge refuses.
-  function vibeToolPolicyTables(options) {
+  // A tool result Vibe saved to a file (over 16,000 characters) lies in VIBE_HOME, outside that folder: read_file
+  // reads it back without asking (test-nocode: without it the read was refused and the agent saw an excerpt only).
+  function vibeToolPolicyTables(options, vibeHome) {
     var policy = noCodeToolPolicyName(options);
     if (policy !== "files" && policy !== "sandboxed-shell") {
       return [];
     }
-    return ["[tools.write_file]", 'permission = "always"', "", "[tools.edit]", 'permission = "always"', ""];
+    var tables = ["[tools.write_file]", 'permission = "always"', "", "[tools.edit]", 'permission = "always"', ""];
+    if (trim(vibeHome).length) {
+      tables.push("[tools.read_file]", "allowlist = " + tomlArray([trim(vibeHome) + "/logs/session/unified/*/tool-results/*"]), "");
+    }
+    return tables;
   }
 
   // The session's own folder, beside the user's VIBE_HOME: its cwd, its TMPDIR (Vibe's scratchpad) and, confined,
@@ -7721,7 +7728,7 @@
         ''
       );
     }
-    Array.prototype.push.apply(lines, vibeToolPolicyTables(options));
+    Array.prototype.push.apply(lines, vibeToolPolicyTables(options, vibeHome));
     var text = migrateManagedVibeModelPresets(lines.join("\n")).text;
     writeVibeCompactionPrompt(configDir);
     return {
