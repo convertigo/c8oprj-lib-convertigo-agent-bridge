@@ -437,6 +437,74 @@
   // Bumped when the generated model blocks change: existing homes rewrite config.toml, resident sessions restart.
   var VIBE_MODEL_CONFIG_REVISION = "gateway-output-cap-v3";
 
+  // A No Code session works through the Convertigo MCP only. Vibe's own shell, file and web tools ran in the engine
+  // container with the engine's rights, its cwd the whole workspace (test-nocode, Mistral run: `bash: jq ...`
+  // approved by choosePermissionOption). Its config.toml removes them from the catalog (Vibe denies their runtime
+  // builtins too), and the Bridge refuses any permission asked for another tool. Bumped when the list changes:
+  // No Code homes rewrite config.toml, resident No Code sessions restart.
+  var VIBE_NOCODE_TOOL_POLICY = "nocode-builtins-off-v1";
+  var VIBE_NOCODE_DISABLED_TOOLS = ["bash*", "git_bash*", "powershell*", "read_file", "write_file", "edit", "grep", "web_fetch", "web_search", "task"];
+
+  function vibeToolPolicy(options) {
+    return normalizeSkillProfile(options || {}) === "nocode" ? VIBE_NOCODE_TOOL_POLICY : "";
+  }
+
+  // run_typescript reaches background processes (tools.process) and subagents (tools.subagent) on its own switches.
+  function vibeToolPolicyLines(options) {
+    if (!vibeToolPolicy(options).length) {
+      return [];
+    }
+    return [
+      "disabled_tools = [" + VIBE_NOCODE_DISABLED_TOOLS.map(function (name) { return '"' + tomlString(name) + '"'; }).join(", ") + "]",
+      "enable_background_processes = false",
+      "enable_subagents = false"
+    ];
+  }
+
+  // The only tools a No Code session may be asked to run: the Convertigo MCP ones (`mcp_Convertigo.nocode_app_create`
+  // from run_typescript, `Convertigo_nocode-form-get` called directly).
+  function isConvertigoMcpToolTitle(title) {
+    return /^(mcp_convertigo\.|convertigo_)/i.test(trim(title));
+  }
+
+  // The title Vibe gave the tool call a permission request names (its tool_call update comes first, with the same id).
+  // An id Vibe built from the tool name stands for it; an effect id never seen is not judged.
+  function permissionToolTitle(entry, toolCall) {
+    toolCall = toolCall || {};
+    var id = trim(toolCall.toolCallId || toolCall.tool_call_id);
+    var title = trim(toolCall.title) || trim(entry && entry.toolCallTitles && id.length ? entry.toolCallTitles[id] : "");
+    if (!title.length && id.length && id.indexOf("effect-") !== 0) {
+      title = id;
+    }
+    return title;
+  }
+
+  function noCodePermissionRefused(entry, params) {
+    if (!entry || trim(entry.toolPolicy) !== VIBE_NOCODE_TOOL_POLICY) {
+      return false;
+    }
+    var title = permissionToolTitle(entry, (params || {}).toolCall || (params || {}).tool_call);
+    return title.length > 0 && !isConvertigoMcpToolTitle(title);
+  }
+
+  function rememberToolCallTitle(entry, toolCallId, title) {
+    var id = trim(toolCallId);
+    if (!entry || !id.length || !trim(title).length) {
+      return;
+    }
+    if (!entry.toolCallTitles) {
+      entry.toolCallTitles = {};
+      entry.toolCallTitleOrder = [];
+    }
+    if (!Object.prototype.hasOwnProperty.call(entry.toolCallTitles, id)) {
+      entry.toolCallTitleOrder.push(id);
+      if (entry.toolCallTitleOrder.length > 200) {
+        delete entry.toolCallTitles[entry.toolCallTitleOrder.shift()];
+      }
+    }
+    entry.toolCallTitles[id] = trim(title);
+  }
+
   function gatewayModelCatalogRefreshRequested(options) {
     options = options || {};
     return boolValue(options.refreshModelCatalog, false) || boolValue(options.refreshProviderSettings, false) || boolValue(options.refreshUpdateCheck, false);
@@ -7455,6 +7523,11 @@
       '[providers.extra_headers]',
       ''
     ];
+    // Top-level keys go before the first table.
+    var policyLines = vibeToolPolicyLines(options);
+    if (policyLines.length) {
+      Array.prototype.splice.apply(lines, [lines.indexOf(''), 0].concat(policyLines));
+    }
     for (var specIndex = 0; specIndex < specs.length; specIndex++) {
       var modelSpec = specs[specIndex];
       if (modelSpec.builtIn === true) {
@@ -10970,12 +11043,36 @@
     return preferred || first;
   }
 
+  // Vibe tells the model a rejected call was the user's choice ("provide an alternative plan"); a cancel is a bare deny.
+  function chooseRejectOption(options) {
+    for (var i = 0; i < (options || []).length; i++) {
+      var option = options[i] || {};
+      var optionId = String(option.optionId || option.option_id || option.id || "");
+      if (optionId === "reject_once" || String(option.kind || "").toLowerCase() === "reject_once") {
+        return optionId;
+      }
+    }
+    return "";
+  }
+
   function handleAgentRequest(entry, message) {
     var method = String(message.method || "");
     var params = message.params || {};
     pushEvent(entry, "acp/request_from_agent", { method: method, id: message.id || null, params: params });
 
     if (method === "session/request_permission") {
+      if (noCodePermissionRefused(entry, params)) {
+        var rejectId = chooseRejectOption(params.options || []);
+        pushEvent(entry, "permission/refused", {
+          reason: "nocode_tool_policy",
+          title: permissionToolTitle(entry, params.toolCall || params.tool_call),
+          toolCall: params.toolCall || params.tool_call || null
+        });
+        sendJsonResponse(entry, message.id, {
+          outcome: rejectId.length ? { outcome: "selected", optionId: rejectId } : { outcome: "cancelled" }
+        });
+        return;
+      }
       var optionId = choosePermissionOption(params.options || []);
       if (optionId.length) {
         pushEvent(entry, "permission/selected", {
@@ -11056,6 +11153,7 @@
       eventData.toolCallId = update.toolCallId || update.tool_call_id || "";
       eventData.title = update.title || "";
       eventData.status = update.status || "";
+      rememberToolCallTitle(entry, eventData.toolCallId, eventData.title);
       pushEvent(entry, "tool/start", eventData);
       return;
     }
@@ -11063,6 +11161,7 @@
       eventData.toolCallId = update.toolCallId || update.tool_call_id || "";
       eventData.title = update.title || "";
       eventData.status = update.status || "";
+      rememberToolCallTitle(entry, eventData.toolCallId, eventData.title);
       pushEvent(entry, "tool/update", eventData);
       return;
     }

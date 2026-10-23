@@ -86,7 +86,7 @@
         // compared through the intent recorded beside the file. `active_model` is deliberately
         // out: agent_vibe_start passes an empty model on purpose and sets the session model over
         // ACP, so recording it would make start and setup fight over the file.
-        var expectedIntent = vibeConfigIntent({
+        var intentFields = {
           modelConfigRevision: VIBE_MODEL_CONFIG_REVISION,
           bearerTokenEnv: expectedBearerEnv,
           endpoint: expectedEndpoint,
@@ -99,7 +99,13 @@
           revealMode: expectedRevealMode,
           viewerDebugPort: expectedBearerEnv.length ? expectedViewerDebugPort : 0,
           conversationId: expectedBearerEnv.length && expectedViewerDebugPort >= 1024 ? mcpConversationId(options) : ""
-        });
+        };
+        // Only a No Code home records it: other homes keep the intent they were written with.
+        var expectedToolPolicy = vibeToolPolicy(options);
+        if (expectedToolPolicy.length) {
+          intentFields.toolPolicy = expectedToolPolicy;
+        }
+        var expectedIntent = vibeConfigIntent(intentFields);
         var recordedIntent = readVibeConfigIntent(setup.vibeHome);
         // The file-derived checks stay: they catch a config.toml deleted or hand-edited behind
         // the recorded intent. Only the MCP url is compared on its base, the part `_setupVibe`
@@ -351,6 +357,8 @@
       // user's consent to send feedback). Vibe reads the tool list once, when its process starts.
       var requestedCatalogKey = trim(options.mcpCatalogKey);
       var catalogChanged = requestedCatalogKey.length > 0 && (trim(existing.mcpCatalogKey) || "feedback:off") !== requestedCatalogKey;
+      // A No Code process started before its config.toml removed the shell and file tools still has them.
+      var toolPolicyChanged = trim(existing.toolPolicy) !== vibeToolPolicy(options);
       if (requestedMcpTokenFingerprint.length
           && trim(existing.mcpBearerTokenFingerprint) !== requestedMcpTokenFingerprint) {
         pushEvent(existing, "warning", {
@@ -379,6 +387,17 @@
           phase: "session/config",
           reason: "model_catalog_changed",
           message: "Vibe must restart to apply the refreshed model capabilities."
+        });
+        stopEntry(existing, true);
+        existing = null;
+      } else if (toolPolicyChanged) {
+        if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
+          options.sessionId = trim(existing.sessionId);
+        }
+        pushEvent(existing, "warning", {
+          phase: "session/config",
+          reason: "tool_policy_changed",
+          message: "Vibe must restart to apply the tools this session may use."
         });
         stopEntry(existing, true);
         existing = null;
@@ -507,6 +526,7 @@
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
     entry.mcpCatalogKey = trim(options.mcpCatalogKey);
+    entry.toolPolicy = vibeToolPolicy(options);
     entry.viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
     entry.browserDebugUrl = trim(options.browserDebugUrl);
     entry.playwrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);

@@ -58,6 +58,15 @@ passing another profile id or by running inside a Studio surface.
 The Studio setup removes `convertigo-nocode` from the `studio` home so the
 low-code agent cannot accidentally mutate a NoCode application.
 
+A NoCode agent runs on the server, in the engine's container, so it gets no
+shell, file or web tool of its runtime. For Vibe, the NoCode `config.toml`
+lists them in `disabled_tools` (`bash*`, `git_bash*`, `powershell*`,
+`read_file`, `write_file`, `edit`, `grep`, `web_fetch`, `web_search`, `task`)
+and turns off `run_typescript`'s background processes and subagents; a
+resident NoCode process started before restarts on the same session. The
+Bridge also refuses any permission a NoCode session asks for a tool that is
+not a Convertigo MCP one, instead of approving it.
+
 ## Ownership
 
 `lib_ConvertigoAgentBridge` owns provider lifecycle, isolated homes, sessions,
