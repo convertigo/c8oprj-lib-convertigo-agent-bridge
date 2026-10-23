@@ -10449,11 +10449,18 @@
       data: data || {}
     };
     // Every provider reports its turns with these three events: keep a common "turn running"
-    // flag so interrupt() needs no provider-specific state.
+    // flag so interrupt() needs no provider-specific state. Only the end of the running turn's request ends it: a second
+    // prompt refused by the agent ("A turn is already running") left the flag down while the first turn went on.
+    var requestId = event.data && event.data.requestId != null ? String(event.data.requestId) : "";
     if (event.type === "turn/start") {
+      if (entry.turnActive !== true) {
+        entry.turnRequestId = requestId;
+      }
       entry.turnActive = true;
-    } else if (event.type === "turn/end" || event.type === "turn/error" || event.type === "system/closed") {
+    } else if (event.type === "system/closed" || ((event.type === "turn/end" || event.type === "turn/error") &&
+        (!requestId.length || !trim(entry.turnRequestId).length || requestId === entry.turnRequestId))) {
       entry.turnActive = false;
+      entry.turnRequestId = "";
     }
     entry.events.add(event);
     while (entry.events.size() > MAX_EVENT_BUFFER) {
@@ -11240,6 +11247,44 @@
     }
   }
 
+  function rememberAcpToolStart(entry, toolCallId) {
+    if (!trim(toolCallId).length) {
+      return;
+    }
+    entry.toolStartedAt = entry.toolStartedAt || {};
+    var ids = Object.keys(entry.toolStartedAt);
+    if (ids.length >= 500) {
+      delete entry.toolStartedAt[ids[0]];
+    }
+    entry.toolStartedAt[toolCallId] = now();
+  }
+
+  // A tool call the agent runtime could not complete. Vibe sends every such failure with the same message, "The provided
+  // tool call failed": its error code (mcp_transport_failed, mcp_timeout...), whether it would retry and any details are
+  // the cause, so the update carries them as failure, with the duration of the call.
+  function acpToolFailure(entry, update, toolCallId, status) {
+    var startedAt = entry.toolStartedAt && toolCallId ? entry.toolStartedAt[toolCallId] : null;
+    var terminal = status === "failed" || status === "completed" || status === "cancelled";
+    if (terminal && startedAt != null) {
+      delete entry.toolStartedAt[toolCallId];
+    }
+    if (status !== "failed") {
+      return null;
+    }
+    var output = update.rawOutput || update.raw_output || null;
+    var error = output && typeof output === "object" ? (output.error && typeof output.error === "object" ? output.error : output) : null;
+    if (!error || !trim(error.code).length) {
+      return null;
+    }
+    return {
+      code: String(error.code),
+      message: trim(error.message),
+      retryable: error.retryable === true,
+      details: typeof error.details === "undefined" ? null : error.details,
+      durationMs: startedAt != null ? Math.max(0, now() - startedAt) : null
+    };
+  }
+
   function normalizeSessionUpdate(entry, params) {
     var update = params.update || params.sessionUpdate || params;
     var kind = String(update.sessionUpdate || update.session_update || "");
@@ -11268,6 +11313,7 @@
       eventData.title = update.title || "";
       eventData.status = update.status || "";
       rememberToolCallTitle(entry, eventData.toolCallId, eventData.title);
+      rememberAcpToolStart(entry, eventData.toolCallId);
       pushEvent(entry, "tool/start", eventData);
       return;
     }
@@ -11276,6 +11322,10 @@
       eventData.title = update.title || "";
       eventData.status = update.status || "";
       rememberToolCallTitle(entry, eventData.toolCallId, eventData.title);
+      var failure = acpToolFailure(entry, update, eventData.toolCallId, eventData.status);
+      if (failure !== null) {
+        eventData.failure = failure;
+      }
       pushEvent(entry, "tool/update", eventData);
       return;
     }
