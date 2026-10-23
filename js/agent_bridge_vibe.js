@@ -480,6 +480,8 @@
         // the conversation's first message takes its prewarmed process: the conversation's TTL applies from now on
         existing.prewarm = false;
       }
+      // its prompt follows: a sweep in between must not take this process for an idle one
+      existing.lastAccess = now();
       try {
         configureVibeSession(existing, options, timeoutMs);
       } catch (configureExistingError) {

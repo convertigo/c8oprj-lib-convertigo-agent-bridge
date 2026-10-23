@@ -168,6 +168,7 @@ test('Vibe starts sweep, apply the No Code TTL and the user limit, and the prewa
   assert.match(vibeSource, /if \(boolValue\(options\.prewarm, false\) && existing !== null[^{]+\{\n\s+return \{ ok: true, status: "already_running"/, 'a late prewarm leaves the process alone');
   assert.match(vibeSource, /if \(existing\.prewarm === true && !boolValue\(options\.prewarm, false\)\) \{[^}]*existing\.prewarm = false;/);
   assert.match(vibeSource, /"received"\);\n\s+entry\.prewarm = false;/);
+  assert.match(vibeSource, /existing\.prewarm = false;\n\s+\}\n\s+\/\/ its prompt follows[^\n]*\n\s+existing\.lastAccess = now\(\);/);
   assert.match(vibeSource, /settingsProbe: true,/);
   assert.match(startSequence, /prewarm: typeof prewarm === "undefined" \? false : prewarm\n\s+\}\);'/);
   assert.match(startSequence, /\n↓prewarm \[variables\.RequestableVariable-\d+\]: \n  comment: [^\n]+\n  description: [^\n]+\n  schemaType: xsd:boolean/);
