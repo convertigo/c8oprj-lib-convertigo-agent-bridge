@@ -228,6 +228,12 @@ Les notifications ACP `agent_thought_chunk`, `agent_message_chunk`,
 `tool_call`, `tool_call_update`, `usage_update`,
 `available_commands_update` et `plan` sont converties en evenements pollables.
 
+Un `tool/update` au statut `failed` porte `failure` : `code`, `message`,
+`retryable`, `details` et `durationMs` (mesure depuis le `tool_call`). Vibe
+repond a tout appel qu'il n'a pas pu mener par le meme message, "The provided
+tool call failed" : la cause est le code (`mcp_transport_failed`,
+`mcp_timeout`, `mcp_authorization_required`...).
+
 Dans ce prototype, les demandes ACP `session/request_permission` sont traitees
 automatiquement en selectionnant l'option `allow_once` ou une option
 equivalente quand elle existe.
