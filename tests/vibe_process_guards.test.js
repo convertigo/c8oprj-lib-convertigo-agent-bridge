@@ -165,6 +165,7 @@ test('Vibe starts sweep, apply the No Code TTL and the user limit, and the prewa
   assert.match(vibeSource, /intValue\(options\.ttlSeconds, noCode \? NOCODE_TTL_SECONDS : DEFAULT_TTL_SECONDS, 30, 86400\)/);
   assert.match(vibeSource, /registry\.put\(handle, entry\);\n\s+try \{\n\s+enforceUserLimit\(registry, entry\);/);
   assert.match(vibeSource, /existing\.status === "starting"\) \{\n\s+if \(!waitWhileStarting\(existing, STARTING_GRACE_MILLIS\)\)/);
+  assert.match(vibeSource, /if \(boolValue\(options\.prewarm, false\) && existing !== null[^{]+\{\n\s+return \{ ok: true, status: "already_running"/, 'a late prewarm leaves the process alone');
   assert.match(vibeSource, /if \(existing\.prewarm === true && !boolValue\(options\.prewarm, false\)\) \{[^}]*existing\.prewarm = false;/);
   assert.match(vibeSource, /"received"\);\n\s+entry\.prewarm = false;/);
   assert.match(vibeSource, /settingsProbe: true,/);

@@ -386,6 +386,11 @@
     } catch (_ignoreStartSweep) {}
     var existing = registry.get(handle);
     var timeoutMs = intValue(options.requestTimeoutMs, 60000, 1000, 600000);
+    // A prewarm never changes a process its conversation already has (a late prewarm call must not reset its model).
+    if (boolValue(options.prewarm, false) && existing !== null && typeof existing !== "undefined"
+        && (existing.status === "starting" || processAlive(existing.process))) {
+      return { ok: true, status: "already_running", handle: handle, state: statusOf(existing), timestamp: now() };
+    }
     // The prewarm of this conversation may still be starting its process: wait for it rather than start a second one.
     if (existing !== null && typeof existing !== "undefined" && existing.status === "starting") {
       if (!waitWhileStarting(existing, STARTING_GRACE_MILLIS)) {
