@@ -130,6 +130,16 @@ same context.
   3.5) accepts images; `zai-glm-5-2` through Mistral returns 400 "Image input is
   not enabled for this model". `VIBE_GLM_SUPPORTS_IMAGES` records that fact and
   `migrateManagedVibeModelPresets` realigns existing managed presets.
+- No Code (entries with `noCode`): `vibeImageBlocks` reads the user's
+  attachments only (`noCodeAttachmentAllowed`: agents/<provider>/users/<user>/
+  conversations/<id>/attachments, agents/attachments/<user>/); the path comes
+  from the page. For a model that cannot see, `describeImagesForBlindModel` has
+  each image described by image-describe, loaded from the installed
+  lib_ConvertigoMCP (`js/tools_image_describe.js`), on the user's gateway key:
+  3 images and 45 s per message at most, the description appended to the
+  prompt, a "describe" line in startup-timings.ndjson, the calls kept in
+  `convertigo-image-descriptions.json` beside the session journal and counted by
+  `vibeJournalUsage`. Cover with `node --test tests/nocode_image_describe.test.js`.
 
 ## Codex Integration
 

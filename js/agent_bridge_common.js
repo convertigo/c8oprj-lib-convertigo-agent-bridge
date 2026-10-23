@@ -996,6 +996,7 @@
   var VIBE_IMAGE_MIME_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
   var VIBE_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
   var VIBE_MAX_IMAGES_PER_MESSAGE = 8;
+  var VIBE_DESCRIBED_IMAGES_FILE = "convertigo-image-descriptions.json";
   var STUDIO_ROUTER_SKILL_SLUG = "convertigo-studio";
   var MANAGED_SKILL_BUNDLE_STATE_FILE = "managed-skill-bundle.json";
   var FLOW_MINIMUM_CONVERTIGO_VERSION = "8.5.0";
@@ -10549,7 +10550,20 @@
         writeJsonFile(stateFile, { version: 2, sessionId: session, segments: segments, metrics: metrics });
       } catch (_ignoreUsageStateWrite) {}
     }
-    var total = sumVibeJournalSegments(segments, vibeModelPrices(home));
+    // The images the Agent Bridge had described for a model that cannot see (describeImagesForBlindModel) are not in
+    // the journal: their calls are kept beside it and counted with the session.
+    var summed = segments;
+    var described = readJsonFile(new File(sessionDir, VIBE_DESCRIBED_IMAGES_FILE));
+    if (described && described.segment && typeof described.segment === "object") {
+      summed = {};
+      for (var seg in segments) {
+        if (Object.prototype.hasOwnProperty.call(segments, seg)) {
+          summed[seg] = segments[seg];
+        }
+      }
+      summed[VIBE_DESCRIBED_IMAGES_FILE] = described.segment;
+    }
+    var total = sumVibeJournalSegments(summed, vibeModelPrices(home));
     var view = vibeMetricsView(metrics, vibeCompactionCount(sessionDir));
     if (view && !(options && options.withTurns === true)) {
       // The usage updates carry the session measures; the per-turn detail is for the export.
@@ -11672,7 +11686,8 @@
     return waitForPending(entry, pending, timeoutMs, true);
   }
 
-  function vibeImageBlocks(value, model) {
+  // allowed (optional): which paths may be read; a No Code session reads its user's attachments only
+  function vibeImageBlocks(value, model, allowed) {
     var report = { blocks: [], skipped: [] };
     var paths = [];
     // Sequence variables reach Rhino as java.lang.String objects, not JS
@@ -11701,6 +11716,10 @@
       var extension = lower.lastIndexOf(".") >= 0 ? lower.substring(lower.lastIndexOf(".") + 1) : "";
       var mimeType = VIBE_IMAGE_MIME_TYPES[extension] || "";
       if (!mimeType.length) {
+        continue;
+      }
+      if (typeof allowed === "function" && allowed(candidate) !== true) {
+        report.skipped.push({ path: candidate, reason: "not_allowed" });
         continue;
       }
       if (!file.isFile()) {

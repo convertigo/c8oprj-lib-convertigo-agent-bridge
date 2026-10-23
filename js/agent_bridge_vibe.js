@@ -818,6 +818,144 @@
     }
   };
 
+  // A No Code user's images come from the conversation's attachments only: the Assistant stores them under
+  // agents/<provider>/users/<user>/conversations/<id>/attachments or agents/attachments/<user>/, while the path in the
+  // request comes from the page. Another path (another user's files, the server's) is not read.
+  function noCodeAttachmentAllowed(entry, path) {
+    try {
+      var owner = trim(entry.ownerKey);
+      var root = trim(entry.workspaceRoot);
+      if (!owner.length || !root.length || !trim(path).length) {
+        return false;
+      }
+      var agents = String(new File(new File(root), "agents").getCanonicalPath()).replace(/\\/g, "/") + "/";
+      var file = String(new File(trim(path)).getCanonicalPath()).replace(/\\/g, "/");
+      if (file.indexOf(agents) !== 0) {
+        return false;
+      }
+      var rel = file.substring(agents.length);
+      var slug = userPathSlug(owner).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp("^[^/]+/users/" + slug + "/conversations/[^/]+/attachments/[^/]").test(rel)
+        || new RegExp("^attachments/" + slug + "/[^/]+/[^/]").test(rel);
+    } catch (_ignoreAttachmentCheck) {
+      return false;
+    }
+  }
+
+  // A No Code agent whose model cannot see (GLM through the Convertigo gateway) lost the images its user attached: a
+  // paper form, a scan, a mockup. image-describe (lib_ConvertigoMCP: a vision model of the gateway) now describes each
+  // of them on the user's own gateway key, and the description goes with the prompt. At most 3 images and 45 s per
+  // message, so the prompt still reaches Vibe within the Assistant's wait; the calls count in the conversation's usage.
+  var NOCODE_DESCRIBED_IMAGES_MAX = 3;
+  var NOCODE_IMAGE_DESCRIBE_BUDGET_MS = 45000;
+  var NOCODE_IMAGE_DESCRIBE_MAX_TOKENS = 3000;
+  var NOCODE_IMAGE_QUESTION = "Describe this image for an agent that builds forms, applications and Baserow tables from it "
+    + "and cannot see it. Transcribe every visible text exactly: titles, labels, field names, options, column headers and "
+    + "values. Give the structure: the sections, each field with its apparent type (text, date, number, checkbox, list...), "
+    + "the tables with their columns, and the layout. Say what you cannot read instead of guessing.";
+
+  // image-describe of the installed lib_ConvertigoMCP (its request, image checks and usage), or null without it
+  function loadImageDescribe() {
+    try {
+      var manager = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager;
+      var project = manager.getOriginalProjectByName(MCP_CATALOG_PROJECT);
+      if (project === null || typeof project === "undefined") {
+        return null;
+      }
+      var file = new File(project.getDirFile(), "js/tools_image_describe.js");
+      if (!file.isFile()) {
+        return null;
+      }
+      var api = new Function("C8O", readTextFile(file) + "\nreturn C8O.imageDescribe;")({});
+      return api && typeof api.run === "function" && typeof api.javaHost === "function" ? api : null;
+    } catch (_ignoreImageDescribe) {
+      return null;
+    }
+  }
+
+  // deps (tests): api (image-describe), key (gateway key), record (usage writer)
+  function describeImagesForBlindModel(entry, skipped, deps) {
+    var report = { text: "", described: [], failed: [] };
+    var blind = [];
+    for (var i = 0; i < skipped.length; i++) {
+      if (skipped[i].reason === "model_without_vision") {
+        blind.push(skipped[i]);
+      }
+    }
+    if (entry.noCode !== true || !blind.length) {
+      return report;
+    }
+    deps = deps || {};
+    var api = deps.api !== undefined ? deps.api : loadImageDescribe();
+    var key = deps.key !== undefined ? deps.key : convertigoGatewayApiKey({ workspaceRoot: entry.workspaceRoot }, entry.vibeHome);
+    if (api === null || !trim(key).length) {
+      return report;
+    }
+    var deadline = now() + NOCODE_IMAGE_DESCRIBE_BUDGET_MS;
+    var base = api.javaHost();
+    var host = {
+      readKey: function () { return key; },
+      // the attached file itself, already checked by vibeImageBlocks
+      readImageFile: function (pathText) {
+        var file = new File(pathText);
+        return { bytes: Files.readAllBytes(file.toPath()), path: String(file.getPath()) };
+      },
+      decodeBase64: base.decodeBase64,
+      encodeBase64: base.encodeBase64,
+      now: base.now,
+      post: function (url, apiKey, body, timeoutMs) {
+        return base.post(url, apiKey, body, Math.max(1000, Math.min(Number(timeoutMs), deadline - now())));
+      }
+    };
+    var usages = [];
+    for (var b = 0; b < blind.length; b++) {
+      var name = String(new File(blind[b].path).getName());
+      if (b >= NOCODE_DESCRIBED_IMAGES_MAX || now() >= deadline) {
+        report.failed.push({ path: blind[b].path, name: name, reason: b >= NOCODE_DESCRIBED_IMAGES_MAX ? "too_many" : "time" });
+        continue;
+      }
+      try {
+        var result = api.run({ path: blind[b].path, question: NOCODE_IMAGE_QUESTION, maxTokens: NOCODE_IMAGE_DESCRIBE_MAX_TOKENS }, host);
+        var description = trim(result && result.description);
+        if (!description.length) {
+          throw new Error(trim(result && result.warning) || "no description");
+        }
+        if (result.usage) {
+          usages.push(result.usage);
+        }
+        report.described.push({ path: blind[b].path, name: name, model: trim(result.model) });
+        report.text += "\n\nAttached image \"" + name + "\": you cannot see images, so the Agent Bridge had it described by the vision model `"
+          + trim(result.model) + "`" + (result.truncated === true ? " (its description was cut)" : "") + ". The description:\n" + description;
+      } catch (describeError) {
+        report.failed.push({ path: blind[b].path, name: name, reason: String(describeError && describeError.message ? describeError.message : describeError) });
+      }
+    }
+    if (usages.length) {
+      try {
+        (deps.record || recordDescribedImagesUsage)(entry, usages);
+      } catch (_ignoreDescribedUsage) {}
+    }
+    return report;
+  }
+
+  // the calls go beside the session journal, counted with the session by vibeJournalUsage
+  function recordDescribedImagesUsage(entry, usages) {
+    if (!trim(entry.vibeHome).length || !/^[A-Za-z0-9._-]{1,128}$/.test(trim(entry.sessionId))) {
+      return;
+    }
+    var file = new File(new File(trim(entry.vibeHome), "logs/session/unified/" + trim(entry.sessionId)), VIBE_DESCRIBED_IMAGES_FILE);
+    var state = readJsonFile(file) || {};
+    var segment = state.segment && typeof state.segment === "object" ? state.segment : emptyVibeJournalSegment();
+    var seen = {};
+    for (var s = 0; segment.visionCallIds && s < segment.visionCallIds.length; s++) {
+      seen[segment.visionCallIds[s]] = true;
+    }
+    for (var u = 0; u < usages.length; u++) {
+      addVisionUsage(segment, usages[u], seen);
+    }
+    writeJsonFile(file, { version: 1, segment: segment });
+  }
+
   C8O.agentBridge.vibePrompt = function (options) {
     options = options || {};
     var handle = resolveHandle(options.handle);
@@ -845,9 +983,21 @@
       type: "text",
       text: promptText
     }];
-    var images = vibeImageBlocks(firstDefinedOption(options, ["images", "imagePaths", "attachments"]) || optionOrRequest(options, "images"), entry.model);
+    var images = vibeImageBlocks(firstDefinedOption(options, ["images", "imagePaths", "attachments"]) || optionOrRequest(options, "images"), entry.model,
+      entry.noCode === true ? function (path) { return noCodeAttachmentAllowed(entry, path); } : null);
     for (var imageIndex = 0; imageIndex < images.blocks.length; imageIndex++) {
       promptBlocks.push(images.blocks[imageIndex]);
+    }
+    var describeTimer = startupTimer("describe", { handle: handle });
+    var described = describeImagesForBlindModel(entry, images.skipped);
+    if (described.described.length || described.failed.length) {
+      describeTimer.fields.described = described.described.length;
+      describeTimer.fields.failed = described.failed.length;
+      writeStartupTimings(describeTimer, entry.workspaceRoot, described.failed.length ? "partial" : "described");
+      promptBlocks[0].text += described.text;
+      images.skipped = images.skipped.filter(function (item) {
+        return !described.described.some(function (done) { return done.path === item.path; });
+      });
     }
     if (images.skipped.length) {
       pushEvent(entry, "warning", {
