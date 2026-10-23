@@ -923,7 +923,7 @@
         if (result.usage) {
           usages.push(result.usage);
         }
-        report.described.push({ path: blind[b].path, name: name, model: trim(result.model) });
+        report.described.push({ path: blind[b].path, name: name, model: trim(result.model), description: description, image: result.image || null });
         report.text += "\n\nAttached image \"" + name + "\": you cannot see images, so the Agent Bridge had it described by the vision model `"
           + trim(result.model) + "`" + (result.truncated === true ? " (its description was cut)" : "") + ". The description:\n" + description;
       } catch (describeError) {
@@ -936,6 +936,25 @@
       } catch (_ignoreDescribedUsage) {}
     }
     return report;
+  }
+
+  // Each described image shows in the turn as an image-describe call, as in the Studio: the Assistant page draws the
+  // image (its thumbnail, loaded through AgentWorkspaceImage) with the question and the description.
+  function pushDescribedImageEvents(entry, described) {
+    for (var d = 0; d < described.described.length; d++) {
+      var item = described.described[d];
+      var callId = "bridge-image-describe-" + now() + "-" + d;
+      var input = { path: item.path, question: NOCODE_IMAGE_QUESTION };
+      pushEvent(entry, "tool/start", {
+        sessionId: entry.sessionId || "", toolCallId: callId, title: "image-describe", toolName: "image-describe", status: "in_progress",
+        update: { sessionUpdate: "tool_call", toolCallId: callId, title: "image-describe", status: "in_progress", rawInput: input }
+      });
+      pushEvent(entry, "tool/update", {
+        sessionId: entry.sessionId || "", toolCallId: callId, title: "image-describe", toolName: "image-describe", status: "completed",
+        detail: JSON.stringify({ description: item.description, model: item.model, image: { path: item.path, mimeType: item.image && item.image.mimeType || "", bytes: item.image && item.image.bytes || 0 } }),
+        update: { sessionUpdate: "tool_call_update", toolCallId: callId, title: "image-describe", status: "completed", rawInput: input }
+      });
+    }
   }
 
   // the calls go beside the session journal, counted with the session by vibeJournalUsage
@@ -1032,6 +1051,9 @@
         textLength: promptText.length,
         imageCount: images.blocks.length
       });
+      // the turn's events start here: the images described for it come first
+      var turnCursor = entry.nextIndex;
+      pushDescribedImageEvents(entry, described);
       var wait = boolValue(options.waitForCompletion, false);
       if (wait) {
         var timeoutMs = intValue(options.requestTimeoutMs, 600000, 1000, 3600000);
@@ -1052,7 +1074,7 @@
         status: "submitted",
         handle: handle,
         requestId: pending.id,
-        cursor: entry.nextIndex,
+        cursor: turnCursor,
         state: statusOf(entry),
         timestamp: now()
       };

@@ -139,7 +139,11 @@ same context.
   3 images and 45 s per message at most, the description appended to the
   prompt, a "describe" line in startup-timings.ndjson, the calls kept in
   `convertigo-image-descriptions.json` beside the session journal and counted by
-  `vibeJournalUsage`. Cover with `node --test tests/nocode_image_describe.test.js`.
+  `vibeJournalUsage`. Each described image is also pushed as an `image-describe`
+  tool call (tool/start, tool/update with the image path and the description)
+  right after turn/start, the prompt's cursor before them, so the Assistant shows
+  its thumbnail as in the Studio. Cover with
+  `node --test tests/nocode_image_describe.test.js`.
 
 ## Codex Integration
 

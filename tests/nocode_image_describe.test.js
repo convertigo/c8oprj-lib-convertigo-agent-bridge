@@ -132,3 +132,19 @@ test('the described images count once per call in the vision rows of the session
   assert.equal(Math.round(row.cost * 1000), 4);
   assert.deepEqual(saved.segment.visionCallIds, ['c1', 'c2']);
 });
+
+test('each described image shows in the turn as an image-describe call, read from the turn\'s cursor', () => {
+  const events = [];
+  const fakeEntry = Object.assign({}, entry, { nextIndex: 7 });
+  withFakes({ now: () => 1000, pushEvent: (e, type, data) => { events.push({ type, data }); e.nextIndex++; } }, () =>
+    pushDescribedImageEvents(fakeEntry, { described: [{ path: mine + '/conversations/a/attachments/form.png', name: 'form.png', model: 'mistral/mistral-large-4', description: 'Nom, Date', image: { mimeType: 'image/png', bytes: 1200 } }], failed: [] }));
+  assert.deepEqual(events.map(e => e.type), ['tool/start', 'tool/update']);
+  const [start, done] = events.map(e => e.data);
+  assert.equal(start.toolCallId, done.toolCallId);
+  assert.equal(done.title, 'image-describe', 'the Assistant draws the thumbnail of an image-describe call');
+  assert.equal(done.status, 'completed');
+  assert.equal(done.update.rawInput.path, mine + '/conversations/a/attachments/form.png');
+  assert.deepEqual(JSON.parse(done.detail), { description: 'Nom, Date', model: 'mistral/mistral-large-4', image: { path: mine + '/conversations/a/attachments/form.png', mimeType: 'image/png', bytes: 1200 } });
+  assert.match(vibeSource, /var turnCursor = entry\.nextIndex;\n\s+pushDescribedImageEvents\(entry, described\);/);
+  assert.match(vibeSource, /status: "submitted",\n\s+handle: handle,\n\s+requestId: pending\.id,\n\s+cursor: turnCursor,/);
+});
