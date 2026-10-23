@@ -66,9 +66,18 @@ may do besides the Convertigo MCP is the engine property `agents.tool_policy`
 | --- | --- |
 | `mcp-only` | the Convertigo MCP tools only |
 | `files` (`auto`, the default) | `read_file`, `write_file` and `edit` in the session's own folder (`scratch/<conversation>` beside the user's `VIBE_HOME`, its cwd and `TMPDIR`) and the tool results Vibe saved; no shell, `grep`, web or subagent |
-| `sandboxed-shell` | files and the shell, `vibe-acp` and every process it starts confined by the engine's Landlock helper to the runtime (read only), the user's `VIBE_HOME` and the session's folder; the engine gives `files` where it cannot confine |
+| `sandboxed-shell` | files and the shell; the engine gives `files` where it cannot confine |
 | `full` | what a Studio session gets |
 
+Wherever the engine confines (Landlock, the `c8o-agent-sandbox` helper of its
+Docker image), `vibe-acp` and every process it starts under `mcp-only`,
+`files` and `sandboxed-shell` run through the helper: read only on the
+runtime, writable only in the user's `VIBE_HOME` and the session's folder
+(also its `HOME`, `TMPDIR` and cache), nothing else. The session refuses to
+start rather than run unconfined.
+
+`read_file` reads back, without asking, the tool results Vibe saved to a file
+(`VIBE_HOME/logs/session/unified/*/tool-results/*`, through its allowlist).
 For Vibe, the NoCode `config.toml` lists the tools a policy leaves out in
 `disabled_tools` and turns off `run_typescript`'s background processes (but
 under `sandboxed-shell`) and subagents; a resident NoCode process started

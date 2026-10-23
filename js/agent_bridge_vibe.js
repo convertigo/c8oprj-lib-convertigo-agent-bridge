@@ -525,6 +525,8 @@
         cwd = noCodeSandbox.cwd;
         env.TMPDIR = noCodeSandbox.tmp;
         if (noCodeSandbox.confined) {
+          env.HOME = noCodeSandbox.home;
+          env.XDG_CACHE_HOME = noCodeSandbox.cache;
           command = noCodeSandbox.wrap(command);
         }
       }

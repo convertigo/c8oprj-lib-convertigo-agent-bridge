@@ -36,7 +36,7 @@ function withEngine(policy, run, extra = {}) {
     nodeRuntimeSearchPath: () => extra.nodePath || '',
     stableId: (prefix, value) => prefix + '-' + value,
     engineAgentSandbox: () => policy === undefined ? javaProxy : {
-      describe: () => JSON.stringify({ policy, effective: policy, landlockAbi: 1, helper: '/usr/local/bin/c8o-agent-sandbox' }),
+      describe: () => JSON.stringify({ policy, effective: policy, landlockAbi: extra.abi === undefined ? 1 : extra.abi, helper: '/usr/local/bin/c8o-agent-sandbox' }),
       wrap: (command, ro, rw) => { wrapped.push({ command, ro, rw }); const args = ['/usr/local/bin/c8o-agent-sandbox', '--', ...command]; return { size: () => args.length, get: i => args[i] }; }
     }
   };
@@ -65,7 +65,8 @@ test('a No Code session takes the effective policy of its engine, files on an en
   assert.equal(withEngine(undefined, () => noCodeToolPolicyName(noCode)), 'files');
   for (const policy of ['mcp-only', 'files', 'sandboxed-shell', 'full']) {
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(noCode)), policy);
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + '-v3');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v3');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + policy + '-v3', 'an engine that cannot confine');
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(studio)), '', 'the Studio session is never limited');
     assert.equal(withEngine(policy, () => vibeToolPolicy(studio)), '');
   }
@@ -96,14 +97,18 @@ test('each policy writes what its config.toml leaves out, before the first table
   }
 });
 
-test('a No Code session works in its own folder; sandboxed-shell confines vibe-acp to its runtime, its home and that folder', () => {
+test('a No Code session works in its own folder; where the engine confines, vibe-acp runs confined to its runtime, its home and that folder', () => {
   const home = '/workspace/agents/vibe/homes-convertigo/users/person/.vibe-home';
-  const files = withEngine('files', () => noCodeSessionSandbox(noCode, { installDir: '/workspace/agents/vibe' }, home));
+  const files = withEngine('files', () => noCodeSessionSandbox(noCode, { installDir: '/workspace/agents/vibe' }, home), { abi: 0 });
   assert.equal(files.cwd, '/workspace/agents/vibe/homes-convertigo/users/person/scratch/conversation-agent-1');
   assert.equal(files.tmp, files.cwd + '/.tmp');
-  assert.equal(files.confined, false);
+  assert.equal(files.confined, false, 'an engine that cannot confine');
   assert.deepEqual(files.readWrite, [home, files.cwd]);
+  assert.deepEqual([files.home, files.cache], [files.cwd, files.cwd + '/.cache']);
   assert.notEqual(withEngine('files', () => noCodeSessionSandbox({ ...noCode, conversationId: 'agent-2' }, {}, home)).cwd, files.cwd, 'one folder per conversation');
+  for (const policy of ['mcp-only', 'files', 'sandboxed-shell']) {
+    assert.equal(withEngine(policy, () => noCodeSessionSandbox(noCode, {}, home)).confined, true, policy + ' where the engine confines');
+  }
 
   withEngine('sandboxed-shell', wrapped => {
     const shell = noCodeSessionSandbox(noCode, { installDir: '/workspace/agents/vibe' }, home);
@@ -120,7 +125,7 @@ test('a No Code session works in its own folder; sandboxed-shell confines vibe-a
 test('vibeStart puts the session in its folder, confines its command and fails rather than run it unconfined', () => {
   const start = vibeSource.slice(vibeSource.indexOf('var noCodeSandbox = null;'), vibeSource.indexOf('var ttlMillis = '));
   assert.match(start, /cwd = noCodeSandbox\.cwd;\n\s+env\.TMPDIR = noCodeSandbox\.tmp;/);
-  assert.match(start, /if \(noCodeSandbox\.confined\) \{\n\s+command = noCodeSandbox\.wrap\(command\);/);
+  assert.match(start, /if \(noCodeSandbox\.confined\) \{\n\s+env\.HOME = noCodeSandbox\.home;\n\s+env\.XDG_CACHE_HOME = noCodeSandbox\.cache;\n\s+command = noCodeSandbox\.wrap\(command\);/);
   assert.match(start, /catch \(sandboxError\) \{\n\s+return \{ ok: false, status: "error", phase: "sandbox"/);
   assert.match(vibeSource, /entry\.noCodePolicy = noCodeSandbox !== null \? noCodeSandbox\.policy : noCodeToolPolicyName\(options\);/);
 });

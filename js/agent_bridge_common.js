@@ -443,9 +443,11 @@
   // - mcp-only: none of them;
   // - files: read_file, write_file and edit in the session's own folder (its cwd), read_file on the tool results Vibe
   //   saved in the user's VIBE_HOME, no shell, grep, web or subagent;
-  // - sandboxed-shell: files and the shell, vibe-acp and every process it starts confined by the engine's Landlock
-  //   helper to the runtime (read only), the user's VIBE_HOME and the session's folder;
+  // - sandboxed-shell: files and the shell;
   // - full: as a Studio session.
+  // Wherever the engine confines (Landlock), vibe-acp and every process it starts under mcp-only, files and
+  // sandboxed-shell run through its helper, confined to the runtime (read only), the user's VIBE_HOME and the
+  // session's folder.
   // The config.toml removes the tools a policy leaves out; Vibe's runtime builtins (bash, read_file...) stay in the
   // model's tool list and Vibe refuses to run them (test-nocode: `bash` answered "denied by approval policy"); under mcp-only and
   // files the Bridge also refuses any permission asked for another tool than a Convertigo MCP one. The Studio's own
@@ -461,26 +463,35 @@
     return Packages.com.twinsoft.convertigo.engine.util.AgentSandbox;
   }
 
-  // The policy the engine gives its No Code agents: its effective one (sandboxed-shell is files where the engine cannot
-  // confine). An engine older than agents.tool_policy gives files.
-  function engineNoCodeToolPolicy() {
+  // The policy the engine gives its No Code agents, its effective one (sandboxed-shell is files where the engine cannot
+  // confine), and the Landlock version it confines with (0: it cannot). An engine older than agents.tool_policy gives
+  // files, unconfined.
+  function engineNoCodeToolInfo() {
     try {
       var described = JSON.parse(String(engineAgentSandbox().describe()));
       var policy = trim(described.effective);
-      return VIBE_NOCODE_POLICIES.indexOf(policy) >= 0 ? policy : "files";
+      return {
+        policy: VIBE_NOCODE_POLICIES.indexOf(policy) >= 0 ? policy : "files",
+        landlockAbi: Number(described.landlockAbi) > 0 ? Number(described.landlockAbi) : 0
+      };
     } catch (_ignoreOlderEngine) {
-      return "files";
+      return { policy: "files", landlockAbi: 0 };
     }
   }
 
   // "" for a Studio session, else the policy of this No Code session
   function noCodeToolPolicyName(options) {
-    return normalizeSkillProfile(options || {}) === "nocode" ? engineNoCodeToolPolicy() : "";
+    return normalizeSkillProfile(options || {}) === "nocode" ? engineNoCodeToolInfo().policy : "";
   }
 
+  // what a resident process was started with: a change of policy or of confinement restarts it
   function vibeToolPolicy(options) {
-    var policy = noCodeToolPolicyName(options);
-    return policy.length ? "nocode-" + policy + "-" + VIBE_NOCODE_TOOL_POLICY_REVISION : "";
+    if (normalizeSkillProfile(options || {}) !== "nocode") {
+      return "";
+    }
+    var info = engineNoCodeToolInfo();
+    var confined = info.policy !== "full" && info.landlockAbi > 0;
+    return "nocode-" + info.policy + (confined ? "-landlock" : "") + "-" + VIBE_NOCODE_TOOL_POLICY_REVISION;
   }
 
   // The top-level keys of a No Code config.toml. run_typescript reaches background processes (tools.process) and
@@ -551,11 +562,17 @@
     return folders;
   }
 
-  // null for a Studio session or under full; else where the session works and, confined, its command run through
-  // engine.util.AgentSandbox.wrap (which refuses where the engine cannot confine, so it is never run unconfined).
+  // null for a Studio session or under full; else where the session works and whether its command runs through
+  // engine.util.AgentSandbox.wrap. Wherever the engine confines (Landlock), every No Code policy but full is confined:
+  // the kernel then holds what Vibe's own path checks hold under mcp-only and files, and what the shell could reach
+  // under sandboxed-shell. wrap() refuses where the engine cannot confine, so a confined session never runs unconfined.
   function noCodeSessionSandbox(options, setup, vibeHome) {
-    var policy = noCodeToolPolicyName(options);
-    if (!policy.length || policy === "full" || !trim(vibeHome).length) {
+    if (normalizeSkillProfile(options || {}) !== "nocode" || !trim(vibeHome).length) {
+      return null;
+    }
+    var info = engineNoCodeToolInfo();
+    var policy = info.policy;
+    if (policy === "full") {
       return null;
     }
     var scratch = noCodeScratchDir(options, vibeHome);
@@ -565,7 +582,10 @@
       policy: policy,
       cwd: scratch,
       tmp: tmp,
-      confined: policy === "sandboxed-shell",
+      // a confined process writes nowhere else: HOME and the caches go to the session's folder
+      home: scratch,
+      cache: childPath(scratch, ".cache"),
+      confined: info.landlockAbi > 0,
       readOnly: noCodeRuntimeFolders(setup, options),
       readWrite: [trim(vibeHome), scratch],
       wrap: function (command) {
