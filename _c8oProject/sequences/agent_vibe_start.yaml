@@ -45,7 +45,8 @@ comment: Start a long-running vibe-acp process and create an ACP session.
       env: typeof env === "undefined" ? "" : env,
       ttlSeconds: typeof ttlSeconds === "undefined" ? "" : ttlSeconds,
       requestTimeoutMs: typeof requestTimeoutMs === "undefined" ? "" : requestTimeoutMs,
-      agentRevealMode: typeof agentRevealMode === "undefined" ? "" : agentRevealMode
+      agentRevealMode: typeof agentRevealMode === "undefined" ? "" : agentRevealMode,
+      mcpCatalogKey: typeof mcpCatalogKey === "undefined" ? "" : mcpCatalogKey
     });'
 ↓result [steps.JsonToXmlStep-1781600000202]: 
   jsonObject: 
@@ -94,6 +95,9 @@ comment: Start a long-running vibe-acp process and create an ACP session.
   comment: Set true to tell the agent to pass reveal=true on supported Convertigo mutation/viewer tools.
   description: Set true to tell the agent to pass reveal=true on supported Convertigo mutation/viewer tools.
   value: false
+↓mcpCatalogKey [variables.RequestableVariable-1792740000001]: 
+  comment: What the Convertigo MCP lists for this user, as the Assistant names it (feedback:on or feedback:off). A running Vibe restarts on the same session when it changes, to read the new tool list.
+  description: What the Convertigo MCP lists for this user, as the Assistant names it (feedback:on or feedback:off). A running Vibe restarts on the same session when it changes, to read the new tool list.
 ↓credentialsPolicy [variables.RequestableVariable-1781600000213]: 
   comment: 'Credential injection policy: explicit, user-home, vibe-home, or auto. Defaults to vibe-home for managed profiles.'
   description: 'Credential injection policy: explicit, user-home, vibe-home, or auto. Defaults to vibe-home for managed profiles.'
