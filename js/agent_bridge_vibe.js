@@ -24,6 +24,7 @@
       return startupPresenceOnly ? detectRuntimePresence(options) : detectRuntime(options);
     };
     var setup = detectSetup();
+    startupMark("setup/detect");
     var workspaceFirstOption = typeof options.workspaceInstallFirst !== "undefined" ? options.workspaceInstallFirst : options.preferWorkspaceInstall;
     var workspaceFirst = boolValue(typeof workspaceFirstOption === "undefined" ? true : workspaceFirstOption, true);
     var installation = {
@@ -144,7 +145,9 @@
           messages.push("Legacy managed Vibe model preset migrated: " + presetMigration.removed.join(", "));
         }
       }
+      startupMark("setup/config");
       bootstrap = bootstrapVibeHome(setup.vibeHome, options);
+      startupMark("setup/bootstrap");
       if (bootstrap.message) {
         messages.push(bootstrap.message);
       }
@@ -255,7 +258,9 @@
       commandPathStartsWith(setup.vibe, setup.venvDir) && commandPathStartsWith(setup.vibeAcp, setup.venvDir)
     ));
     var authentication = inspectVibeAuthentication(setup.vibeHome, profile);
+    startupMark("setup/install");
     var skills = installAgentSkills(options, "vibe", setup.vibeHome);
+    startupMark("setup/skills");
     var skillsReady = skills.ok !== false;
     var ready = runtimeReady && authentication.configured === true && skillsReady;
     if (runtimeReady && authentication.configured !== true) {
@@ -331,7 +336,27 @@
     }
   };
 
+  // vibeStart, timed: one line per start in agents/vibe/startup-timings.ndjson (see startupTimer)
   C8O.agentBridge.vibeStart = function (options) {
+    var timer = startupTimer("start", {
+      handle: trim(options && options.handle),
+      conversationId: trim(options && options.conversationId),
+      agentProfile: trim(options && (options.agentProfile || options.skillProfile))
+    });
+    var outer = activeStartupTimer;
+    activeStartupTimer = timer;
+    var result = null;
+    try {
+      result = vibeStartSteps(options);
+      return result;
+    } finally {
+      activeStartupTimer = outer;
+      timer.fields.restarted = !!(result && result.status === "started" && trim(options && (options.sessionId || options.externalSessionId)).length);
+      writeStartupTimings(timer, trim(options && options.workspaceRoot), result ? trim(result.status) : "exception");
+    }
+  };
+
+  function vibeStartSteps(options) {
     options = optionsWithRequestFallbacks(options || {});
     var requestedModel = trim(options.model || options.agentModel);
     var handle = trim(options.handle) || makeHandle("vibe");
@@ -443,6 +468,7 @@
         timestamp: now()
       };
     }
+    startupMark("existing");
     var autoConfigure = boolValue(options.autoConfigure, !trim(options.vibeHome).length);
     var setup = C8O.agentBridge.vibeSetup({
       vibeProfile: resolveVibeProfile(options),
@@ -488,6 +514,7 @@
       configure: autoConfigure,
       startupPresenceOnly: true
     });
+    startupMark("setup");
     if (!setup.ok) {
       var authenticationRequired = setup.status === "authentication_required";
       return {
@@ -514,6 +541,7 @@
       env.PATH = vibeNodePath + String(File.pathSeparator) + String(System.getenv("PATH") || "");
     }
     applyManagedMcpEnvironment(env, options);
+    startupMark("env");
     var cwd = normalizeDirectory(options.cwd, setup.setup.workspaceRoot, setup.setup.workspaceRoot);
     var mcpEndpoint = trim(options.mcpEndpoint) || setup.setup.mcpEndpoint || resolveMcpEndpoint(options);
     var command = parseCommand(options.command, [setup.setup.vibeAcp.path || "vibe-acp"]);
@@ -533,6 +561,7 @@
     } catch (sandboxError) {
       return { ok: false, status: "error", phase: "sandbox", error: String(sandboxError), timestamp: now() };
     }
+    startupMark("sandbox");
     var ttlMillis = intValue(options.ttlSeconds, DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
     var entry = createEntry(handle, "vibe", "acp", command, cwd, env, ttlMillis, setup.setup.home, credentials, requestedModel || setup.setup.model);
     entry.modelConfigRevision = VIBE_MODEL_CONFIG_REVISION;
@@ -551,6 +580,7 @@
     entry.viewerCdpEndpoint = trim(options.viewerCdpEndpoint || entry.playwrightCdpEndpoint);
     entry.playwrightMcpEnabled = trim(setup.setup.config && setup.setup.config.selected && setup.setup.config.selected.playwrightEndpoint).length > 0;
     registry.put(handle, entry);
+    startupMark("entry");
 
     try {
       startProcess(entry, env);
@@ -594,6 +624,7 @@
           }
         }
       }, timeoutMs);
+      startupMark("acp/initialize");
 
       // A conversation whose agent process died (restart, crash, idle sweep) gets its context
       // back when the harness can reload a session; otherwise, or on failure, a new one starts.
@@ -632,6 +663,7 @@
           mcpServers: buildMcpServers(mcpEndpoint, options)
         }, timeoutMs);
       }
+      startupMark(entry.sessionRestored === true ? "acp/session-load" : "acp/session-new");
       entry.sessionId = String(entry.session.sessionId || entry.session.session_id || "");
       var sessionProvider = vibeSettings({
         vibeProfile: resolveVibeProfile(options),
@@ -642,7 +674,9 @@
         runtimePresenceOnly: true
       });
       updateVibeProviderSettings(entry, entry.session.configOptions || entry.session.config_options || [], sessionProvider);
+      startupMark("settings");
       configureVibeSession(entry, options, timeoutMs);
+      startupMark("configure");
       entry.phase = "ready";
       entry.status = "running";
       pushEvent(entry, "acp/session", {
@@ -682,7 +716,7 @@
         timestamp: now()
       };
     }
-  };
+  }
 
   C8O.agentBridge.discoverVibeSettings = function (options, provider) {
     options = options || {};
@@ -756,6 +790,7 @@
     if (!processAlive(entry.process) || entry.status !== "running") {
       return { ok: false, status: "not_running", handle: handle, state: statusOf(entry), timestamp: now() };
     }
+    writeStartupTimings(startupTimer("prompt", { handle: handle }), entry.workspaceRoot, "received");
 
     entry.convertigoRevealMode = revealModeEnabled(options, entry);
     var promptText = String(options.prompt || "");

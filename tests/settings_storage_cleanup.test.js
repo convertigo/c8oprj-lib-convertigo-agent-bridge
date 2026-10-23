@@ -32,7 +32,8 @@ const sandbox = {
   cleanupConversationArtifacts: (options) => stopped.push(options.conversationId || options.threadid || options.handle),
   cleanupOrphanedAgentStorage: (options) => swept.push(options.workspaceRoot)
 };
-const settings = extract(/C8O\.agentBridge\.settings = function \(options\) \{[\s\S]*?\n  \};/);
+// settings() is timed: its steps live in agentSettingsSteps.
+const settings = extract(/function agentSettingsSteps\(options\) \{[\s\S]*?\n  \}\n/);
 // The storage cleanup statement settings() really runs, evaluated as is.
 const settingsCleanup = settings.match(/var storageCleanup = ([\s\S]*?\}\));/)[1];
 vm.runInNewContext([

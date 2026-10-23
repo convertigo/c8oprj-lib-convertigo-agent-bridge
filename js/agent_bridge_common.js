@@ -1820,6 +1820,58 @@
     return bytes.length;
   }
 
+  // Startup timings, a diagnostic: what each step of a Vibe start, a prompt and a settings read takes, one JSON line per
+  // call in agents/vibe/startup-timings.ndjson (over 512 KB the file becomes startup-timings.ndjson.1). A new No Code
+  // conversation took 14 to 25 s before its first prompt reached Vibe, the model answering in 2 s (test-nocode).
+  var STARTUP_TIMINGS_FILE = "startup-timings.ndjson";
+  var STARTUP_TIMINGS_MAX_BYTES = 524288;
+  var activeStartupTimer = null;
+
+  function startupTimer(kind, fields) {
+    var timer = { kind: kind, at: now(), fields: fields || {}, marks: [], last: 0 };
+    timer.mark = function (step) {
+      var elapsed = now() - timer.at;
+      timer.marks.push({ step: step, ms: elapsed - timer.last });
+      timer.last = elapsed;
+    };
+    return timer;
+  }
+
+  // a step of the timer of the current call, if any (vibeSetup, startProcess... run inside vibeStart)
+  function startupMark(step) {
+    if (activeStartupTimer !== null) {
+      try {
+        activeStartupTimer.mark(step);
+      } catch (_ignoreStartupMark) {}
+    }
+  }
+
+  function writeStartupTimings(timer, workspaceRoot, outcome) {
+    try {
+      var root = trim(workspaceRoot) || engineWorkspaceRoot();
+      if (!root.length) {
+        return;
+      }
+      var dir = new File(new File(root, "agents"), "vibe");
+      ensureDirectory(dir);
+      var file = new File(dir, STARTUP_TIMINGS_FILE);
+      if (file.isFile() && file.length() > STARTUP_TIMINGS_MAX_BYTES) {
+        var previous = new File(dir, STARTUP_TIMINGS_FILE + ".1");
+        previous["delete"]();
+        file.renameTo(previous);
+      }
+      var line = { at: new Date(timer.at).toISOString(), kind: timer.kind, totalMs: now() - timer.at, outcome: trim(outcome) };
+      for (var key in timer.fields) {
+        if (Object.prototype.hasOwnProperty.call(timer.fields, key)) {
+          line[key] = timer.fields[key];
+        }
+      }
+      line.steps = timer.marks;
+      var bytes = new java.lang.String(JSON.stringify(line) + "\n").getBytes(StandardCharsets.UTF_8);
+      Files.write(file.toPath(), bytes, StandardOpenOption.CREATE, StandardOpenOption.APPEND, StandardOpenOption.WRITE);
+    } catch (_ignoreStartupTimings) {}
+  }
+
   function readJsonFile(file) {
     try {
       var text = readTextFile(file);
@@ -9484,7 +9536,22 @@
     return report;
   }
 
+  // settings, timed like vibeStart (startup-timings.ndjson): the agent check of the Assistant panel goes through it
   C8O.agentBridge.settings = function (options) {
+    var timer = startupTimer("settings", { provider: trim(options && (options.provider || options.agent)) });
+    var outer = activeStartupTimer;
+    activeStartupTimer = timer;
+    var result = null;
+    try {
+      result = agentSettingsSteps(options);
+      return result;
+    } finally {
+      activeStartupTimer = outer;
+      writeStartupTimings(timer, trim(options && options.workspaceRoot), result && result.ok === false ? "error" : "ok");
+    }
+  };
+
+  function agentSettingsSteps(options) {
     options = optionsWithRequestFallbacks(options);
     var presenceOnly = boolValue(options.runtimePresenceOnly, false);
     var rawProvider = trim(options.provider || options.agent || "").toLowerCase();
@@ -9503,6 +9570,7 @@
     if ((!provider.length || provider === "claude") && typeof claudeSettings === "function") {
       providers.push(claudeSettings(options));
     }
+    startupMark("settings/providers");
     var settingsWorkspaceRoot = trim(options.workspaceRoot);
     if (!settingsWorkspaceRoot.length) {
       for (var workspaceIndex = 0; workspaceIndex < providers.length; workspaceIndex++) {
@@ -9529,6 +9597,7 @@
       }
       providers[cachedProviderIndex] = requireProviderAuthentication(currentProvider);
     }
+    startupMark("settings/discover");
     if (!presenceOnly) {
       writePersistentProviderSettingsCache(settingsWorkspaceRoot, providers);
     }
@@ -9587,7 +9656,8 @@
       },
       timestamp: now()
     };
-  };
+  }
+
 
   function envKeys(env) {
     var keys = [];
@@ -11751,13 +11821,16 @@
   function startProcess(entry, env) {
     ensureAgentShutdownHook();
     var orphanSweep = sweepAllProviderPidFiles(entry.workspaceRoot || "", intValue(entry.ttlMillis, 0, 0, 86400000));
+    startupMark("process/sweep");
     var guard = agentGuardedCommand(entry, entry.options || {});
+    startupMark("process/guard");
     entry.guarded = guard.guarded === true;
     var pb = new ProcessBuilder(toJavaList(guard.command));
     pb.directory(new File(entry.cwd));
     applyEngineProxyEnvironment(pb.environment(), agentProxyTargetUrl(entry.provider, env));
     envObjectToMap(pb.environment(), env);
     entry.process = pb.start();
+    startupMark("process/spawn");
     entry.writer = new BufferedWriter(new OutputStreamWriter(entry.process.getOutputStream(), StandardCharsets.UTF_8));
     writeEntryPidFile(entry);
     if (orphanSweep.stopped.length) {
