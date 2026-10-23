@@ -36,7 +36,7 @@ function withEngine(policy, run, extra = {}) {
     nodeRuntimeSearchPath: () => extra.nodePath || '',
     stableId: (prefix, value) => prefix + '-' + value,
     engineAgentSandbox: () => policy === undefined ? javaProxy : {
-      describe: () => JSON.stringify({ policy, effective: policy, landlockAbi: extra.abi === undefined ? 1 : extra.abi, helper: '/usr/local/bin/c8o-agent-sandbox' }),
+      describe: () => JSON.stringify({ policy: extra.configured || policy, effective: policy, landlockAbi: extra.abi === undefined ? 1 : extra.abi, helper: '/usr/local/bin/c8o-agent-sandbox' }),
       wrap: (command, ro, rw) => { wrapped.push({ command, ro, rw }); const args = ['/usr/local/bin/c8o-agent-sandbox', '--', ...command]; return { size: () => args.length, get: i => args[i] }; }
     }
   };
@@ -121,6 +121,36 @@ test('a No Code session works in its own folder; where the engine confines, vibe
 
   assert.equal(withEngine('full', () => noCodeSessionSandbox(noCode, {}, home)), null);
   assert.equal(withEngine('files', () => noCodeSessionSandbox(studio, {}, home)), null);
+});
+
+test('the status of a session says what it may do: the policy its harness applies, its confinement, never limited in the Studio', () => {
+  const home = '/workspace/agents/vibe/homes-convertigo/users/person/.vibe-home';
+  const vibe = (policy, extra) => withEngine(policy, () => agentSessionSandbox(noCode, 'vibe', noCodeSessionSandbox(noCode, {}, home)), extra);
+  assert.deepEqual(vibe('files'), { scope: 'nocode', policy: 'files', source: 'engine', configured: '', confined: true, landlockAbi: 1 });
+  assert.deepEqual(vibe('mcp-only', { abi: 6 }), { scope: 'nocode', policy: 'mcp-only', source: 'engine', configured: '', confined: true, landlockAbi: 6 });
+  assert.deepEqual(vibe('files', { abi: 0 }), { scope: 'nocode', policy: 'files', source: 'engine', configured: '', confined: false, landlockAbi: 0 }, 'an engine that cannot confine');
+  assert.deepEqual(vibe('files', { abi: 0, configured: 'sandboxed-shell' }), { scope: 'nocode', policy: 'files', source: 'engine', configured: 'sandboxed-shell', confined: false, landlockAbi: 0 }, 'the shell asked where the engine cannot confine it');
+  assert.deepEqual(vibe('full'), { scope: 'nocode', policy: 'full', source: 'engine', configured: '', confined: false, landlockAbi: 1 });
+  assert.deepEqual(withEngine(undefined, () => agentSessionSandbox(noCode, 'vibe', null)), { scope: 'nocode', policy: 'files', source: 'engine', configured: '', confined: false, landlockAbi: 0 }, 'an engine older than agents.tool_policy');
+  for (const provider of ['codex', 'claude']) {
+    assert.deepEqual(withEngine('mcp-only', () => agentSessionSandbox(noCode, provider, null)), { scope: 'nocode', policy: 'full', source: 'harness', configured: '', confined: false, landlockAbi: 1 }, provider + ' does not apply the policy');
+  }
+  for (const provider of ['vibe', 'codex', 'claude']) {
+    assert.deepEqual(withEngine('mcp-only', () => agentSessionSandbox(studio, provider, null)), { scope: 'studio', policy: 'full', source: 'studio', configured: '', confined: false, landlockAbi: 0 });
+  }
+  const savedAlive = global.processAlive;
+  global.processAlive = () => true;
+  try {
+    const entry = createEntry('h', 'vibe', 'acp', [], '/tmp', {}, 1000, null, null, '');
+    assert.equal(statusOf(entry).sandbox, null, 'a session started by an older Bridge');
+    entry.sandbox = vibe('files');
+    assert.deepEqual(statusOf(entry).sandbox, entry.sandbox);
+  } finally {
+    global.processAlive = savedAlive;
+  }
+  for (const [source, provider] of [[vibeSource, 'vibe'], ...['codex', 'claude'].map(name => [fs.readFileSync(path.join(root, 'js/agent_bridge_' + name + '.js'), 'utf8'), name])]) {
+    assert.ok(source.includes('entry.sandbox = agentSessionSandbox(options, "' + provider + '", ' + (provider === 'vibe' ? 'noCodeSandbox' : 'null') + ');'), provider);
+  }
 });
 
 test('vibeStart puts the session in its folder, confines its command and fails rather than run it unconfined', () => {

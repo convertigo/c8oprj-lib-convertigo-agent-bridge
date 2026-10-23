@@ -2206,6 +2206,7 @@
     entry.pidFile = pidFile === null ? "" : filePath(pidFile);
     entry.agentProfile = trim(options.agentProfile || options.skillProfile || options.assistantContext || options.profile);
     entry.skillProfile = normalizeSkillProfile(options);
+    entry.sandbox = agentSessionSandbox(options, "codex", null);
     entry.assistantContext = trim(options.assistantContext);
     entry.assistantSurface = trim(options.assistantSurface);
     entry.userId = trim(options.userId);

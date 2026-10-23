@@ -464,19 +464,42 @@
   }
 
   // The policy the engine gives its No Code agents, its effective one (sandboxed-shell is files where the engine cannot
-  // confine), and the Landlock version it confines with (0: it cannot). An engine older than agents.tool_policy gives
-  // files, unconfined.
+  // confine), the one agents.tool_policy names, and the Landlock version it confines with (0: it cannot). An engine
+  // older than agents.tool_policy gives files, unconfined, and names none.
   function engineNoCodeToolInfo() {
     try {
       var described = JSON.parse(String(engineAgentSandbox().describe()));
       var policy = trim(described.effective);
+      var configured = trim(described.policy);
       return {
         policy: VIBE_NOCODE_POLICIES.indexOf(policy) >= 0 ? policy : "files",
+        configured: VIBE_NOCODE_POLICIES.indexOf(configured) >= 0 ? configured : "",
         landlockAbi: Number(described.landlockAbi) > 0 ? Number(described.landlockAbi) : 0
       };
     } catch (_ignoreOlderEngine) {
-      return { policy: "files", landlockAbi: 0 };
+      return { policy: "files", configured: "", landlockAbi: 0 };
     }
+  }
+
+  // What a session may do, as its status tells the Assistant: the Studio's own session is never limited (source
+  // studio); a No Code session gets the engine's policy where its harness applies it, Vibe (source engine), and runs
+  // as a Studio session elsewhere, Codex and Claude (source harness). confined: the kernel holds the session's
+  // processes (Landlock); configured: the policy agents.tool_policy names, when the engine gives another one.
+  function agentSessionSandbox(options, provider, noCodeSandbox) {
+    if (normalizeSkillProfile(options || {}) !== "nocode") {
+      return { scope: "studio", policy: "full", source: "studio", configured: "", confined: false, landlockAbi: 0 };
+    }
+    var info = engineNoCodeToolInfo();
+    var applied = normalizeProvider(provider) === "vibe";
+    var policy = !applied ? "full" : (noCodeSandbox ? noCodeSandbox.policy : info.policy);
+    return {
+      scope: "nocode",
+      policy: policy,
+      source: applied ? "engine" : "harness",
+      configured: applied && info.configured.length && info.configured !== policy ? info.configured : "",
+      confined: !!(applied && noCodeSandbox && noCodeSandbox.confined === true),
+      landlockAbi: info.landlockAbi
+    };
   }
 
   // "" for a Studio session, else the policy of this No Code session
@@ -11694,6 +11717,7 @@
       browserDebugUrl: entry.browserDebugUrl || "",
       viewerDebugPort: Number(entry.viewerDebugPort || 0),
       playwrightCdpEndpoint: entry.playwrightCdpEndpoint || entry.viewerCdpEndpoint || "",
+      sandbox: entry.sandbox || null,
       managedSkillBundle: entry.managedSkillBundle ? {
         ready: entry.managedSkillBundle.ready === true,
         fingerprint: entry.managedSkillBundle.fingerprint || "",

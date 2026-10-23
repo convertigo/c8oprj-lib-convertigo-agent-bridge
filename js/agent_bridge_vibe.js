@@ -544,6 +544,7 @@
     entry.mcpCatalogKey = trim(options.mcpCatalogKey);
     entry.toolPolicy = vibeToolPolicy(options);
     entry.noCodePolicy = noCodeSandbox !== null ? noCodeSandbox.policy : noCodeToolPolicyName(options);
+    entry.sandbox = agentSessionSandbox(options, "vibe", noCodeSandbox);
     entry.viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
     entry.browserDebugUrl = trim(options.browserDebugUrl);
     entry.playwrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);

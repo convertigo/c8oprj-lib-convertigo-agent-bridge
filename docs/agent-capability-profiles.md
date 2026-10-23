@@ -86,6 +86,22 @@ under another policy restarts on the same session. Under `mcp-only` and
 that is not a Convertigo MCP one, instead of approving it. The Studio's own
 session (`studio`) is never limited.
 
+Only Vibe applies the policy: a NoCode session on Codex or Claude runs as a
+Studio session does. Every session status (`state` of the start, prompt and
+event answers) carries what was applied when its process started, for the
+Assistant to show:
+
+| `sandbox` field | Value |
+| --- | --- |
+| `scope` | `studio` or `nocode` |
+| `policy` | `mcp-only`, `files`, `sandboxed-shell` or `full`: what the session gets |
+| `source` | `studio` (never limited), `engine` (`agents.tool_policy`, Vibe), `harness` (Codex, Claude: not applied) |
+| `configured` | the policy `agents.tool_policy` names when the engine gives another one (`sandboxed-shell` without Landlock), else empty |
+| `confined` | the kernel holds the session's processes (Landlock helper) |
+| `landlockAbi` | the Landlock version the engine confines with, `0` when it cannot |
+
+A session started by an older Bridge has `sandbox: null`.
+
 ## Ownership
 
 `lib_ConvertigoAgentBridge` owns provider lifecycle, isolated homes, sessions,
