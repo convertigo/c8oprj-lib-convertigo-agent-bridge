@@ -83,7 +83,10 @@ built-in plugin. A confined `vibe-acp` gets the Bridge's
 `sandbox/python/sitecustomize.py` first on `PYTHONPATH` (read only): on `EXDEV`,
 `os.rename` and `os.replace` copy into the target's directory and rename there,
 as `mv` does, and a `sitecustomize` it hides still runs. From ABI 2 the helper
-allows those moves and the module changes nothing.
+allows those moves and the module changes nothing. Its `PATH` starts with the bin
+folder of the CPython behind Vibe's venv, read only like the rest of the runtime:
+the engine's container has no `python3` of its own, and a `sandboxed-shell` agent
+lost a step on `python3: command not found`.
 
 `read_file` reads back, without asking, the tool results Vibe saved to a file
 (`VIBE_HOME/logs/session/unified/*/tool-results/*`, through its allowlist).

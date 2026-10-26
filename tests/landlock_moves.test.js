@@ -38,8 +38,8 @@ test('a confined Python reads the module from the Bridge\'s own folder, none wit
   assert.equal(bridge(os.tmpdir()), '', 'a Bridge folder without sandbox/python/sitecustomize.py');
 });
 
-test('vibeStart puts the module first on the confined process\'s PYTHONPATH, before the confinement wraps it', () => {
-  assert.match(vibeSource, /env\.XDG_CACHE_HOME = noCodeSandbox\.cache;\n\s+if \(noCodeSandbox\.pythonPath\.length\) \{\n\s+env\.PYTHONPATH = noCodeSandbox\.pythonPath \+ \(trim\(env\.PYTHONPATH\)\.length \? String\(File\.pathSeparator\) \+ env\.PYTHONPATH : ""\);\n\s+\}\n\s+command = noCodeSandbox\.wrap\(command\);/);
+test('vibeStart puts the module first on the confined process\'s PYTHONPATH and its CPython first on PATH, before the confinement wraps it', () => {
+  assert.match(vibeSource, /env\.XDG_CACHE_HOME = noCodeSandbox\.cache;\n\s+if \(noCodeSandbox\.pythonPath\.length\) \{\n\s+env\.PYTHONPATH = noCodeSandbox\.pythonPath \+ \(trim\(env\.PYTHONPATH\)\.length \? String\(File\.pathSeparator\) \+ env\.PYTHONPATH : ""\);\n\s+\}\n\s+if \(noCodeSandbox\.pythonBin\.length\) \{\n\s+env\.PATH = noCodeSandbox\.pythonBin \+ String\(File\.pathSeparator\) \+ \(trim\(env\.PATH\) \|\| String\(System\.getenv\("PATH"\) \|\| ""\)\);\n\s+\}\n\s+command = noCodeSandbox\.wrap\(command\);/);
 });
 
 // os.rename and os.replace as Landlock ABI 1 runs them: EXDEV for any move into another directory.

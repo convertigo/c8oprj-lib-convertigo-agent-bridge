@@ -574,6 +574,17 @@
   // The folders a confined vibe-acp reads besides the system: its runtime (the venv of the managed Vibe, the Python
   // of that venv, Node). The venv only: the Vibe install folder also holds every user's VIBE_HOME (test-nocode: with
   // it read only, a confined agent listed another user's home).
+  // The bin folder of the CPython behind Vibe's venv (home in pyvenv.cfg), "" without one.
+  function venvPythonBin(setup) {
+    try {
+      var config = readTextFile(new File(new File(setup.installDir, ".venv"), "pyvenv.cfg"));
+      var home = /^home\s*=\s*(.+)$/m.exec(config);
+      return home ? filePath(new File(trim(home[1]))) : "";
+    } catch (_ignoreNoVenvConfig) {
+      return "";
+    }
+  }
+
   function noCodeRuntimeFolders(setup, options) {
     var folders = [];
     var add = function (path) {
@@ -585,13 +596,10 @@
     if (setup && trim(setup.installDir).length) {
       add(childPath(setup.installDir, ".venv"));
     }
-    try {
-      var config = readTextFile(new File(new File(setup.installDir, ".venv"), "pyvenv.cfg"));
-      var home = /^home\s*=\s*(.+)$/m.exec(config);
-      if (home) {
-        add(filePath(new File(trim(home[1])).getParentFile()));
-      }
-    } catch (_ignoreNoVenvConfig) {}
+    var pythonBin = venvPythonBin(setup);
+    if (pythonBin.length) {
+      add(filePath(new File(pythonBin).getParentFile()));
+    }
     var nodePath = nodeRuntimeSearchPath(options || {});
     if (nodePath.length) {
       nodePath.split(String(File.pathSeparator)).forEach(add);
@@ -640,6 +648,8 @@
       cache: childPath(scratch, ".cache"),
       confined: confined,
       pythonPath: pythonPath,
+      // the engine's container has no python3 on its PATH: a sandboxed-shell agent tried it and lost a step
+      pythonBin: confined ? venvPythonBin(setup) : "",
       readOnly: readOnly,
       readWrite: [trim(vibeHome), scratch],
       wrap: function (command) {

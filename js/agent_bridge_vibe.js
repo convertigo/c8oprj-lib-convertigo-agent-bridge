@@ -590,6 +590,9 @@
           if (noCodeSandbox.pythonPath.length) {
             env.PYTHONPATH = noCodeSandbox.pythonPath + (trim(env.PYTHONPATH).length ? String(File.pathSeparator) + env.PYTHONPATH : "");
           }
+          if (noCodeSandbox.pythonBin.length) {
+            env.PATH = noCodeSandbox.pythonBin + String(File.pathSeparator) + (trim(env.PATH) || String(System.getenv("PATH") || ""));
+          }
           command = noCodeSandbox.wrap(command);
         }
       }
