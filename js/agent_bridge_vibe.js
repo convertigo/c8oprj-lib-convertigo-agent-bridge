@@ -587,6 +587,9 @@
         if (noCodeSandbox.confined) {
           env.HOME = noCodeSandbox.home;
           env.XDG_CACHE_HOME = noCodeSandbox.cache;
+          if (noCodeSandbox.pythonPath.length) {
+            env.PYTHONPATH = noCodeSandbox.pythonPath + (trim(env.PYTHONPATH).length ? String(File.pathSeparator) + env.PYTHONPATH : "");
+          }
           command = noCodeSandbox.wrap(command);
         }
       }

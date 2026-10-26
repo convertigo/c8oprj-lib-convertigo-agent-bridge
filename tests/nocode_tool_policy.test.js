@@ -34,6 +34,7 @@ function withEngine(policy, run, extra = {}) {
     toJavaList: values => values.slice(0),
     readTextFile: file => { if (extra.pyvenv && /pyvenv\.cfg$/.test(file.p)) return extra.pyvenv; throw new Error('no file'); },
     nodeRuntimeSearchPath: () => extra.nodePath || '',
+    confinedPythonPath: () => extra.pythonPath || '',
     stableId: (prefix, value) => prefix + '-' + value,
     engineAgentSandbox: () => policy === undefined ? javaProxy : {
       describe: () => JSON.stringify({ policy: extra.configured || policy, effective: policy, landlockAbi: extra.abi === undefined ? 1 : extra.abi, helper: '/usr/local/bin/c8o-agent-sandbox' }),
@@ -113,11 +114,12 @@ test('a No Code session works in its own folder; where the engine confines, vibe
   withEngine('sandboxed-shell', wrapped => {
     const shell = noCodeSessionSandbox(noCode, { installDir: '/workspace/agents/vibe' }, home);
     assert.equal(shell.confined, true);
-    // the venv, not the install folder that holds every user's VIBE_HOME
-    assert.deepEqual(shell.readOnly, ['/workspace/agents/vibe/.venv', '/workspace/agents/python/cpython-3.12', '/workspace/nodes/node-v22/bin', '/workspace/nodes/node-v22']);
+    // the venv, not the install folder that holds every user's VIBE_HOME; the Bridge's module for Landlock ABI 1 moves
+    assert.deepEqual(shell.readOnly, ['/workspace/agents/vibe/.venv', '/workspace/agents/python/cpython-3.12', '/workspace/nodes/node-v22/bin', '/workspace/nodes/node-v22', '/workspace/projects/lib_ConvertigoAgentBridge/sandbox/python']);
+    assert.equal(shell.pythonPath, '/workspace/projects/lib_ConvertigoAgentBridge/sandbox/python');
     assert.deepEqual(shell.wrap(['vibe-acp']), ['/usr/local/bin/c8o-agent-sandbox', '--', 'vibe-acp']);
     assert.deepEqual(wrapped[0], { command: ['vibe-acp'], ro: shell.readOnly, rw: [home, shell.cwd] });
-  }, { pyvenv: 'home = /workspace/agents/python/cpython-3.12/bin\nversion = 3.12.8\n', nodePath: '/workspace/nodes/node-v22/bin:/workspace/nodes/node-v22' });
+  }, { pyvenv: 'home = /workspace/agents/python/cpython-3.12/bin\nversion = 3.12.8\n', nodePath: '/workspace/nodes/node-v22/bin:/workspace/nodes/node-v22', pythonPath: '/workspace/projects/lib_ConvertigoAgentBridge/sandbox/python' });
 
   assert.equal(withEngine('full', () => noCodeSessionSandbox(noCode, {}, home)), null);
   assert.equal(withEngine('files', () => noCodeSessionSandbox(studio, {}, home)), null);
@@ -156,7 +158,7 @@ test('the status of a session says what it may do: the policy its harness applie
 test('vibeStart puts the session in its folder, confines its command and fails rather than run it unconfined', () => {
   const start = vibeSource.slice(vibeSource.indexOf('var noCodeSandbox = null;'), vibeSource.indexOf('var ttlMillis = '));
   assert.match(start, /cwd = noCodeSandbox\.cwd;\n\s+env\.TMPDIR = noCodeSandbox\.tmp;/);
-  assert.match(start, /if \(noCodeSandbox\.confined\) \{\n\s+env\.HOME = noCodeSandbox\.home;\n\s+env\.XDG_CACHE_HOME = noCodeSandbox\.cache;\n\s+command = noCodeSandbox\.wrap\(command\);/);
+  assert.match(start, /if \(noCodeSandbox\.confined\) \{\n\s+env\.HOME = noCodeSandbox\.home;\n\s+env\.XDG_CACHE_HOME = noCodeSandbox\.cache;\n[\s\S]{0,260}?\n\s+command = noCodeSandbox\.wrap\(command\);/);
   assert.match(start, /catch \(sandboxError\) \{\n\s+return \{ ok: false, status: "error", phase: "sandbox"/);
   assert.match(vibeSource, /entry\.noCodePolicy = noCodeSandbox !== null \? noCodeSandbox\.policy : noCodeToolPolicyName\(options\);/);
 });

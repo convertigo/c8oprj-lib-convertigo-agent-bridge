@@ -76,6 +76,15 @@ runtime, writable only in the user's `VIBE_HOME` and the session's folder
 (also its `HOME`, `TMPDIR` and cache), nothing else. The session refuses to
 start rather than run unconfined.
 
+Landlock ABI 1 (Linux before 5.19) refuses any move of a file into another
+directory (`EXDEV`, "Invalid cross-device link"), and Vibe's plugin store moves
+every file it publishes: without help a user's first confined Vibe dies on its
+built-in plugin. A confined `vibe-acp` gets the Bridge's
+`sandbox/python/sitecustomize.py` first on `PYTHONPATH` (read only): on `EXDEV`,
+`os.rename` and `os.replace` copy into the target's directory and rename there,
+as `mv` does, and a `sitecustomize` it hides still runs. From ABI 2 the helper
+allows those moves and the module changes nothing.
+
 `read_file` reads back, without asking, the tool results Vibe saved to a file
 (`VIBE_HOME/logs/session/unified/*/tool-results/*`, through its allowlist).
 For Vibe, the NoCode `config.toml` lists the tools a policy leaves out in

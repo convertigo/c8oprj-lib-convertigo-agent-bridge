@@ -599,6 +599,16 @@
     return folders;
   }
 
+  // Landlock ABI 1 refuses to move or link a file into another directory (EXDEV), even where the process may write,
+  // and Vibe's plugin store moves every file it publishes: a user's first confined Vibe died on its built-in plugin.
+  // sandbox/python/sitecustomize.py, found first on PYTHONPATH, makes the confined Python copy into the target's
+  // directory and rename there instead, as mv does. "" when the Bridge's folder or the module cannot be found.
+  function confinedPythonPath() {
+    var bridgeDir = projectDirectoryByName("lib_ConvertigoAgentBridge");
+    var folder = bridgeDir === null ? null : new File(new File(bridgeDir, "sandbox"), "python");
+    return folder !== null && new File(folder, "sitecustomize.py").isFile() ? filePath(folder) : "";
+  }
+
   // null for a Studio session or under full; else where the session works and whether its command runs through
   // engine.util.AgentSandbox.wrap. Wherever the engine confines (Landlock), every No Code policy but full is confined:
   // the kernel then holds what Vibe's own path checks hold under mcp-only and files, and what the shell could reach
@@ -615,6 +625,12 @@
     var scratch = noCodeScratchDir(options, vibeHome);
     var tmp = childPath(scratch, ".tmp");
     ensureDirectory(new File(tmp));
+    var confined = info.landlockAbi > 0;
+    var pythonPath = confined ? confinedPythonPath() : "";
+    var readOnly = noCodeRuntimeFolders(setup, options);
+    if (pythonPath.length) {
+      readOnly.push(pythonPath);
+    }
     return {
       policy: policy,
       cwd: scratch,
@@ -622,8 +638,9 @@
       // a confined process writes nowhere else: HOME and the caches go to the session's folder
       home: scratch,
       cache: childPath(scratch, ".cache"),
-      confined: info.landlockAbi > 0,
-      readOnly: noCodeRuntimeFolders(setup, options),
+      confined: confined,
+      pythonPath: pythonPath,
+      readOnly: readOnly,
       readWrite: [trim(vibeHome), scratch],
       wrap: function (command) {
         var wrapped = engineAgentSandbox().wrap(toJavaList(command), toJavaList(this.readOnly), toJavaList(this.readWrite));
