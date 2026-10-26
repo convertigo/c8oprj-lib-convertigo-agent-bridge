@@ -1,5 +1,5 @@
 // The Convertigo MCP server of a Vibe session names the Tigo conversation (X-Convertigo-Conversation-Id), so the
-// sub-agent tools record their runs under it; a malformed id is left out.
+// sub-agent tools record their runs under it, and nocode-form-preview-capture its requests; a malformed id is left out.
 // node tests/mcp_conversation_header.test.js
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -17,6 +17,8 @@ assert.deepEqual(named(headers, 'X-Convertigo-Viewer-Debug-Port'), ['45991']);
 headers = headersOf({ threadid: 'agent-1' });
 assert.deepEqual(named(headers, 'X-Convertigo-Conversation-Id'), ['agent-1'], 'the thread id stands for the conversation');
 assert.deepEqual(named(headersOf({ conversationId: 'bad id"' }), 'X-Convertigo-Conversation-Id'), []);
-assert.deepEqual(named(headersOf({ conversationId: 'agent-2', skillProfile: 'nocode' }), 'X-Convertigo-Conversation-Id'), [], 'not in NoCode');
+headers = headersOf({ conversationId: 'agent-2', skillProfile: 'nocode', viewerDebugPort: 45991 });
+assert.deepEqual(named(headers, 'X-Convertigo-Conversation-Id'), ['agent-2'], 'in NoCode too: the preview captures wait under it');
+assert.deepEqual(named(headers, 'X-Convertigo-Viewer-Debug-Port'), [], 'NoCode drives no viewer');
 assert.equal(mcpConversationId({ handle: 'agent-3' }), 'agent-3');
 console.log('conversation header ok');

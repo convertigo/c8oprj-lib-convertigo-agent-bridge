@@ -11964,7 +11964,8 @@
         value: String(viewerDebugPort)
       });
     }
-    if (mcpConversationId(options).length && normalizeSkillProfile(options) !== "nocode") {
+    // the sub-agent runs and, in No Code, the preview captures (nocode-form-preview-capture) are recorded under it
+    if (mcpConversationId(options).length) {
       headers.push({
         name: "X-Convertigo-Conversation-Id",
         value: mcpConversationId(options)
