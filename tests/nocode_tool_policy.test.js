@@ -36,9 +36,9 @@ function withEngine(policy, run, extra = {}) {
     nodeRuntimeSearchPath: () => extra.nodePath || '',
     confinedPythonPath: () => extra.pythonPath || '',
     stableId: (prefix, value) => prefix + '-' + value,
-    engineAgentSandbox: () => policy === undefined ? javaProxy : {
+    agentSandbox: () => policy === undefined ? { describe: () => { throw new Error('no sandbox'); } } : {
       describe: () => JSON.stringify({ policy: extra.configured || policy, effective: policy, landlockAbi: extra.abi === undefined ? 1 : extra.abi, helper: '/usr/local/bin/c8o-agent-sandbox' }),
-      wrap: (command, ro, rw) => { wrapped.push({ command, ro, rw }); const args = ['/usr/local/bin/c8o-agent-sandbox', '--', ...command]; return { size: () => args.length, get: i => args[i] }; }
+      wrap: (command, ro, rw) => { wrapped.push({ command, ro, rw }); return ['/usr/local/bin/c8o-agent-sandbox', '--', ...command]; }
     }
   };
   for (const [name, value] of Object.entries(fakes)) { saved[name] = global[name]; global[name] = value; }

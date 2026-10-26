@@ -29,3 +29,6 @@ settings.gradle
 /AGENTS.md
 /build/**
 /.project
+
+# The agent sandbox: the helper's source, checks and binaries, the Python module of confined agents.
+/sandbox/**

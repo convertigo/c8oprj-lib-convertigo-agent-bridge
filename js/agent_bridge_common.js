@@ -448,16 +448,16 @@
   // Bumped when the generated model blocks change: existing homes rewrite config.toml, resident sessions restart.
   var VIBE_MODEL_CONFIG_REVISION = "gateway-output-cap-v3";
 
-  // What a No Code session may do besides the Convertigo MCP: the engine's agents.tool_policy (engine.util.AgentSandbox),
-  // files on an engine without it. Vibe's own shell, file and web tools ran in the engine container with the engine's
+  // What a No Code session may do besides the Convertigo MCP: agents.tool_policy (agentSandbox() below), files when
+  // nothing sets it. Vibe's own shell, file and web tools ran in the engine container with the engine's
   // rights, its cwd the whole workspace (test-nocode, Mistral run: `bash: jq ...` approved by choosePermissionOption).
   // - mcp-only: none of them;
   // - files: read_file, write_file and edit in the session's own folder (its cwd), read_file on the tool results Vibe
   //   saved in the user's VIBE_HOME, no shell, grep, web or subagent;
   // - sandboxed-shell: files and the shell;
   // - full: as a Studio session.
-  // Wherever the engine confines (Landlock), vibe-acp and every process it starts under mcp-only, files and
-  // sandboxed-shell run through its helper, confined to the runtime (read only), the user's VIBE_HOME and the
+  // Wherever the kernel confines (Landlock), vibe-acp and every process it starts under mcp-only, files and
+  // sandboxed-shell run through the helper, confined to the runtime (read only), the user's VIBE_HOME and the
   // session's folder.
   // The config.toml removes the tools a policy leaves out; Vibe's runtime builtins (bash, read_file...) stay in the
   // model's tool list and Vibe refuses to run them (test-nocode: `bash` answered "denied by approval policy"); under mcp-only and
@@ -470,8 +470,171 @@
   var VIBE_NOCODE_FILE_TOOLS = ["read_file", "write_file", "edit"];
   var VIBE_NOCODE_OTHER_TOOLS = ["grep", "web_fetch", "web_search", "task"];
 
-  function engineAgentSandbox() {
-    return Packages.com.twinsoft.convertigo.engine.util.AgentSandbox;
+  // The confinement of the No Code agents. The Bridge carries it: it was engine.util.AgentSandbox of the engine branch
+  // hotfix-optims (8.4.7), which nothing but the Bridge used, and a policy that follows the agents had to wait for an
+  // engine release. Same contract: describe() and wrap().
+  // The policy is the system property convertigo.engine.agents.tool_policy, which wins: the platform sets it (the
+  // javaOpts of a cloud server) and the console of the server cannot lift it. Else the global symbol agents.tool_policy,
+  // else the engine property of an engine that still has it. auto, nothing or a value no policy has is files.
+  // The helper is the static program of this project, sandbox/linux-<arch>/c8o-agent-sandbox (its source, checks and CI
+  // beside it), unless the system property convertigo.agent.sandbox.helper names another one, else the one of a Docker
+  // image that still ships it. It applies Landlock and no_new_privs, then runs the command, and every process it starts
+  // inherits both; `--probe` prints the Landlock version of the kernel (0, a failure or no helper: it cannot confine,
+  // and sandboxed-shell is files).
+  var AGENT_SANDBOX_POLICY_PROPERTY = "convertigo.engine.agents.tool_policy";
+  var AGENT_SANDBOX_POLICY_SYMBOL = "agents.tool_policy";
+  var AGENT_SANDBOX_HELPER_PROPERTY = "convertigo.agent.sandbox.helper";
+  var AGENT_SANDBOX_IMAGE_HELPER = "/usr/local/bin/c8o-agent-sandbox";
+  var AGENT_SANDBOX_PROBE_CACHE = "lib_ConvertigoAgentBridge.sandboxProbe";
+  var AGENT_SANDBOX_PROBE_TIMEOUT_MS = 5000;
+  // What every confined process reads and runs: the system, neither /usr/local (Tomcat, the engine) nor /workspace. Of
+  // /proc, the command's own entries (/proc/self, resolved by the helper to the pid the command keeps) and the
+  // system-wide files only: with the whole of /proc, a confined shell read the command line of the engine and the
+  // passwords it holds (test-nocode, 23/10). A process space of its own is not an option there: the container refuses
+  // to mount another /proc.
+  var AGENT_SANDBOX_SYSTEM_READ_ONLY = ["/bin", "/sbin", "/lib", "/lib32", "/lib64", "/usr/bin", "/usr/sbin", "/usr/lib",
+    "/usr/lib32", "/usr/lib64", "/usr/libexec", "/usr/share", "/etc", "/sys", "/dev", "/proc/self", "/proc/thread-self",
+    "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/loadavg", "/proc/uptime", "/proc/version",
+    "/proc/filesystems", "/proc/sys"];
+  // what every confined process writes besides its folders
+  var AGENT_SANDBOX_SYSTEM_READ_WRITE = ["/dev/null"];
+
+  function agentSandboxPolicyName(value) {
+    var name = trim(value).toLowerCase();
+    if (VIBE_NOCODE_POLICIES.indexOf(name) >= 0) {
+      return name;
+    }
+    if (name.length && name !== "auto") {
+      try { log.warn("(lib_ConvertigoAgentBridge) agents.tool_policy=" + value + " names no policy: auto is used"); } catch (_ignoreNoLog) {}
+    }
+    return "files";
+  }
+
+  function agentSandboxConfiguredPolicy() {
+    var value = "";
+    try { value = trim(System.getProperty(AGENT_SANDBOX_POLICY_PROPERTY)); } catch (_ignoreNoProperty) {}
+    if (!value.length) {
+      try { value = trim(Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue(AGENT_SANDBOX_POLICY_SYMBOL)); } catch (_ignoreNoSymbol) {}
+    }
+    if (!value.length) {
+      try {
+        var properties = Packages.com.twinsoft.convertigo.engine.EnginePropertiesManager;
+        value = trim(properties.getProperty(properties.PropertyName.valueOf("AGENTS_TOOL_POLICY")));
+      } catch (_ignoreEngineWithoutIt) {}
+    }
+    return value;
+  }
+
+  function isLinuxHost() {
+    return /linux/i.test(String(System.getProperty("os.name") || ""));
+  }
+
+  function agentSandboxArchitecture() {
+    var arch = String(System.getProperty("os.arch") || "").toLowerCase();
+    return arch === "amd64" || arch === "x86_64" ? "linux-amd64" : (arch === "aarch64" || arch === "arm64" ? "linux-arm64" : "");
+  }
+
+  // The helper of this project for this machine, made executable (a .car or a checkout can lose the bit); null without one.
+  function shippedAgentSandboxHelper() {
+    var arch = agentSandboxArchitecture();
+    var bridgeDir = arch.length ? projectDirectoryByName("lib_ConvertigoAgentBridge") : null;
+    if (bridgeDir === null) {
+      return null;
+    }
+    var file = new File(new File(new File(bridgeDir, "sandbox"), arch), "c8o-agent-sandbox");
+    if (!file.isFile()) {
+      return null;
+    }
+    if (!file.canExecute()) {
+      try { file.setExecutable(true, true); } catch (_ignoreChmod) {}
+    }
+    return file.canExecute() ? filePath(file) : null;
+  }
+
+  function agentSandboxHelper() {
+    var configured = "";
+    try { configured = trim(System.getProperty(AGENT_SANDBOX_HELPER_PROPERTY)); } catch (_ignoreNoHelperProperty) {}
+    return configured.length ? configured : (shippedAgentSandboxHelper() || AGENT_SANDBOX_IMAGE_HELPER);
+  }
+
+  // What `helper --probe` prints: the Landlock version, on success only; 0 for a missing helper, a failure or a timeout.
+  function probeAgentSandbox(helper, timeoutMs) {
+    var file = new File(helper);
+    if (!file.isFile() || !file.canExecute()) {
+      return 0;
+    }
+    var run = runProcessBuilder(new ProcessBuilder(toJavaList([helper, "--probe"])), { timeoutMs: timeoutMs });
+    if (!run.ok) {
+      return 0;
+    }
+    var line = trim(String(run.stdout || "").split(/\r?\n/)[0]);
+    var abi = /^\d+$/.test(line) ? parseInt(line, 10) : 0;
+    return abi > 0 ? abi : 0;
+  }
+
+  // The Landlock version the helper finds, probed once per helper (its path, date and bit) and engine; 0 off Linux.
+  function agentSandboxLandlockAbi(helper) {
+    if (!isLinuxHost()) {
+      return 0;
+    }
+    var file = new File(helper);
+    var key = helper + "|" + (file.isFile() ? file.lastModified() + "|" + file.canExecute() : "missing") + "|";
+    var cached = "";
+    try { cached = String(System.getProperty(AGENT_SANDBOX_PROBE_CACHE) || ""); } catch (_ignoreNoCache) {}
+    if (cached.indexOf(key) === 0) {
+      return Number(cached.substring(key.length)) || 0;
+    }
+    var abi = probeAgentSandbox(helper, AGENT_SANDBOX_PROBE_TIMEOUT_MS);
+    try { System.setProperty(AGENT_SANDBOX_PROBE_CACHE, key + abi); } catch (_ignoreCacheWrite) {}
+    return abi;
+  }
+
+  function agentSandboxPaths(system, given) {
+    var paths = system.slice(0);
+    (given || []).forEach(function (path) {
+      var text = path == null ? "" : String(path);
+      if (!text.length || text.indexOf("\u0000") >= 0 || !new File(text).isAbsolute()) {
+        throw new Error("Not an absolute path: " + path);
+      }
+      if (paths.indexOf(text) < 0) {
+        paths.push(text);
+      }
+    });
+    return paths;
+  }
+
+  // helper, --ro and --rw for the system and the given folders (each once), --, the command
+  function buildAgentSandboxCommand(helper, command, readOnly, readWrite) {
+    var commandArgs = (command || []).map(String);
+    if (!commandArgs.length) {
+      throw new Error("No command to confine");
+    }
+    var args = [helper];
+    agentSandboxPaths(AGENT_SANDBOX_SYSTEM_READ_ONLY, readOnly).forEach(function (path) { args.push("--ro", path); });
+    agentSandboxPaths(AGENT_SANDBOX_SYSTEM_READ_WRITE, readWrite).forEach(function (path) { args.push("--rw", path); });
+    args.push("--");
+    return args.concat(commandArgs);
+  }
+
+  function agentSandbox() {
+    return {
+      // {"policy", "effective", "landlockAbi", "helper"}, as engine.util.AgentSandbox.describe() gave them
+      describe: function () {
+        var helper = agentSandboxHelper();
+        var abi = agentSandboxLandlockAbi(helper);
+        var policy = agentSandboxPolicyName(agentSandboxConfiguredPolicy());
+        return JSON.stringify({ policy: policy, effective: policy === "sandboxed-shell" && abi < 1 ? "files" : policy, landlockAbi: abi, helper: helper });
+      },
+      // the command run confined to the system (read only), readOnly and readWrite; never unconfined: an error where
+      // the kernel cannot confine it
+      wrap: function (command, readOnly, readWrite) {
+        var helper = agentSandboxHelper();
+        if (agentSandboxLandlockAbi(helper) < 1) {
+          throw new Error("The agent's command cannot be confined here: " + helper + " or Landlock is missing");
+        }
+        return buildAgentSandboxCommand(helper, command, readOnly, readWrite);
+      }
+    };
   }
 
   // The policy the engine gives its No Code agents, its effective one (sandboxed-shell is files where the engine cannot
@@ -479,7 +642,7 @@
   // older than agents.tool_policy gives files, unconfined, and names none.
   function engineNoCodeToolInfo() {
     try {
-      var described = JSON.parse(String(engineAgentSandbox().describe()));
+      var described = JSON.parse(String(agentSandbox().describe()));
       var policy = trim(described.effective);
       var configured = trim(described.policy);
       return {
@@ -618,9 +781,9 @@
   }
 
   // null for a Studio session or under full; else where the session works and whether its command runs through
-  // engine.util.AgentSandbox.wrap. Wherever the engine confines (Landlock), every No Code policy but full is confined:
-  // the kernel then holds what Vibe's own path checks hold under mcp-only and files, and what the shell could reach
-  // under sandboxed-shell. wrap() refuses where the engine cannot confine, so a confined session never runs unconfined.
+  // agentSandbox().wrap. Wherever the kernel confines (Landlock), every No Code policy but full is confined: the kernel
+  // then holds what Vibe's own path checks hold under mcp-only and files, and what the shell could reach under
+  // sandboxed-shell. wrap() refuses where it cannot confine, so a confined session never runs unconfined.
   function noCodeSessionSandbox(options, setup, vibeHome) {
     if (normalizeSkillProfile(options || {}) !== "nocode" || !trim(vibeHome).length) {
       return null;
@@ -653,12 +816,7 @@
       readOnly: readOnly,
       readWrite: [trim(vibeHome), scratch],
       wrap: function (command) {
-        var wrapped = engineAgentSandbox().wrap(toJavaList(command), toJavaList(this.readOnly), toJavaList(this.readWrite));
-        var args = [];
-        for (var i = 0; i < wrapped.size(); i++) {
-          args.push(String(wrapped.get(i)));
-        }
-        return args;
+        return agentSandbox().wrap(command, this.readOnly, this.readWrite);
       }
     };
   }

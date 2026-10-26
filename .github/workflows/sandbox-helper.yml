@@ -1,0 +1,66 @@
+# Builds c8o-agent-sandbox (sandbox/c8o-agent-sandbox.c), the helper that confines the No Code agents with Landlock,
+# static for linux-amd64 and linux-arm64 on Ubuntu Noble, runs sandbox/c8o-agent-sandbox-test.sh on each, and keeps
+# the binaries as artifacts. The project carries them in sandbox/linux-<arch>/ (a .car and a checkout run them
+# as they are): after a change of the source, commit the binaries of the artifacts. A committed binary that differs
+# from the build is reported.
+
+name: Sandbox helper
+
+on:
+  push:
+    branches:
+      - '**'
+    paths:
+      - 'sandbox/c8o-agent-sandbox.c'
+      - 'sandbox/c8o-agent-sandbox-test.sh'
+      - 'sandbox/linux-*/c8o-agent-sandbox'
+      - '.github/workflows/sandbox-helper.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build static on Ubuntu Noble
+        run: |
+          mkdir -p build/linux-${{ matrix.arch }}
+          docker run --rm -v "$PWD:/src" -w /src ubuntu:noble sh -c '
+            apt-get update -qq >/dev/null &&
+            apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null &&
+            gcc -O2 -Wall -Wextra -Werror -static -o build/linux-${{ matrix.arch }}/c8o-agent-sandbox sandbox/c8o-agent-sandbox.c &&
+            chown -R '"$(id -u):$(id -g)"' build'
+          file build/linux-${{ matrix.arch }}/c8o-agent-sandbox
+          sha256sum build/linux-${{ matrix.arch }}/c8o-agent-sandbox
+
+      - name: Check the confinement
+        run: sh sandbox/c8o-agent-sandbox-test.sh build/linux-${{ matrix.arch }}/c8o-agent-sandbox
+
+      - name: Compare with the committed binary
+        run: |
+          committed=sandbox/linux-${{ matrix.arch }}/c8o-agent-sandbox
+          if [ ! -f "$committed" ]; then
+            echo "::warning::$committed is not committed yet: take it from the artifact"
+          elif ! cmp -s "$committed" build/linux-${{ matrix.arch }}/c8o-agent-sandbox; then
+            echo "::warning::$committed differs from this build: commit the binary of the artifact"
+            sh sandbox/c8o-agent-sandbox-test.sh "$committed"
+          fi
+
+      - name: Keep the binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: c8o-agent-sandbox-linux-${{ matrix.arch }}
+          path: build/linux-${{ matrix.arch }}/c8o-agent-sandbox
+          if-no-files-found: error
