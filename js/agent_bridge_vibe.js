@@ -347,6 +347,10 @@
       var activePlaywrightCdpEndpoint = trim(existing.playwrightCdpEndpoint || existing.viewerCdpEndpoint);
       var viewerChanged = requestedPlaywrightCdpEndpoint.length && activePlaywrightCdpEndpoint !== requestedPlaywrightCdpEndpoint;
       var revealChanged = (existing.convertigoRevealMode === true) !== revealModeEnabled(options, null);
+      // What the Convertigo MCP lists for this user (the Assistant's key: its report tool comes and goes with the
+      // user's consent to send feedback). Vibe reads the tool list once, when its process starts.
+      var requestedCatalogKey = trim(options.mcpCatalogKey);
+      var catalogChanged = requestedCatalogKey.length > 0 && (trim(existing.mcpCatalogKey) || "feedback:off") !== requestedCatalogKey;
       if (requestedMcpTokenFingerprint.length
           && trim(existing.mcpBearerTokenFingerprint) !== requestedMcpTokenFingerprint) {
         pushEvent(existing, "warning", {
@@ -375,6 +379,18 @@
           phase: "session/config",
           reason: "model_catalog_changed",
           message: "Vibe must restart to apply the refreshed model capabilities."
+        });
+        stopEntry(existing, true);
+        existing = null;
+      } else if (catalogChanged) {
+        // The session goes on in a new process that reads the new tool list.
+        if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
+          options.sessionId = trim(existing.sessionId);
+        }
+        pushEvent(existing, "warning", {
+          phase: "mcp/catalog",
+          reason: "mcp_catalog_changed",
+          message: "Vibe must restart to read the updated Convertigo MCP tool list."
         });
         stopEntry(existing, true);
         existing = null;
@@ -490,6 +506,7 @@
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
+    entry.mcpCatalogKey = trim(options.mcpCatalogKey);
     entry.viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
     entry.browserDebugUrl = trim(options.browserDebugUrl);
     entry.playwrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);

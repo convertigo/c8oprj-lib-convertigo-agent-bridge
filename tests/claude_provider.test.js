@@ -1018,3 +1018,12 @@ console.log("Vibe image attachment contract OK");
   }
   console.log("Vibe compaction rules contract OK");
 }
+
+{
+  // The model Claude Code answers with (its default when Tigo asks for none) reaches the Assistant with the usage.
+  const modelEntry = fakeEntry();
+  handleClaudeStreamLine(modelEntry, JSON.stringify({ type: "assistant", message: { id: "mu1", model: "claude-opus-5-5", content: [{ type: "text", text: "ok" }],
+    usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }), "stdout");
+  assert.equal(modelEntry._events.find((event) => event.type === "usage/update").data.update._meta.model, "claude-opus-5-5");
+  console.log("Claude answering model OK");
+}

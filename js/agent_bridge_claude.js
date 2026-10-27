@@ -2615,6 +2615,10 @@
       var wrote = Number(usage.output_tokens) || 0;
       entry.claudeContextUsed = read + wrote;
       entry.claudeContextMeta = { promptTokens: read, completionTokens: wrote, cachedTokens: Number(usage.cache_read_input_tokens) || 0 };
+      // The model that answered: Claude Code's default when Tigo asks for none, so the Assistant can name it.
+      if (trim(payload && payload.model).length) {
+        entry.claudeContextMeta.model = trim(payload.model);
+      }
       claudePushContextUsage(entry, null);
     } catch (_ignoreContextUsage) {}
   }
