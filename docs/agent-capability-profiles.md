@@ -59,6 +59,78 @@ passing another profile id or by running inside a Studio surface.
 The Studio setup removes `convertigo-nocode` from the `studio` home so the
 low-code agent cannot accidentally mutate a NoCode application.
 
+A NoCode agent runs in the engine's container, as the engine's user. What it
+may do besides the Convertigo MCP is `agents.tool_policy`, read by the Bridge
+(`agentSandbox()` in `js/agent_bridge_common.js`) from, in this order: the
+system property `convertigo.engine.agents.tool_policy` (set by the platform,
+for instance in the `javaOpts` of a cloud server: the console cannot lift it),
+the global symbol `agents.tool_policy`, the engine property of an engine that
+still has it. `auto`, nothing or an unknown value is `files`:
+
+| Policy | The NoCode agent gets |
+| --- | --- |
+| `mcp-only` | the Convertigo MCP tools only |
+| `files` (`auto`, the default) | `read_file`, `write_file` and `edit` in the session's own folder (`scratch/<conversation>` beside the user's `VIBE_HOME`, its cwd and `TMPDIR`) and the tool results Vibe saved; no shell, `grep`, web or subagent |
+| `sandboxed-shell` | files and the shell; the engine gives `files` where it cannot confine |
+| `full` | what a Studio session gets |
+
+Wherever the kernel confines (Landlock, through `c8o-agent-sandbox`),
+`vibe-acp` and every process it starts under `mcp-only`,
+`files` and `sandboxed-shell` run through the helper: read only on the
+runtime, writable only in the user's `VIBE_HOME` and the session's folder
+(also its `HOME`, `TMPDIR` and cache), nothing else. The session refuses to
+start rather than run unconfined.
+
+Landlock ABI 1 (Linux before 5.19) refuses any move of a file into another
+directory (`EXDEV`, "Invalid cross-device link"), and Vibe's plugin store moves
+every file it publishes: without help a user's first confined Vibe dies on its
+built-in plugin. A confined `vibe-acp` gets the Bridge's
+`sandbox/python/sitecustomize.py` first on `PYTHONPATH` (read only): on `EXDEV`,
+`os.rename` and `os.replace` copy into the target's directory and rename there,
+as `mv` does, and a `sitecustomize` it hides still runs. From ABI 2 the helper
+allows those moves and the module changes nothing. Its `PATH` starts with the bin
+folder of the CPython behind Vibe's venv, read only like the rest of the runtime:
+the engine's container has no `python3` of its own, and a `sandboxed-shell` agent
+lost a step on `python3: command not found`.
+
+`read_file` reads back, without asking, the tool results Vibe saved to a file
+(`VIBE_HOME/logs/session/unified/*/tool-results/*`, through its allowlist).
+For Vibe, the NoCode `config.toml` lists the tools a policy leaves out in
+`disabled_tools` and turns off `run_typescript`'s background processes (but
+under `sandboxed-shell`) and subagents; a resident NoCode process started
+under another policy restarts on the same session. Under `mcp-only` and
+`files` the Bridge also refuses any permission the session asks for a tool
+that is not a Convertigo MCP one, instead of approving it. The Studio's own
+session (`studio`) is never limited.
+
+Only Vibe applies the policy: a NoCode session on Codex or Claude runs as a
+Studio session does. Every session status (`state` of the start, prompt and
+event answers) carries what was applied when its process started, for the
+Assistant to show:
+
+| `sandbox` field | Value |
+| --- | --- |
+| `scope` | `studio` or `nocode` |
+| `policy` | `mcp-only`, `files`, `sandboxed-shell` or `full`: what the session gets |
+| `source` | `studio` (never limited), `engine` (`agents.tool_policy`, Vibe), `harness` (Codex, Claude: not applied) |
+| `configured` | the policy `agents.tool_policy` names when the engine gives another one (`sandboxed-shell` without Landlock), else empty |
+| `confined` | the kernel holds the session's processes (Landlock helper) |
+| `landlockAbi` | the Landlock version the helper confines with, `0` when it cannot |
+
+The helper is a static program of this project, `sandbox/linux-amd64/` and
+`sandbox/linux-arm64/c8o-agent-sandbox`, built from `sandbox/c8o-agent-sandbox.c`
+by `.github/workflows/sandbox-helper.yml`, which runs
+`sandbox/c8o-agent-sandbox-test.sh` on each build: commit the binaries of its
+artifacts after a change of the source. The Bridge gives it back its execute
+bit (a `.car` or a checkout can lose it). The system property
+`convertigo.agent.sandbox.helper` names another helper; without one for the
+machine, the Bridge takes `/usr/local/bin/c8o-agent-sandbox` of a Docker image
+that still ships it. `c8o-agent-sandbox --probe` prints the Landlock version of
+the kernel, probed once per helper and engine. The engine's own
+`engine.util.AgentSandbox` (branch `hotfix-optims`) is no longer used.
+
+A session started by an older Bridge has `sandbox: null`.
+
 ## Ownership
 
 `lib_ConvertigoAgentBridge` owns provider lifecycle, isolated homes, sessions,

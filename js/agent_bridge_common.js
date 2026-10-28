@@ -53,6 +53,17 @@
   var VIBE_COMPACTION_PROMPT_ID = "convertigo_compact";
   var FALLBACK_FLOW_MCP_PATH = "/api/flow-mcp";
   var DEFAULT_TTL_SECONDS = 3600;
+  // How long agent processes live and how many Vibe processes a No Code user keeps (see sweepRegistry).
+  var NOCODE_TTL_SECONDS = 1200;
+  var PREWARM_TTL_MILLIS = 180000;
+  var NOCODE_MAX_VIBE_PER_USER = 3;
+  var STARTING_GRACE_MILLIS = 150000;
+  var SWEEP_MIN_INTERVAL_MILLIS = 10000;
+  var SWEEP_CLOCK_KEY = "lib_ConvertigoAgentBridge.sweepClock.v1";
+  var REAPER_PROPERTY = "lib_ConvertigoAgentBridge.reaper";
+  // Bump it when the sweep changes: the reaper thread of an older revision then stops at its next tick.
+  var REAPER_REVISION = "1";
+  var REAPER_PERIOD_MILLIS = 60000;
   var RUNTIME_UPDATE_CACHE_KEY = "lib_ConvertigoAgentBridge.runtimeUpdateCache.v1";
   var RUNTIME_UPDATE_CACHE_FILE = "runtime-update-checks.json";
   var DEFAULT_RUNTIME_UPDATE_CACHE_MS = 21600000;
@@ -437,6 +448,425 @@
   // Bumped when the generated model blocks change: existing homes rewrite config.toml, resident sessions restart.
   var VIBE_MODEL_CONFIG_REVISION = "gateway-output-cap-v3";
 
+  // What a No Code session may do besides the Convertigo MCP: agents.tool_policy (agentSandbox() below), files when
+  // nothing sets it. Vibe's own shell, file and web tools ran in the engine container with the engine's
+  // rights, its cwd the whole workspace (test-nocode, Mistral run: `bash: jq ...` approved by choosePermissionOption).
+  // - mcp-only: none of them;
+  // - files: read_file, write_file and edit in the session's own folder (its cwd), read_file on the tool results Vibe
+  //   saved in the user's VIBE_HOME, no shell, grep, web or subagent;
+  // - sandboxed-shell: files and the shell;
+  // - full: as a Studio session.
+  // Wherever the kernel confines (Landlock), vibe-acp and every process it starts under mcp-only, files and
+  // sandboxed-shell run through the helper, confined to the runtime (read only), the user's VIBE_HOME and the
+  // session's folder.
+  // The config.toml removes the tools a policy leaves out; Vibe's runtime builtins (bash, read_file...) stay in the
+  // model's tool list and Vibe refuses to run them (test-nocode: `bash` answered "denied by approval policy"); under mcp-only and
+  // files the Bridge also refuses any permission asked for another tool than a Convertigo MCP one. The Studio's own
+  // session (user studio) is never limited. Bumped when a policy changes: No Code homes rewrite config.toml, resident
+  // No Code sessions restart.
+  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v3";
+  var VIBE_NOCODE_POLICIES = ["mcp-only", "files", "sandboxed-shell", "full"];
+  var VIBE_NOCODE_SHELL_TOOLS = ["bash*", "git_bash*", "powershell*"];
+  var VIBE_NOCODE_FILE_TOOLS = ["read_file", "write_file", "edit"];
+  var VIBE_NOCODE_OTHER_TOOLS = ["grep", "web_fetch", "web_search", "task"];
+
+  // The confinement of the No Code agents. The Bridge carries it: it was engine.util.AgentSandbox of the engine branch
+  // hotfix-optims (8.4.7), which nothing but the Bridge used, and a policy that follows the agents had to wait for an
+  // engine release. Same contract: describe() and wrap().
+  // The policy is the system property convertigo.engine.agents.tool_policy, which wins: the platform sets it (the
+  // javaOpts of a cloud server) and the console of the server cannot lift it. Else the global symbol agents.tool_policy,
+  // else the engine property of an engine that still has it. auto, nothing or a value no policy has is files.
+  // The helper is the static program of this project, sandbox/linux-<arch>/c8o-agent-sandbox (its source, checks and CI
+  // beside it), unless the system property convertigo.agent.sandbox.helper names another one, else the one of a Docker
+  // image that still ships it. It applies Landlock and no_new_privs, then runs the command, and every process it starts
+  // inherits both; `--probe` prints the Landlock version of the kernel (0, a failure or no helper: it cannot confine,
+  // and sandboxed-shell is files).
+  var AGENT_SANDBOX_POLICY_PROPERTY = "convertigo.engine.agents.tool_policy";
+  var AGENT_SANDBOX_POLICY_SYMBOL = "agents.tool_policy";
+  var AGENT_SANDBOX_HELPER_PROPERTY = "convertigo.agent.sandbox.helper";
+  var AGENT_SANDBOX_IMAGE_HELPER = "/usr/local/bin/c8o-agent-sandbox";
+  var AGENT_SANDBOX_PROBE_CACHE = "lib_ConvertigoAgentBridge.sandboxProbe";
+  var AGENT_SANDBOX_PROBE_TIMEOUT_MS = 5000;
+  // What every confined process reads and runs: the system, neither /usr/local (Tomcat, the engine) nor /workspace. Of
+  // /proc, the command's own entries (/proc/self, resolved by the helper to the pid the command keeps) and the
+  // system-wide files only: with the whole of /proc, a confined shell read the command line of the engine and the
+  // passwords it holds (test-nocode, 23/10). A process space of its own is not an option there: the container refuses
+  // to mount another /proc.
+  var AGENT_SANDBOX_SYSTEM_READ_ONLY = ["/bin", "/sbin", "/lib", "/lib32", "/lib64", "/usr/bin", "/usr/sbin", "/usr/lib",
+    "/usr/lib32", "/usr/lib64", "/usr/libexec", "/usr/share", "/etc", "/sys", "/dev", "/proc/self", "/proc/thread-self",
+    "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/loadavg", "/proc/uptime", "/proc/version",
+    "/proc/filesystems", "/proc/sys"];
+  // what every confined process writes besides its folders
+  var AGENT_SANDBOX_SYSTEM_READ_WRITE = ["/dev/null"];
+
+  function agentSandboxPolicyName(value) {
+    var name = trim(value).toLowerCase();
+    if (VIBE_NOCODE_POLICIES.indexOf(name) >= 0) {
+      return name;
+    }
+    if (name.length && name !== "auto") {
+      try { log.warn("(lib_ConvertigoAgentBridge) agents.tool_policy=" + value + " names no policy: auto is used"); } catch (_ignoreNoLog) {}
+    }
+    return "files";
+  }
+
+  function agentSandboxConfiguredPolicy() {
+    var value = "";
+    try { value = trim(System.getProperty(AGENT_SANDBOX_POLICY_PROPERTY)); } catch (_ignoreNoProperty) {}
+    if (!value.length) {
+      try { value = trim(Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue(AGENT_SANDBOX_POLICY_SYMBOL)); } catch (_ignoreNoSymbol) {}
+    }
+    if (!value.length) {
+      try {
+        var properties = Packages.com.twinsoft.convertigo.engine.EnginePropertiesManager;
+        value = trim(properties.getProperty(properties.PropertyName.valueOf("AGENTS_TOOL_POLICY")));
+      } catch (_ignoreEngineWithoutIt) {}
+    }
+    return value;
+  }
+
+  function isLinuxHost() {
+    return /linux/i.test(String(System.getProperty("os.name") || ""));
+  }
+
+  function agentSandboxArchitecture() {
+    var arch = String(System.getProperty("os.arch") || "").toLowerCase();
+    return arch === "amd64" || arch === "x86_64" ? "linux-amd64" : (arch === "aarch64" || arch === "arm64" ? "linux-arm64" : "");
+  }
+
+  // The helper of this project for this machine, made executable (a .car or a checkout can lose the bit); null without one.
+  function shippedAgentSandboxHelper() {
+    var arch = agentSandboxArchitecture();
+    var bridgeDir = arch.length ? projectDirectoryByName("lib_ConvertigoAgentBridge") : null;
+    if (bridgeDir === null) {
+      return null;
+    }
+    var file = new File(new File(new File(bridgeDir, "sandbox"), arch), "c8o-agent-sandbox");
+    if (!file.isFile()) {
+      return null;
+    }
+    if (!file.canExecute()) {
+      try { file.setExecutable(true, true); } catch (_ignoreChmod) {}
+    }
+    return file.canExecute() ? filePath(file) : null;
+  }
+
+  function agentSandboxHelper() {
+    var configured = "";
+    try { configured = trim(System.getProperty(AGENT_SANDBOX_HELPER_PROPERTY)); } catch (_ignoreNoHelperProperty) {}
+    return configured.length ? configured : (shippedAgentSandboxHelper() || AGENT_SANDBOX_IMAGE_HELPER);
+  }
+
+  // What `helper --probe` prints: the Landlock version, on success only; 0 for a missing helper, a failure or a timeout.
+  function probeAgentSandbox(helper, timeoutMs) {
+    var file = new File(helper);
+    if (!file.isFile() || !file.canExecute()) {
+      return 0;
+    }
+    var run = runProcessBuilder(new ProcessBuilder(toJavaList([helper, "--probe"])), { timeoutMs: timeoutMs });
+    if (!run.ok) {
+      return 0;
+    }
+    var line = trim(String(run.stdout || "").split(/\r?\n/)[0]);
+    var abi = /^\d+$/.test(line) ? parseInt(line, 10) : 0;
+    return abi > 0 ? abi : 0;
+  }
+
+  // The Landlock version the helper finds, probed once per helper (its path, date and bit) and engine; 0 off Linux.
+  function agentSandboxLandlockAbi(helper) {
+    if (!isLinuxHost()) {
+      return 0;
+    }
+    var file = new File(helper);
+    var key = helper + "|" + (file.isFile() ? file.lastModified() + "|" + file.canExecute() : "missing") + "|";
+    var cached = "";
+    try { cached = String(System.getProperty(AGENT_SANDBOX_PROBE_CACHE) || ""); } catch (_ignoreNoCache) {}
+    if (cached.indexOf(key) === 0) {
+      return Number(cached.substring(key.length)) || 0;
+    }
+    var abi = probeAgentSandbox(helper, AGENT_SANDBOX_PROBE_TIMEOUT_MS);
+    try { System.setProperty(AGENT_SANDBOX_PROBE_CACHE, key + abi); } catch (_ignoreCacheWrite) {}
+    return abi;
+  }
+
+  function agentSandboxPaths(system, given) {
+    var paths = system.slice(0);
+    (given || []).forEach(function (path) {
+      var text = path == null ? "" : String(path);
+      if (!text.length || text.indexOf("\u0000") >= 0 || !new File(text).isAbsolute()) {
+        throw new Error("Not an absolute path: " + path);
+      }
+      if (paths.indexOf(text) < 0) {
+        paths.push(text);
+      }
+    });
+    return paths;
+  }
+
+  // helper, --ro and --rw for the system and the given folders (each once), --, the command
+  function buildAgentSandboxCommand(helper, command, readOnly, readWrite) {
+    var commandArgs = (command || []).map(String);
+    if (!commandArgs.length) {
+      throw new Error("No command to confine");
+    }
+    var args = [helper];
+    agentSandboxPaths(AGENT_SANDBOX_SYSTEM_READ_ONLY, readOnly).forEach(function (path) { args.push("--ro", path); });
+    agentSandboxPaths(AGENT_SANDBOX_SYSTEM_READ_WRITE, readWrite).forEach(function (path) { args.push("--rw", path); });
+    args.push("--");
+    return args.concat(commandArgs);
+  }
+
+  function agentSandbox() {
+    return {
+      // {"policy", "effective", "landlockAbi", "helper"}, as engine.util.AgentSandbox.describe() gave them
+      describe: function () {
+        var helper = agentSandboxHelper();
+        var abi = agentSandboxLandlockAbi(helper);
+        var policy = agentSandboxPolicyName(agentSandboxConfiguredPolicy());
+        return JSON.stringify({ policy: policy, effective: policy === "sandboxed-shell" && abi < 1 ? "files" : policy, landlockAbi: abi, helper: helper });
+      },
+      // the command run confined to the system (read only), readOnly and readWrite; never unconfined: an error where
+      // the kernel cannot confine it
+      wrap: function (command, readOnly, readWrite) {
+        var helper = agentSandboxHelper();
+        if (agentSandboxLandlockAbi(helper) < 1) {
+          throw new Error("The agent's command cannot be confined here: " + helper + " or Landlock is missing");
+        }
+        return buildAgentSandboxCommand(helper, command, readOnly, readWrite);
+      }
+    };
+  }
+
+  // The policy the engine gives its No Code agents, its effective one (sandboxed-shell is files where the engine cannot
+  // confine), the one agents.tool_policy names, and the Landlock version it confines with (0: it cannot). An engine
+  // older than agents.tool_policy gives files, unconfined, and names none.
+  function engineNoCodeToolInfo() {
+    try {
+      var described = JSON.parse(String(agentSandbox().describe()));
+      var policy = trim(described.effective);
+      var configured = trim(described.policy);
+      return {
+        policy: VIBE_NOCODE_POLICIES.indexOf(policy) >= 0 ? policy : "files",
+        configured: VIBE_NOCODE_POLICIES.indexOf(configured) >= 0 ? configured : "",
+        landlockAbi: Number(described.landlockAbi) > 0 ? Number(described.landlockAbi) : 0
+      };
+    } catch (_ignoreOlderEngine) {
+      return { policy: "files", configured: "", landlockAbi: 0 };
+    }
+  }
+
+  // What a session may do, as its status tells the Assistant: the Studio's own session is never limited (source
+  // studio); a No Code session gets the engine's policy where its harness applies it, Vibe (source engine), and runs
+  // as a Studio session elsewhere, Codex and Claude (source harness). confined: the kernel holds the session's
+  // processes (Landlock); configured: the policy agents.tool_policy names, when the engine gives another one.
+  function agentSessionSandbox(options, provider, noCodeSandbox) {
+    if (normalizeSkillProfile(options || {}) !== "nocode") {
+      return { scope: "studio", policy: "full", source: "studio", configured: "", confined: false, landlockAbi: 0 };
+    }
+    var info = engineNoCodeToolInfo();
+    var applied = normalizeProvider(provider) === "vibe";
+    var policy = !applied ? "full" : (noCodeSandbox ? noCodeSandbox.policy : info.policy);
+    return {
+      scope: "nocode",
+      policy: policy,
+      source: applied ? "engine" : "harness",
+      configured: applied && info.configured.length && info.configured !== policy ? info.configured : "",
+      confined: !!(applied && noCodeSandbox && noCodeSandbox.confined === true),
+      landlockAbi: info.landlockAbi
+    };
+  }
+
+  // "" for a Studio session, else the policy of this No Code session
+  function noCodeToolPolicyName(options) {
+    return normalizeSkillProfile(options || {}) === "nocode" ? engineNoCodeToolInfo().policy : "";
+  }
+
+  // what a resident process was started with: a change of policy or of confinement restarts it
+  function vibeToolPolicy(options) {
+    if (normalizeSkillProfile(options || {}) !== "nocode") {
+      return "";
+    }
+    var info = engineNoCodeToolInfo();
+    var confined = info.policy !== "full" && info.landlockAbi > 0;
+    return "nocode-" + info.policy + (confined ? "-landlock" : "") + "-" + VIBE_NOCODE_TOOL_POLICY_REVISION;
+  }
+
+  // The top-level keys of a No Code config.toml. run_typescript reaches background processes (tools.process) and
+  // subagents (tools.subagent) on their own switches.
+  function vibeToolPolicyLines(options) {
+    var policy = noCodeToolPolicyName(options);
+    if (!policy.length || policy === "full") {
+      return [];
+    }
+    var disabled = VIBE_NOCODE_OTHER_TOOLS.slice(0);
+    if (policy !== "sandboxed-shell") {
+      disabled = VIBE_NOCODE_SHELL_TOOLS.concat(disabled);
+    }
+    if (policy === "mcp-only") {
+      disabled = disabled.concat(VIBE_NOCODE_FILE_TOOLS);
+    }
+    return [
+      "disabled_tools = " + tomlArray(disabled),
+      "enable_background_processes = " + (policy === "sandboxed-shell" ? "true" : "false"),
+      "enable_subagents = false"
+    ];
+  }
+
+  // Its tables: writes in the session's folder need no permission; outside it Vibe asks, and the Bridge refuses.
+  // A tool result Vibe saved to a file (over 16,000 characters) lies in VIBE_HOME, outside that folder: read_file
+  // reads it back without asking (test-nocode: without it the read was refused and the agent saw an excerpt only).
+  function vibeToolPolicyTables(options, vibeHome) {
+    var policy = noCodeToolPolicyName(options);
+    if (policy !== "files" && policy !== "sandboxed-shell") {
+      return [];
+    }
+    var tables = ["[tools.write_file]", 'permission = "always"', "", "[tools.edit]", 'permission = "always"', ""];
+    if (trim(vibeHome).length) {
+      tables.push("[tools.read_file]", "allowlist = " + tomlArray([trim(vibeHome) + "/logs/session/unified/*/tool-results/*"]), "");
+    }
+    return tables;
+  }
+
+  // The session's own folder, beside the user's VIBE_HOME: its cwd, its TMPDIR (Vibe's scratchpad) and, confined,
+  // the only folder it writes with that home.
+  function noCodeScratchDir(options, vibeHome) {
+    var key = trim(options && options.conversationId) || trim(options && options.handle) || "session";
+    return childPath(childPath(filePath(new File(vibeHome).getParentFile()), "scratch"), stableId("conversation", key));
+  }
+
+  // The folders a confined vibe-acp reads besides the system: its runtime (the venv of the managed Vibe, the Python
+  // of that venv, Node). The venv only: the Vibe install folder also holds every user's VIBE_HOME (test-nocode: with
+  // it read only, a confined agent listed another user's home).
+  // The bin folder of the CPython behind Vibe's venv (home in pyvenv.cfg), "" without one.
+  function venvPythonBin(setup) {
+    try {
+      var config = readTextFile(new File(new File(setup.installDir, ".venv"), "pyvenv.cfg"));
+      var home = /^home\s*=\s*(.+)$/m.exec(config);
+      return home ? filePath(new File(trim(home[1]))) : "";
+    } catch (_ignoreNoVenvConfig) {
+      return "";
+    }
+  }
+
+  function noCodeRuntimeFolders(setup, options) {
+    var folders = [];
+    var add = function (path) {
+      var value = trim(path);
+      if (value.length && folders.indexOf(value) < 0) {
+        folders.push(value);
+      }
+    };
+    if (setup && trim(setup.installDir).length) {
+      add(childPath(setup.installDir, ".venv"));
+    }
+    var pythonBin = venvPythonBin(setup);
+    if (pythonBin.length) {
+      add(filePath(new File(pythonBin).getParentFile()));
+    }
+    var nodePath = nodeRuntimeSearchPath(options || {});
+    if (nodePath.length) {
+      nodePath.split(String(File.pathSeparator)).forEach(add);
+    }
+    return folders;
+  }
+
+  // Landlock ABI 1 refuses to move or link a file into another directory (EXDEV), even where the process may write,
+  // and Vibe's plugin store moves every file it publishes: a user's first confined Vibe died on its built-in plugin.
+  // sandbox/python/sitecustomize.py, found first on PYTHONPATH, makes the confined Python copy into the target's
+  // directory and rename there instead, as mv does. "" when the Bridge's folder or the module cannot be found.
+  function confinedPythonPath() {
+    var bridgeDir = projectDirectoryByName("lib_ConvertigoAgentBridge");
+    var folder = bridgeDir === null ? null : new File(new File(bridgeDir, "sandbox"), "python");
+    return folder !== null && new File(folder, "sitecustomize.py").isFile() ? filePath(folder) : "";
+  }
+
+  // null for a Studio session or under full; else where the session works and whether its command runs through
+  // agentSandbox().wrap. Wherever the kernel confines (Landlock), every No Code policy but full is confined: the kernel
+  // then holds what Vibe's own path checks hold under mcp-only and files, and what the shell could reach under
+  // sandboxed-shell. wrap() refuses where it cannot confine, so a confined session never runs unconfined.
+  function noCodeSessionSandbox(options, setup, vibeHome) {
+    if (normalizeSkillProfile(options || {}) !== "nocode" || !trim(vibeHome).length) {
+      return null;
+    }
+    var info = engineNoCodeToolInfo();
+    var policy = info.policy;
+    if (policy === "full") {
+      return null;
+    }
+    var scratch = noCodeScratchDir(options, vibeHome);
+    var tmp = childPath(scratch, ".tmp");
+    ensureDirectory(new File(tmp));
+    var confined = info.landlockAbi > 0;
+    var pythonPath = confined ? confinedPythonPath() : "";
+    var readOnly = noCodeRuntimeFolders(setup, options);
+    if (pythonPath.length) {
+      readOnly.push(pythonPath);
+    }
+    return {
+      policy: policy,
+      cwd: scratch,
+      tmp: tmp,
+      // a confined process writes nowhere else: HOME and the caches go to the session's folder
+      home: scratch,
+      cache: childPath(scratch, ".cache"),
+      confined: confined,
+      pythonPath: pythonPath,
+      // the engine's container has no python3 on its PATH: a sandboxed-shell agent tried it and lost a step
+      pythonBin: confined ? venvPythonBin(setup) : "",
+      readOnly: readOnly,
+      readWrite: [trim(vibeHome), scratch],
+      wrap: function (command) {
+        return agentSandbox().wrap(command, this.readOnly, this.readWrite);
+      }
+    };
+  }
+
+  // The only tools a No Code session may be asked to run under mcp-only and files: the Convertigo MCP ones
+  // (`mcp_Convertigo.nocode_app_create` from run_typescript, `Convertigo_nocode-form-get` called directly).
+  function isConvertigoMcpToolTitle(title) {
+    return /^(mcp_convertigo\.|convertigo_)/i.test(trim(title));
+  }
+
+  // The title Vibe gave the tool call a permission request names (its tool_call update comes first, with the same id).
+  // An id Vibe built from the tool name stands for it; an effect id never seen is not judged.
+  function permissionToolTitle(entry, toolCall) {
+    toolCall = toolCall || {};
+    var id = trim(toolCall.toolCallId || toolCall.tool_call_id);
+    var title = trim(toolCall.title) || trim(entry && entry.toolCallTitles && id.length ? entry.toolCallTitles[id] : "");
+    if (!title.length && id.length && id.indexOf("effect-") !== 0) {
+      title = id;
+    }
+    return title;
+  }
+
+  // Under sandboxed-shell the kernel confines what the agent runs, under full nothing is limited.
+  function noCodePermissionRefused(entry, params) {
+    var policy = trim(entry && entry.noCodePolicy);
+    if (policy !== "mcp-only" && policy !== "files") {
+      return false;
+    }
+    var title = permissionToolTitle(entry, (params || {}).toolCall || (params || {}).tool_call);
+    return title.length > 0 && !isConvertigoMcpToolTitle(title);
+  }
+
+  function rememberToolCallTitle(entry, toolCallId, title) {
+    var id = trim(toolCallId);
+    if (!entry || !id.length || !trim(title).length) {
+      return;
+    }
+    if (!entry.toolCallTitles) {
+      entry.toolCallTitles = {};
+      entry.toolCallTitleOrder = [];
+    }
+    if (!Object.prototype.hasOwnProperty.call(entry.toolCallTitles, id)) {
+      entry.toolCallTitleOrder.push(id);
+      if (entry.toolCallTitleOrder.length > 200) {
+        delete entry.toolCallTitles[entry.toolCallTitleOrder.shift()];
+      }
+    }
+    entry.toolCallTitles[id] = trim(title);
+  }
+
   function gatewayModelCatalogRefreshRequested(options) {
     options = options || {};
     return boolValue(options.refreshModelCatalog, false) || boolValue(options.refreshProviderSettings, false) || boolValue(options.refreshUpdateCheck, false);
@@ -751,6 +1181,7 @@
   var VIBE_IMAGE_MIME_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
   var VIBE_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
   var VIBE_MAX_IMAGES_PER_MESSAGE = 8;
+  var VIBE_DESCRIBED_IMAGES_FILE = "convertigo-image-descriptions.json";
   var STUDIO_ROUTER_SKILL_SLUG = "convertigo-studio";
   var MANAGED_SKILL_BUNDLE_STATE_FILE = "managed-skill-bundle.json";
   var FLOW_MINIMUM_CONVERTIGO_VERSION = "8.5.0";
@@ -824,6 +1255,7 @@
   var Base64 = Packages.java.util.Base64;
   var Collections = Packages.java.util.Collections;
   var TimeUnit = Packages.java.util.concurrent.TimeUnit;
+  var AtomicLong = Packages.java.util.concurrent.atomic.AtomicLong;
   var Files = Packages.java.nio.file.Files;
   var StandardCharsets = Packages.java.nio.charset.StandardCharsets;
   var StandardCopyOption = Packages.java.nio.file.StandardCopyOption;
@@ -1584,6 +2016,58 @@
       StandardOpenOption.WRITE
     );
     return bytes.length;
+  }
+
+  // Startup timings, a diagnostic: what each step of a Vibe start, a prompt and a settings read takes, one JSON line per
+  // call in agents/vibe/startup-timings.ndjson (over 512 KB the file becomes startup-timings.ndjson.1). A new No Code
+  // conversation took 14 to 25 s before its first prompt reached Vibe, the model answering in 2 s (test-nocode).
+  var STARTUP_TIMINGS_FILE = "startup-timings.ndjson";
+  var STARTUP_TIMINGS_MAX_BYTES = 524288;
+  var activeStartupTimer = null;
+
+  function startupTimer(kind, fields) {
+    var timer = { kind: kind, at: now(), fields: fields || {}, marks: [], last: 0 };
+    timer.mark = function (step) {
+      var elapsed = now() - timer.at;
+      timer.marks.push({ step: step, ms: elapsed - timer.last });
+      timer.last = elapsed;
+    };
+    return timer;
+  }
+
+  // a step of the timer of the current call, if any (vibeSetup, startProcess... run inside vibeStart)
+  function startupMark(step) {
+    if (activeStartupTimer !== null) {
+      try {
+        activeStartupTimer.mark(step);
+      } catch (_ignoreStartupMark) {}
+    }
+  }
+
+  function writeStartupTimings(timer, workspaceRoot, outcome) {
+    try {
+      var root = trim(workspaceRoot) || engineWorkspaceRoot();
+      if (!root.length) {
+        return;
+      }
+      var dir = new File(new File(root, "agents"), "vibe");
+      ensureDirectory(dir);
+      var file = new File(dir, STARTUP_TIMINGS_FILE);
+      if (file.isFile() && file.length() > STARTUP_TIMINGS_MAX_BYTES) {
+        var previous = new File(dir, STARTUP_TIMINGS_FILE + ".1");
+        previous["delete"]();
+        file.renameTo(previous);
+      }
+      var line = { at: new Date(timer.at).toISOString(), kind: timer.kind, totalMs: now() - timer.at, outcome: trim(outcome) };
+      for (var key in timer.fields) {
+        if (Object.prototype.hasOwnProperty.call(timer.fields, key)) {
+          line[key] = timer.fields[key];
+        }
+      }
+      line.steps = timer.marks;
+      var bytes = new java.lang.String(JSON.stringify(line) + "\n").getBytes(StandardCharsets.UTF_8);
+      Files.write(file.toPath(), bytes, StandardOpenOption.CREATE, StandardOpenOption.APPEND, StandardOpenOption.WRITE);
+    } catch (_ignoreStartupTimings) {}
   }
 
   function readJsonFile(file) {
@@ -7460,6 +7944,11 @@
       '[providers.extra_headers]',
       ''
     ];
+    // Top-level keys go before the first table.
+    var policyLines = vibeToolPolicyLines(options);
+    if (policyLines.length) {
+      Array.prototype.splice.apply(lines, [lines.indexOf(''), 0].concat(policyLines));
+    }
     for (var specIndex = 0; specIndex < specs.length; specIndex++) {
       var modelSpec = specs[specIndex];
       if (modelSpec.builtIn === true) {
@@ -7540,6 +8029,7 @@
         ''
       );
     }
+    Array.prototype.push.apply(lines, vibeToolPolicyTables(options, vibeHome));
     var text = migrateManagedVibeModelPresets(lines.join("\n")).text;
     writeVibeCompactionPrompt(configDir);
     return {
@@ -9249,7 +9739,22 @@
     return report;
   }
 
+  // settings, timed like vibeStart (startup-timings.ndjson): the agent check of the Assistant panel goes through it
   C8O.agentBridge.settings = function (options) {
+    var timer = startupTimer("settings", { provider: trim(options && (options.provider || options.agent)) });
+    var outer = activeStartupTimer;
+    activeStartupTimer = timer;
+    var result = null;
+    try {
+      result = agentSettingsSteps(options);
+      return result;
+    } finally {
+      activeStartupTimer = outer;
+      writeStartupTimings(timer, trim(options && options.workspaceRoot), result && result.ok === false ? "error" : "ok");
+    }
+  };
+
+  function agentSettingsSteps(options) {
     options = optionsWithRequestFallbacks(options);
     var presenceOnly = boolValue(options.runtimePresenceOnly, false);
     var rawProvider = trim(options.provider || options.agent || "").toLowerCase();
@@ -9268,6 +9773,7 @@
     if ((!provider.length || provider === "claude") && typeof claudeSettings === "function") {
       providers.push(claudeSettings(options));
     }
+    startupMark("settings/providers");
     var settingsWorkspaceRoot = trim(options.workspaceRoot);
     if (!settingsWorkspaceRoot.length) {
       for (var workspaceIndex = 0; workspaceIndex < providers.length; workspaceIndex++) {
@@ -9294,6 +9800,7 @@
       }
       providers[cachedProviderIndex] = requireProviderAuthentication(currentProvider);
     }
+    startupMark("settings/discover");
     if (!presenceOnly) {
       writePersistentProviderSettingsCache(settingsWorkspaceRoot, providers);
     }
@@ -9352,7 +9859,8 @@
       },
       timestamp: now()
     };
-  };
+  }
+
 
   function envKeys(env) {
     var keys = [];
@@ -10232,7 +10740,20 @@
         writeJsonFile(stateFile, { version: 2, sessionId: session, segments: segments, metrics: metrics });
       } catch (_ignoreUsageStateWrite) {}
     }
-    var total = sumVibeJournalSegments(segments, vibeModelPrices(home));
+    // The images the Agent Bridge had described for a model that cannot see (describeImagesForBlindModel) are not in
+    // the journal: their calls are kept beside it and counted with the session.
+    var summed = segments;
+    var described = readJsonFile(new File(sessionDir, VIBE_DESCRIBED_IMAGES_FILE));
+    if (described && described.segment && typeof described.segment === "object") {
+      summed = {};
+      for (var seg in segments) {
+        if (Object.prototype.hasOwnProperty.call(segments, seg)) {
+          summed[seg] = segments[seg];
+        }
+      }
+      summed[VIBE_DESCRIBED_IMAGES_FILE] = described.segment;
+    }
+    var total = sumVibeJournalSegments(summed, vibeModelPrices(home));
     var view = vibeMetricsView(metrics, vibeCompactionCount(sessionDir));
     if (view && !(options && options.withTurns === true)) {
       // The usage updates carry the session measures; the per-turn detail is for the export.
@@ -10267,11 +10788,18 @@
       data: data || {}
     };
     // Every provider reports its turns with these three events: keep a common "turn running"
-    // flag so interrupt() needs no provider-specific state.
+    // flag so interrupt() needs no provider-specific state. Only the end of the running turn's request ends it: a second
+    // prompt refused by the agent ("A turn is already running") left the flag down while the first turn went on.
+    var requestId = event.data && event.data.requestId != null ? String(event.data.requestId) : "";
     if (event.type === "turn/start") {
+      if (entry.turnActive !== true) {
+        entry.turnRequestId = requestId;
+      }
       entry.turnActive = true;
-    } else if (event.type === "turn/end" || event.type === "turn/error" || event.type === "system/closed") {
+    } else if (event.type === "system/closed" || ((event.type === "turn/end" || event.type === "turn/error") &&
+        (!requestId.length || !trim(entry.turnRequestId).length || requestId === entry.turnRequestId))) {
       entry.turnActive = false;
+      entry.turnRequestId = "";
     }
     entry.events.add(event);
     while (entry.events.size() > MAX_EVENT_BUFFER) {
@@ -10975,12 +11503,36 @@
     return preferred || first;
   }
 
+  // Vibe tells the model a rejected call was the user's choice ("provide an alternative plan"); a cancel is a bare deny.
+  function chooseRejectOption(options) {
+    for (var i = 0; i < (options || []).length; i++) {
+      var option = options[i] || {};
+      var optionId = String(option.optionId || option.option_id || option.id || "");
+      if (optionId === "reject_once" || String(option.kind || "").toLowerCase() === "reject_once") {
+        return optionId;
+      }
+    }
+    return "";
+  }
+
   function handleAgentRequest(entry, message) {
     var method = String(message.method || "");
     var params = message.params || {};
     pushEvent(entry, "acp/request_from_agent", { method: method, id: message.id || null, params: params });
 
     if (method === "session/request_permission") {
+      if (noCodePermissionRefused(entry, params)) {
+        var rejectId = chooseRejectOption(params.options || []);
+        pushEvent(entry, "permission/refused", {
+          reason: "nocode_tool_policy",
+          title: permissionToolTitle(entry, params.toolCall || params.tool_call),
+          toolCall: params.toolCall || params.tool_call || null
+        });
+        sendJsonResponse(entry, message.id, {
+          outcome: rejectId.length ? { outcome: "selected", optionId: rejectId } : { outcome: "cancelled" }
+        });
+        return;
+      }
       var optionId = choosePermissionOption(params.options || []);
       if (optionId.length) {
         pushEvent(entry, "permission/selected", {
@@ -11034,6 +11586,44 @@
     }
   }
 
+  function rememberAcpToolStart(entry, toolCallId) {
+    if (!trim(toolCallId).length) {
+      return;
+    }
+    entry.toolStartedAt = entry.toolStartedAt || {};
+    var ids = Object.keys(entry.toolStartedAt);
+    if (ids.length >= 500) {
+      delete entry.toolStartedAt[ids[0]];
+    }
+    entry.toolStartedAt[toolCallId] = now();
+  }
+
+  // A tool call the agent runtime could not complete. Vibe sends every such failure with the same message, "The provided
+  // tool call failed": its error code (mcp_transport_failed, mcp_timeout...), whether it would retry and any details are
+  // the cause, so the update carries them as failure, with the duration of the call.
+  function acpToolFailure(entry, update, toolCallId, status) {
+    var startedAt = entry.toolStartedAt && toolCallId ? entry.toolStartedAt[toolCallId] : null;
+    var terminal = status === "failed" || status === "completed" || status === "cancelled";
+    if (terminal && startedAt != null) {
+      delete entry.toolStartedAt[toolCallId];
+    }
+    if (status !== "failed") {
+      return null;
+    }
+    var output = update.rawOutput || update.raw_output || null;
+    var error = output && typeof output === "object" ? (output.error && typeof output.error === "object" ? output.error : output) : null;
+    if (!error || !trim(error.code).length) {
+      return null;
+    }
+    return {
+      code: String(error.code),
+      message: trim(error.message),
+      retryable: error.retryable === true,
+      details: typeof error.details === "undefined" ? null : error.details,
+      durationMs: startedAt != null ? Math.max(0, now() - startedAt) : null
+    };
+  }
+
   function normalizeSessionUpdate(entry, params) {
     var update = params.update || params.sessionUpdate || params;
     var kind = String(update.sessionUpdate || update.session_update || "");
@@ -11061,6 +11651,8 @@
       eventData.toolCallId = update.toolCallId || update.tool_call_id || "";
       eventData.title = update.title || "";
       eventData.status = update.status || "";
+      rememberToolCallTitle(entry, eventData.toolCallId, eventData.title);
+      rememberAcpToolStart(entry, eventData.toolCallId);
       pushEvent(entry, "tool/start", eventData);
       return;
     }
@@ -11068,6 +11660,11 @@
       eventData.toolCallId = update.toolCallId || update.tool_call_id || "";
       eventData.title = update.title || "";
       eventData.status = update.status || "";
+      rememberToolCallTitle(entry, eventData.toolCallId, eventData.title);
+      var failure = acpToolFailure(entry, update, eventData.toolCallId, eventData.status);
+      if (failure !== null) {
+        eventData.failure = failure;
+      }
       pushEvent(entry, "tool/update", eventData);
       return;
     }
@@ -11279,7 +11876,8 @@
     return waitForPending(entry, pending, timeoutMs, true);
   }
 
-  function vibeImageBlocks(value, model) {
+  // allowed (optional): which paths may be read; a No Code session reads its user's attachments only
+  function vibeImageBlocks(value, model, allowed) {
     var report = { blocks: [], skipped: [] };
     var paths = [];
     // Sequence variables reach Rhino as java.lang.String objects, not JS
@@ -11308,6 +11906,10 @@
       var extension = lower.lastIndexOf(".") >= 0 ? lower.substring(lower.lastIndexOf(".") + 1) : "";
       var mimeType = VIBE_IMAGE_MIME_TYPES[extension] || "";
       if (!mimeType.length) {
+        continue;
+      }
+      if (typeof allowed === "function" && allowed(candidate) !== true) {
+        report.skipped.push({ path: candidate, reason: "not_allowed" });
         continue;
       }
       if (!file.isFile()) {
@@ -11367,7 +11969,8 @@
         value: String(viewerDebugPort)
       });
     }
-    if (mcpConversationId(options).length && normalizeSkillProfile(options) !== "nocode") {
+    // the sub-agent runs and, in No Code, the preview captures (nocode-form-preview-capture) are recorded under it
+    if (mcpConversationId(options).length) {
       headers.push({
         name: "X-Convertigo-Conversation-Id",
         value: mcpConversationId(options)
@@ -11406,6 +12009,7 @@
       browserDebugUrl: entry.browserDebugUrl || "",
       viewerDebugPort: Number(entry.viewerDebugPort || 0),
       playwrightCdpEndpoint: entry.playwrightCdpEndpoint || entry.viewerCdpEndpoint || "",
+      sandbox: entry.sandbox || null,
       managedSkillBundle: entry.managedSkillBundle ? {
         ready: entry.managedSkillBundle.ready === true,
         fingerprint: entry.managedSkillBundle.fingerprint || "",
@@ -11439,13 +12043,16 @@
   function startProcess(entry, env) {
     ensureAgentShutdownHook();
     var orphanSweep = sweepAllProviderPidFiles(entry.workspaceRoot || "", intValue(entry.ttlMillis, 0, 0, 86400000));
+    startupMark("process/sweep");
     var guard = agentGuardedCommand(entry, entry.options || {});
+    startupMark("process/guard");
     entry.guarded = guard.guarded === true;
     var pb = new ProcessBuilder(toJavaList(guard.command));
     pb.directory(new File(entry.cwd));
     applyEngineProxyEnvironment(pb.environment(), agentProxyTargetUrl(entry.provider, env));
     envObjectToMap(pb.environment(), env);
     entry.process = pb.start();
+    startupMark("process/spawn");
     entry.writer = new BufferedWriter(new OutputStreamWriter(entry.process.getOutputStream(), StandardCharsets.UTF_8));
     writeEntryPidFile(entry);
     if (orphanSweep.stopped.length) {
@@ -11532,6 +12139,10 @@
     if (!handle.length) {
       return { ok: false, status: "error", error: "handle is required", timestamp: now() };
     }
+    ensureAgentReaper();
+    try {
+      sweepIfDue(getRegistry(), sweepClock(), SWEEP_MIN_INTERVAL_MILLIS, { keep: handle });
+    } catch (_ignoreEventsSweep) {}
     var entry = getRegistry().get(handle);
     if (entry === null || typeof entry === "undefined") {
       return { ok: false, status: "not_found", handle: handle, events: [], timestamp: now() };
@@ -11635,45 +12246,235 @@
     }
   }
 
+  // The sweep of the agent processes, at each Vibe start, at most every 10 s on event reads and every minute on the
+  // reaper thread. Vibe processes used to live until the engine stopped: only Codex and Claude starts swept, and the No
+  // Code server kept every conversation's vibe-acp (165 MB each). A process stops when it is dead, idle longer than its
+  // TTL (1 h, 20 min in No Code, never less than 1 h during a turn), or prewarmed and idle 3 min without its first
+  // message; a No Code user keeps at most 3 Vibe processes, the least recently used idle one stopping first, never one
+  // in a turn. Each stop writes a "stop" line in agents/vibe/startup-timings.ndjson.
   C8O.agentBridge.sweepExpired = function (options) {
+    return sweepRegistry(getRegistry(), options);
+  };
+
+  // why the sweep stops an entry, or null to keep it
+  function sweepVerdict(entry, current, hardIdle) {
+    if (entry.status === "starting" && current - Number(entry.createdAt || 0) < STARTING_GRACE_MILLIS) {
+      return null;
+    }
+    if (!processAlive(entry.process)) {
+      return "dead";
+    }
+    var idle = current - Number(entry.lastAccess || 0);
+    if (entry.prewarm === true && idle > PREWARM_TTL_MILLIS) {
+      return "prewarm_expired";
+    }
+    var ttl = Number(entry.ttlMillis || 0);
+    if (entry.turnActive === true && ttl > 0) {
+      ttl = Math.max(ttl, DEFAULT_TTL_SECONDS * 1000);
+    }
+    if ((ttl > 0 && idle > ttl) || (hardIdle > 0 && idle > hardIdle)) {
+      return "idle";
+    }
+    return null;
+  }
+
+  // a No Code user's Vibe process, which counts toward the limit of the user (not a settings probe)
+  function countsTowardUserLimit(entry) {
+    return entry.provider === "vibe" && entry.noCode === true && trim(entry.ownerKey).length > 0
+      && (entry.status === "starting" || entry.status === "running");
+  }
+
+  // the entries to stop for a user above the limit: least recently used first, never one in a turn, starting or kept
+  function userLimitVictims(entries, keep) {
+    var count = entries.length;
+    var candidates = entries.filter(function (entry) {
+      return entry !== keep && entry.status === "running" && entry.turnActive !== true;
+    }).sort(function (a, b) {
+      return Number(a.lastAccess || 0) - Number(b.lastAccess || 0);
+    });
+    var victims = [];
+    for (var i = 0; i < candidates.length && count > NOCODE_MAX_VIBE_PER_USER; i++) {
+      victims.push(candidates[i]);
+      count--;
+    }
+    return victims;
+  }
+
+  function registryEntries(registry) {
+    var entries = [];
+    var iterator = registry.keySet().iterator();
+    while (iterator.hasNext() === true) {
+      var entry = registry.get(String(iterator.next()));
+      if (entry !== null && typeof entry !== "undefined") {
+        entries.push(entry);
+      }
+    }
+    return entries;
+  }
+
+  function stopSweptEntry(registry, entry, reason, current) {
+    var idle = current - Number(entry.lastAccess || 0);
+    var state = null;
+    try {
+      state = statusOf(entry);
+    } catch (_ignoreSweptState) {}
+    try {
+      stopEntry(entry, false);
+    } catch (_ignoreSweptStop) {}
+    registry.remove(entry.handle);
+    forgetSessionHandle(entry.handle);
+    writeStartupTimings(startupTimer("stop", {
+      handle: entry.handle,
+      provider: entry.provider,
+      reason: reason,
+      idleMs: idle,
+      aliveMs: current - Number(entry.createdAt || current)
+    }), entry.workspaceRoot, reason);
+    return { handle: entry.handle, reason: reason, idleMs: idle, state: state };
+  }
+
+  // options.keep: the handle of the caller, never stopped by this sweep (its events are being read)
+  function sweepRegistry(registry, options) {
     options = options || {};
     var hardIdle = intValue(options.maxIdleSeconds, 0, 0, 86400) * 1000;
-    var registry = getRegistry();
+    var keepHandle = trim(options.keep);
+    var current = now();
     var stopped = [];
     var kept = [];
-    var iterator = registry.keySet().iterator();
-    var current = now();
-    while (iterator.hasNext()) {
-      var handle = String(iterator.next());
-      var entry = registry.get(handle);
-      if (entry === null || typeof entry === "undefined") {
+    var byUser = {};
+    var entries = registryEntries(registry);
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      var reason = String(entry.handle) === keepHandle ? null : sweepVerdict(entry, current, hardIdle);
+      if (reason !== null) {
+        stopped.push(stopSweptEntry(registry, entry, reason, current));
         continue;
       }
-      var idle = current - entry.lastAccess;
-      var expiredByTtl = entry.ttlMillis > 0 && idle > entry.ttlMillis;
-      var expiredByHardIdle = hardIdle > 0 && idle > hardIdle;
-      var dead = !processAlive(entry.process);
-      if (expiredByTtl || expiredByHardIdle || dead) {
-        var state = statusOf(entry);
-        stopEntry(entry, true);
-        stopped.push({
-          handle: handle,
-          reason: dead ? "dead" : "idle",
-          idleMs: idle,
-          state: state
-        });
-      } else {
-        kept.push(statusOf(entry));
+      kept.push(entry);
+      if (countsTowardUserLimit(entry)) {
+        (byUser[entry.ownerKey] = byUser[entry.ownerKey] || []).push(entry);
+      }
+    }
+    for (var owner in byUser) {
+      if (Object.prototype.hasOwnProperty.call(byUser, owner)) {
+        var keep = null;
+        for (var k = 0; k < byUser[owner].length; k++) {
+          if (String(byUser[owner][k].handle) === keepHandle) {
+            keep = byUser[owner][k];
+          }
+        }
+        var victims = userLimitVictims(byUser[owner], keep);
+        for (var v = 0; v < victims.length; v++) {
+          stopped.push(stopSweptEntry(registry, victims[v], "user_limit", current));
+          kept.splice(kept.indexOf(victims[v]), 1);
+        }
       }
     }
     return {
       ok: true,
       status: "ok",
       stopped: stopped,
-      kept: kept,
+      kept: kept.map(function (entry) { return statusOf(entry); }),
       timestamp: current
     };
-  };
+  }
+
+  // A new Vibe process of a No Code user: the user's other prewarm, if this one is a prewarm, and the least recently
+  // used idle processes above the limit stop.
+  function enforceUserLimit(registry, entry) {
+    if (!countsTowardUserLimit(entry)) {
+      return [];
+    }
+    var current = now();
+    var stopped = [];
+    var mine = [];
+    var entries = registryEntries(registry);
+    for (var i = 0; i < entries.length; i++) {
+      var other = entries[i];
+      if (other === entry || !countsTowardUserLimit(other) || String(other.ownerKey) !== String(entry.ownerKey)) {
+        continue;
+      }
+      if (entry.prewarm === true && other.prewarm === true && other.status === "running") {
+        stopped.push(stopSweptEntry(registry, other, "prewarm_replaced", current));
+        continue;
+      }
+      mine.push(other);
+    }
+    mine.push(entry);
+    var victims = userLimitVictims(mine, entry);
+    for (var v = 0; v < victims.length; v++) {
+      stopped.push(stopSweptEntry(registry, victims[v], "user_limit", current));
+    }
+    return stopped;
+  }
+
+  function sweepClock() {
+    var store = getServerStore();
+    if (store === null) {
+      C8O.agentBridge._sweepClock = C8O.agentBridge._sweepClock || new AtomicLong(0);
+      return C8O.agentBridge._sweepClock;
+    }
+    var clock = store.get(SWEEP_CLOCK_KEY);
+    if (clock === null || typeof clock === "undefined") {
+      clock = new AtomicLong(0);
+      store.set(SWEEP_CLOCK_KEY, clock);
+    }
+    return clock;
+  }
+
+  // a sweep, unless one ran less than minIntervalMs ago; one caller at a time wins the clock
+  function sweepIfDue(registry, clock, minIntervalMs, options) {
+    var current = Number(now());
+    var last = Number(clock.get());
+    if (current - last < minIntervalMs || clock.compareAndSet(last, current) !== true) {
+      return null;
+    }
+    return sweepRegistry(registry, options);
+  }
+
+  // One reaper thread per engine sweeps every minute, so idle processes stop even when nobody uses the agents. A
+  // newer revision of this code replaces it: the thread stops when the property no longer names it.
+  function ensureAgentReaper() {
+    try {
+      var current = String(System.getProperty(REAPER_PROPERTY) || "").split("|");
+      if (current.length === 3 && current[0] === REAPER_REVISION && Number(now()) - Number(current[2]) < 3 * REAPER_PERIOD_MILLIS) {
+        return false;
+      }
+      var id = String(UUID.randomUUID());
+      System.setProperty(REAPER_PROPERTY, REAPER_REVISION + "|" + id + "|" + Number(now()));
+      var registry = getRegistry();
+      var clock = sweepClock();
+      var thread = new Thread(new Runnable({
+        run: function () {
+          while (reaperTick(id, registry, clock)) {
+            // one sweep a minute
+          }
+        }
+      }), "c8o-agent-bridge-reaper");
+      thread.setDaemon(true);
+      thread.start();
+      return true;
+    } catch (_ignoreReaper) {
+      return false;
+    }
+  }
+
+  // a minute of the reaper; false once another reaper replaced it
+  function reaperTick(id, registry, clock) {
+    try {
+      Thread.sleep(REAPER_PERIOD_MILLIS);
+    } catch (_reaperInterrupted) {
+      return false;
+    }
+    if (String(System.getProperty(REAPER_PROPERTY) || "").split("|")[1] !== id) {
+      return false;
+    }
+    System.setProperty(REAPER_PROPERTY, REAPER_REVISION + "|" + id + "|" + Number(now()));
+    try {
+      sweepIfDue(registry, clock, REAPER_PERIOD_MILLIS / 2);
+    } catch (_ignoreReaperSweep) {}
+    return true;
+  }
 
   // Session measures of a Vibe conversation, for reports: usage totals, session measures and per-turn detail, read
   // from its journal. The conversation is the Assistant thread id (agent-…) or the Vibe session id.

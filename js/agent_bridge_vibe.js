@@ -24,6 +24,7 @@
       return startupPresenceOnly ? detectRuntimePresence(options) : detectRuntime(options);
     };
     var setup = detectSetup();
+    startupMark("setup/detect");
     var workspaceFirstOption = typeof options.workspaceInstallFirst !== "undefined" ? options.workspaceInstallFirst : options.preferWorkspaceInstall;
     var workspaceFirst = boolValue(typeof workspaceFirstOption === "undefined" ? true : workspaceFirstOption, true);
     var installation = {
@@ -86,7 +87,7 @@
         // compared through the intent recorded beside the file. `active_model` is deliberately
         // out: agent_vibe_start passes an empty model on purpose and sets the session model over
         // ACP, so recording it would make start and setup fight over the file.
-        var expectedIntent = vibeConfigIntent({
+        var intentFields = {
           modelConfigRevision: VIBE_MODEL_CONFIG_REVISION,
           bearerTokenEnv: expectedBearerEnv,
           endpoint: expectedEndpoint,
@@ -99,7 +100,13 @@
           revealMode: expectedRevealMode,
           viewerDebugPort: expectedBearerEnv.length ? expectedViewerDebugPort : 0,
           conversationId: expectedBearerEnv.length && expectedViewerDebugPort >= 1024 ? mcpConversationId(options) : ""
-        });
+        };
+        // Only a No Code home records it: other homes keep the intent they were written with.
+        var expectedToolPolicy = vibeToolPolicy(options);
+        if (expectedToolPolicy.length) {
+          intentFields.toolPolicy = expectedToolPolicy;
+        }
+        var expectedIntent = vibeConfigIntent(intentFields);
         var recordedIntent = readVibeConfigIntent(setup.vibeHome);
         // The file-derived checks stay: they catch a config.toml deleted or hand-edited behind
         // the recorded intent. Only the MCP url is compared on its base, the part `_setupVibe`
@@ -138,7 +145,9 @@
           messages.push("Legacy managed Vibe model preset migrated: " + presetMigration.removed.join(", "));
         }
       }
+      startupMark("setup/config");
       bootstrap = bootstrapVibeHome(setup.vibeHome, options);
+      startupMark("setup/bootstrap");
       if (bootstrap.message) {
         messages.push(bootstrap.message);
       }
@@ -249,7 +258,9 @@
       commandPathStartsWith(setup.vibe, setup.venvDir) && commandPathStartsWith(setup.vibeAcp, setup.venvDir)
     ));
     var authentication = inspectVibeAuthentication(setup.vibeHome, profile);
+    startupMark("setup/install");
     var skills = installAgentSkills(options, "vibe", setup.vibeHome);
+    startupMark("setup/skills");
     var skillsReady = skills.ok !== false;
     var ready = runtimeReady && authentication.configured === true && skillsReady;
     if (runtimeReady && authentication.configured !== true) {
@@ -325,7 +336,37 @@
     }
   };
 
+  // vibeStart, timed: one line per start in agents/vibe/startup-timings.ndjson (see startupTimer)
   C8O.agentBridge.vibeStart = function (options) {
+    var timer = startupTimer("start", {
+      handle: trim(options && options.handle),
+      conversationId: trim(options && options.conversationId),
+      agentProfile: trim(options && (options.agentProfile || options.skillProfile)),
+      prewarm: boolValue(options && options.prewarm, false)
+    });
+    var outer = activeStartupTimer;
+    activeStartupTimer = timer;
+    var result = null;
+    try {
+      result = vibeStartSteps(options);
+      return result;
+    } finally {
+      activeStartupTimer = outer;
+      timer.fields.restarted = !!(result && result.status === "started" && trim(options && (options.sessionId || options.externalSessionId)).length);
+      writeStartupTimings(timer, trim(options && options.workspaceRoot), result ? trim(result.status) : "exception");
+    }
+  };
+
+  // false when the entry is still starting after maxMs
+  function waitWhileStarting(entry, maxMs) {
+    var deadline = now() + maxMs;
+    while (entry.status === "starting" && now() < deadline) {
+      Thread.sleep(100);
+    }
+    return entry.status !== "starting";
+  }
+
+  function vibeStartSteps(options) {
     options = optionsWithRequestFallbacks(options || {});
     var requestedModel = trim(options.model || options.agentModel);
     var handle = trim(options.handle) || makeHandle("vibe");
@@ -339,8 +380,24 @@
       options.homeScope = "conversation";
     }
     var registry = getRegistry();
+    ensureAgentReaper();
+    try {
+      sweepIfDue(registry, sweepClock(), 0, {});
+    } catch (_ignoreStartSweep) {}
     var existing = registry.get(handle);
     var timeoutMs = intValue(options.requestTimeoutMs, 60000, 1000, 600000);
+    // A prewarm never changes a process its conversation already has (a late prewarm call must not reset its model).
+    if (boolValue(options.prewarm, false) && existing !== null && typeof existing !== "undefined"
+        && (existing.status === "starting" || processAlive(existing.process))) {
+      return { ok: true, status: "already_running", handle: handle, state: statusOf(existing), timestamp: now() };
+    }
+    // The prewarm of this conversation may still be starting its process: wait for it rather than start a second one.
+    if (existing !== null && typeof existing !== "undefined" && existing.status === "starting") {
+      if (!waitWhileStarting(existing, STARTING_GRACE_MILLIS)) {
+        return { ok: false, status: "error", phase: "starting", handle: handle, error: "Vibe is still starting this conversation", timestamp: now() };
+      }
+      existing = registry.get(handle);
+    }
     if (existing !== null && typeof existing !== "undefined" && processAlive(existing.process)) {
       var requestedMcpTokenFingerprint = mcpBearerTokenFingerprint(options);
       var requestedPlaywrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
@@ -351,6 +408,8 @@
       // user's consent to send feedback). Vibe reads the tool list once, when its process starts.
       var requestedCatalogKey = trim(options.mcpCatalogKey);
       var catalogChanged = requestedCatalogKey.length > 0 && (trim(existing.mcpCatalogKey) || "feedback:off") !== requestedCatalogKey;
+      // A No Code process started before its config.toml removed the shell and file tools still has them.
+      var toolPolicyChanged = trim(existing.toolPolicy) !== vibeToolPolicy(options);
       if (requestedMcpTokenFingerprint.length
           && trim(existing.mcpBearerTokenFingerprint) !== requestedMcpTokenFingerprint) {
         pushEvent(existing, "warning", {
@@ -382,6 +441,17 @@
         });
         stopEntry(existing, true);
         existing = null;
+      } else if (toolPolicyChanged) {
+        if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
+          options.sessionId = trim(existing.sessionId);
+        }
+        pushEvent(existing, "warning", {
+          phase: "session/config",
+          reason: "tool_policy_changed",
+          message: "Vibe must restart to apply the tools this session may use."
+        });
+        stopEntry(existing, true);
+        existing = null;
       } else if (catalogChanged) {
         // The session goes on in a new process that reads the new tool list.
         if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
@@ -406,6 +476,12 @@
       }
     }
     if (existing !== null && typeof existing !== "undefined" && processAlive(existing.process)) {
+      if (existing.prewarm === true && !boolValue(options.prewarm, false)) {
+        // the conversation's first message takes its prewarmed process: the conversation's TTL applies from now on
+        existing.prewarm = false;
+      }
+      // its prompt follows: a sweep in between must not take this process for an idle one
+      existing.lastAccess = now();
       try {
         configureVibeSession(existing, options, timeoutMs);
       } catch (configureExistingError) {
@@ -424,6 +500,7 @@
         timestamp: now()
       };
     }
+    startupMark("existing");
     var autoConfigure = boolValue(options.autoConfigure, !trim(options.vibeHome).length);
     var setup = C8O.agentBridge.vibeSetup({
       vibeProfile: resolveVibeProfile(options),
@@ -469,6 +546,7 @@
       configure: autoConfigure,
       startupPresenceOnly: true
     });
+    startupMark("setup");
     if (!setup.ok) {
       var authenticationRequired = setup.status === "authentication_required";
       return {
@@ -495,11 +573,40 @@
       env.PATH = vibeNodePath + String(File.pathSeparator) + String(System.getenv("PATH") || "");
     }
     applyManagedMcpEnvironment(env, options);
+    startupMark("env");
     var cwd = normalizeDirectory(options.cwd, setup.setup.workspaceRoot, setup.setup.workspaceRoot);
     var mcpEndpoint = trim(options.mcpEndpoint) || setup.setup.mcpEndpoint || resolveMcpEndpoint(options);
     var command = parseCommand(options.command, [setup.setup.vibeAcp.path || "vibe-acp"]);
-    var ttlMillis = intValue(options.ttlSeconds, DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
+    // A No Code session works in its own folder; under sandboxed-shell the engine's helper confines vibe-acp to it.
+    var noCodeSandbox = null;
+    try {
+      noCodeSandbox = noCodeSessionSandbox(options, setup.setup, vibeHome);
+      if (noCodeSandbox !== null) {
+        cwd = noCodeSandbox.cwd;
+        env.TMPDIR = noCodeSandbox.tmp;
+        if (noCodeSandbox.confined) {
+          env.HOME = noCodeSandbox.home;
+          env.XDG_CACHE_HOME = noCodeSandbox.cache;
+          if (noCodeSandbox.pythonPath.length) {
+            env.PYTHONPATH = noCodeSandbox.pythonPath + (trim(env.PYTHONPATH).length ? String(File.pathSeparator) + env.PYTHONPATH : "");
+          }
+          if (noCodeSandbox.pythonBin.length) {
+            env.PATH = noCodeSandbox.pythonBin + String(File.pathSeparator) + (trim(env.PATH) || String(System.getenv("PATH") || ""));
+          }
+          command = noCodeSandbox.wrap(command);
+        }
+      }
+    } catch (sandboxError) {
+      return { ok: false, status: "error", phase: "sandbox", error: String(sandboxError), timestamp: now() };
+    }
+    startupMark("sandbox");
+    var noCode = normalizeSkillProfile(options) === "nocode";
+    var ttlMillis = intValue(options.ttlSeconds, noCode ? NOCODE_TTL_SECONDS : DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
     var entry = createEntry(handle, "vibe", "acp", command, cwd, env, ttlMillis, setup.setup.home, credentials, requestedModel || setup.setup.model);
+    // a settings probe (discoverVibeSettings) closes at once and does not count toward the user's limit
+    entry.ownerKey = boolValue(options.settingsProbe, false) ? "" : trim(options.userId);
+    entry.noCode = noCode;
+    entry.prewarm = boolValue(options.prewarm, false);
     entry.modelConfigRevision = VIBE_MODEL_CONFIG_REVISION;
     entry.vibeHome = vibeHome;
     entry.vibeProfile = resolveVibeProfile(options);
@@ -507,12 +614,19 @@
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
     entry.mcpCatalogKey = trim(options.mcpCatalogKey);
+    entry.toolPolicy = vibeToolPolicy(options);
+    entry.noCodePolicy = noCodeSandbox !== null ? noCodeSandbox.policy : noCodeToolPolicyName(options);
+    entry.sandbox = agentSessionSandbox(options, "vibe", noCodeSandbox);
     entry.viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
     entry.browserDebugUrl = trim(options.browserDebugUrl);
     entry.playwrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
     entry.viewerCdpEndpoint = trim(options.viewerCdpEndpoint || entry.playwrightCdpEndpoint);
     entry.playwrightMcpEnabled = trim(setup.setup.config && setup.setup.config.selected && setup.setup.config.selected.playwrightEndpoint).length > 0;
     registry.put(handle, entry);
+    try {
+      enforceUserLimit(registry, entry);
+    } catch (_ignoreUserLimit) {}
+    startupMark("entry");
 
     try {
       startProcess(entry, env);
@@ -556,6 +670,7 @@
           }
         }
       }, timeoutMs);
+      startupMark("acp/initialize");
 
       // A conversation whose agent process died (restart, crash, idle sweep) gets its context
       // back when the harness can reload a session; otherwise, or on failure, a new one starts.
@@ -594,6 +709,7 @@
           mcpServers: buildMcpServers(mcpEndpoint, options)
         }, timeoutMs);
       }
+      startupMark(entry.sessionRestored === true ? "acp/session-load" : "acp/session-new");
       entry.sessionId = String(entry.session.sessionId || entry.session.session_id || "");
       var sessionProvider = vibeSettings({
         vibeProfile: resolveVibeProfile(options),
@@ -604,7 +720,9 @@
         runtimePresenceOnly: true
       });
       updateVibeProviderSettings(entry, entry.session.configOptions || entry.session.config_options || [], sessionProvider);
+      startupMark("settings");
       configureVibeSession(entry, options, timeoutMs);
+      startupMark("configure");
       entry.phase = "ready";
       entry.status = "running";
       pushEvent(entry, "acp/session", {
@@ -644,7 +762,7 @@
         timestamp: now()
       };
     }
-  };
+  }
 
   C8O.agentBridge.discoverVibeSettings = function (options, provider) {
     options = options || {};
@@ -678,6 +796,7 @@
         autoConfigure: true,
         disableViewerDebugPortReservation: true,
         disablePlaywrightMcp: true,
+        settingsProbe: true,
         requestTimeoutMs: options.settingsTimeoutMs || options.requestTimeoutMs || 60000
       });
       if (started && started.ok !== false && started.providerSettings) {
@@ -705,6 +824,163 @@
     }
   };
 
+  // A No Code user's images come from the conversation's attachments only: the Assistant stores them under
+  // agents/<provider>/users/<user>/conversations/<id>/attachments or agents/attachments/<user>/, while the path in the
+  // request comes from the page. Another path (another user's files, the server's) is not read.
+  function noCodeAttachmentAllowed(entry, path) {
+    try {
+      var owner = trim(entry.ownerKey);
+      var root = trim(entry.workspaceRoot);
+      if (!owner.length || !root.length || !trim(path).length) {
+        return false;
+      }
+      var agents = String(new File(new File(root), "agents").getCanonicalPath()).replace(/\\/g, "/") + "/";
+      var file = String(new File(trim(path)).getCanonicalPath()).replace(/\\/g, "/");
+      if (file.indexOf(agents) !== 0) {
+        return false;
+      }
+      var rel = file.substring(agents.length);
+      var slug = userPathSlug(owner).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp("^[^/]+/users/" + slug + "/conversations/[^/]+/attachments/[^/]").test(rel)
+        || new RegExp("^attachments/" + slug + "/[^/]+/[^/]").test(rel);
+    } catch (_ignoreAttachmentCheck) {
+      return false;
+    }
+  }
+
+  // A No Code agent whose model cannot see (GLM through the Convertigo gateway) lost the images its user attached: a
+  // paper form, a scan, a mockup. image-describe (lib_ConvertigoMCP: a vision model of the gateway) now describes each
+  // of them on the user's own gateway key, and the description goes with the prompt. At most 3 images and 45 s per
+  // message, so the prompt still reaches Vibe within the Assistant's wait; the calls count in the conversation's usage.
+  var NOCODE_DESCRIBED_IMAGES_MAX = 3;
+  var NOCODE_IMAGE_DESCRIBE_BUDGET_MS = 45000;
+  var NOCODE_IMAGE_DESCRIBE_MAX_TOKENS = 3000;
+  var NOCODE_IMAGE_QUESTION = "Describe this image for an agent that builds forms, applications and Baserow tables from it "
+    + "and cannot see it. Transcribe every visible text exactly: titles, labels, field names, options, column headers and "
+    + "values. Give the structure: the sections, each field with its apparent type (text, date, number, checkbox, list...), "
+    + "the tables with their columns, and the layout. Say what you cannot read instead of guessing.";
+
+  // image-describe of the installed lib_ConvertigoMCP (its request, image checks and usage), or null without it
+  function loadImageDescribe() {
+    try {
+      var manager = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager;
+      var project = manager.getOriginalProjectByName(MCP_CATALOG_PROJECT);
+      if (project === null || typeof project === "undefined") {
+        return null;
+      }
+      var file = new File(project.getDirFile(), "js/tools_image_describe.js");
+      if (!file.isFile()) {
+        return null;
+      }
+      var api = new Function("C8O", readTextFile(file) + "\nreturn C8O.imageDescribe;")({});
+      return api && typeof api.run === "function" && typeof api.javaHost === "function" ? api : null;
+    } catch (_ignoreImageDescribe) {
+      return null;
+    }
+  }
+
+  // deps (tests): api (image-describe), key (gateway key), record (usage writer)
+  function describeImagesForBlindModel(entry, skipped, deps) {
+    var report = { text: "", described: [], failed: [] };
+    var blind = [];
+    for (var i = 0; i < skipped.length; i++) {
+      if (skipped[i].reason === "model_without_vision") {
+        blind.push(skipped[i]);
+      }
+    }
+    if (entry.noCode !== true || !blind.length) {
+      return report;
+    }
+    deps = deps || {};
+    var api = deps.api !== undefined ? deps.api : loadImageDescribe();
+    var key = deps.key !== undefined ? deps.key : convertigoGatewayApiKey({ workspaceRoot: entry.workspaceRoot }, entry.vibeHome);
+    if (api === null || !trim(key).length) {
+      return report;
+    }
+    var deadline = now() + NOCODE_IMAGE_DESCRIBE_BUDGET_MS;
+    var base = api.javaHost();
+    var host = {
+      readKey: function () { return key; },
+      // the attached file itself, already checked by vibeImageBlocks
+      readImageFile: function (pathText) {
+        var file = new File(pathText);
+        return { bytes: Files.readAllBytes(file.toPath()), path: String(file.getPath()) };
+      },
+      decodeBase64: base.decodeBase64,
+      encodeBase64: base.encodeBase64,
+      now: base.now,
+      post: function (url, apiKey, body, timeoutMs) {
+        return base.post(url, apiKey, body, Math.max(1000, Math.min(Number(timeoutMs), deadline - now())));
+      }
+    };
+    var usages = [];
+    for (var b = 0; b < blind.length; b++) {
+      var name = String(new File(blind[b].path).getName());
+      if (b >= NOCODE_DESCRIBED_IMAGES_MAX || now() >= deadline) {
+        report.failed.push({ path: blind[b].path, name: name, reason: b >= NOCODE_DESCRIBED_IMAGES_MAX ? "too_many" : "time" });
+        continue;
+      }
+      try {
+        var result = api.run({ path: blind[b].path, question: NOCODE_IMAGE_QUESTION, maxTokens: NOCODE_IMAGE_DESCRIBE_MAX_TOKENS }, host);
+        var description = trim(result && result.description);
+        if (!description.length) {
+          throw new Error(trim(result && result.warning) || "no description");
+        }
+        if (result.usage) {
+          usages.push(result.usage);
+        }
+        report.described.push({ path: blind[b].path, name: name, model: trim(result.model), description: description, image: result.image || null });
+        report.text += "\n\nAttached image \"" + name + "\": you cannot see images, so the Agent Bridge had it described by the vision model `"
+          + trim(result.model) + "`" + (result.truncated === true ? " (its description was cut)" : "") + ". The description:\n" + description;
+      } catch (describeError) {
+        report.failed.push({ path: blind[b].path, name: name, reason: String(describeError && describeError.message ? describeError.message : describeError) });
+      }
+    }
+    if (usages.length) {
+      try {
+        (deps.record || recordDescribedImagesUsage)(entry, usages);
+      } catch (_ignoreDescribedUsage) {}
+    }
+    return report;
+  }
+
+  // Each described image shows in the turn as an image-describe call, as in the Studio: the Assistant page draws the
+  // image (its thumbnail, loaded through AgentWorkspaceImage) with the question and the description.
+  function pushDescribedImageEvents(entry, described) {
+    for (var d = 0; d < described.described.length; d++) {
+      var item = described.described[d];
+      var callId = "bridge-image-describe-" + now() + "-" + d;
+      var input = { path: item.path, question: NOCODE_IMAGE_QUESTION };
+      pushEvent(entry, "tool/start", {
+        sessionId: entry.sessionId || "", toolCallId: callId, title: "image-describe", toolName: "image-describe", status: "in_progress",
+        update: { sessionUpdate: "tool_call", toolCallId: callId, title: "image-describe", status: "in_progress", rawInput: input }
+      });
+      pushEvent(entry, "tool/update", {
+        sessionId: entry.sessionId || "", toolCallId: callId, title: "image-describe", toolName: "image-describe", status: "completed",
+        detail: JSON.stringify({ description: item.description, model: item.model, image: { path: item.path, mimeType: item.image && item.image.mimeType || "", bytes: item.image && item.image.bytes || 0 } }),
+        update: { sessionUpdate: "tool_call_update", toolCallId: callId, title: "image-describe", status: "completed", rawInput: input }
+      });
+    }
+  }
+
+  // the calls go beside the session journal, counted with the session by vibeJournalUsage
+  function recordDescribedImagesUsage(entry, usages) {
+    if (!trim(entry.vibeHome).length || !/^[A-Za-z0-9._-]{1,128}$/.test(trim(entry.sessionId))) {
+      return;
+    }
+    var file = new File(new File(trim(entry.vibeHome), "logs/session/unified/" + trim(entry.sessionId)), VIBE_DESCRIBED_IMAGES_FILE);
+    var state = readJsonFile(file) || {};
+    var segment = state.segment && typeof state.segment === "object" ? state.segment : emptyVibeJournalSegment();
+    var seen = {};
+    for (var s = 0; segment.visionCallIds && s < segment.visionCallIds.length; s++) {
+      seen[segment.visionCallIds[s]] = true;
+    }
+    for (var u = 0; u < usages.length; u++) {
+      addVisionUsage(segment, usages[u], seen);
+    }
+    writeJsonFile(file, { version: 1, segment: segment });
+  }
+
   C8O.agentBridge.vibePrompt = function (options) {
     options = options || {};
     var handle = resolveHandle(options.handle);
@@ -718,6 +994,8 @@
     if (!processAlive(entry.process) || entry.status !== "running") {
       return { ok: false, status: "not_running", handle: handle, state: statusOf(entry), timestamp: now() };
     }
+    writeStartupTimings(startupTimer("prompt", { handle: handle }), entry.workspaceRoot, "received");
+    entry.prewarm = false;
 
     entry.convertigoRevealMode = revealModeEnabled(options, entry);
     var promptText = String(options.prompt || "");
@@ -730,9 +1008,21 @@
       type: "text",
       text: promptText
     }];
-    var images = vibeImageBlocks(firstDefinedOption(options, ["images", "imagePaths", "attachments"]) || optionOrRequest(options, "images"), entry.model);
+    var images = vibeImageBlocks(firstDefinedOption(options, ["images", "imagePaths", "attachments"]) || optionOrRequest(options, "images"), entry.model,
+      entry.noCode === true ? function (path) { return noCodeAttachmentAllowed(entry, path); } : null);
     for (var imageIndex = 0; imageIndex < images.blocks.length; imageIndex++) {
       promptBlocks.push(images.blocks[imageIndex]);
+    }
+    var describeTimer = startupTimer("describe", { handle: handle });
+    var described = describeImagesForBlindModel(entry, images.skipped);
+    if (described.described.length || described.failed.length) {
+      describeTimer.fields.described = described.described.length;
+      describeTimer.fields.failed = described.failed.length;
+      writeStartupTimings(describeTimer, entry.workspaceRoot, described.failed.length ? "partial" : "described");
+      promptBlocks[0].text += described.text;
+      images.skipped = images.skipped.filter(function (item) {
+        return !described.described.some(function (done) { return done.path === item.path; });
+      });
     }
     if (images.skipped.length) {
       pushEvent(entry, "warning", {
@@ -754,6 +1044,10 @@
     if (messageId.length) {
       params.messageId = messageId;
     }
+    // Vibe runs one turn at a time and refuses a prompt sent during a turn: it is not sent, and the turn goes on.
+    if (entry.turnActive === true) {
+      return { ok: false, status: "busy", handle: handle, error: "A turn is already running in this conversation", state: statusOf(entry), timestamp: now() };
+    }
 
     try {
       var pending = sendAcpRequest(entry, "session/prompt", params);
@@ -763,6 +1057,9 @@
         textLength: promptText.length,
         imageCount: images.blocks.length
       });
+      // the turn's events start here: the images described for it come first
+      var turnCursor = entry.nextIndex;
+      pushDescribedImageEvents(entry, described);
       var wait = boolValue(options.waitForCompletion, false);
       if (wait) {
         var timeoutMs = intValue(options.requestTimeoutMs, 600000, 1000, 3600000);
@@ -783,7 +1080,7 @@
         status: "submitted",
         handle: handle,
         requestId: pending.id,
-        cursor: entry.nextIndex,
+        cursor: turnCursor,
         state: statusOf(entry),
         timestamp: now()
       };

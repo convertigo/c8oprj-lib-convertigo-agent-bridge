@@ -46,7 +46,8 @@ comment: Start a long-running vibe-acp process and create an ACP session.
       ttlSeconds: typeof ttlSeconds === "undefined" ? "" : ttlSeconds,
       requestTimeoutMs: typeof requestTimeoutMs === "undefined" ? "" : requestTimeoutMs,
       agentRevealMode: typeof agentRevealMode === "undefined" ? "" : agentRevealMode,
-      mcpCatalogKey: typeof mcpCatalogKey === "undefined" ? "" : mcpCatalogKey
+      mcpCatalogKey: typeof mcpCatalogKey === "undefined" ? "" : mcpCatalogKey,
+      prewarm: typeof prewarm === "undefined" ? false : prewarm
     });'
 ↓result [steps.JsonToXmlStep-1781600000202]: 
   jsonObject: 
@@ -195,3 +196,7 @@ comment: Start a long-running vibe-acp process and create an ACP session.
     - ↑traceable: false
     - →→: xd8e180806a1c1d83a6255212121ab827
   visibility: 15
+↓prewarm [variables.RequestableVariable-1792770000002]: 
+  comment: Set true to start the process of a conversation before its first message (the Assistant, when the No Code panel opens). It stops after 3 min idle without a message, and a user keeps one prewarm. The first start or prompt of the conversation takes it.
+  description: Set true to start the process of a conversation before its first message (the Assistant, when the No Code panel opens). It stops after 3 min idle without a message, and a user keeps one prewarm. The first start or prompt of the conversation takes it.
+  schemaType: xsd:boolean

@@ -130,6 +130,20 @@ same context.
   3.5) accepts images; `zai-glm-5-2` through Mistral returns 400 "Image input is
   not enabled for this model". `VIBE_GLM_SUPPORTS_IMAGES` records that fact and
   `migrateManagedVibeModelPresets` realigns existing managed presets.
+- No Code (entries with `noCode`): `vibeImageBlocks` reads the user's
+  attachments only (`noCodeAttachmentAllowed`: agents/<provider>/users/<user>/
+  conversations/<id>/attachments, agents/attachments/<user>/); the path comes
+  from the page. For a model that cannot see, `describeImagesForBlindModel` has
+  each image described by image-describe, loaded from the installed
+  lib_ConvertigoMCP (`js/tools_image_describe.js`), on the user's gateway key:
+  3 images and 45 s per message at most, the description appended to the
+  prompt, a "describe" line in startup-timings.ndjson, the calls kept in
+  `convertigo-image-descriptions.json` beside the session journal and counted by
+  `vibeJournalUsage`. Each described image is also pushed as an `image-describe`
+  tool call (tool/start, tool/update with the image path and the description)
+  right after turn/start, the prompt's cursor before them, so the Assistant shows
+  its thumbnail as in the Studio. Cover with
+  `node --test tests/nocode_image_describe.test.js`.
 
 ## Codex Integration
 
@@ -379,6 +393,16 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   prewarm the resident app-server before the first prompt. This prewarm is
   best-effort and should still rely on `agent_codex_prompt` start fallback if the
   process is not ready.
+- Agent processes are swept (`sweepRegistry`) at each Vibe start, at most every
+  10 s on event reads, and every minute by one daemon reaper thread per engine
+  (`ensureAgentReaper`; bump `REAPER_REVISION` when the sweep changes). A process
+  stops when dead, idle beyond its TTL (1 h, 20 min in No Code, at least 1 h in a
+  turn), or prewarmed (`prewarm` on agent_vibe_start, one per user) and idle
+  3 min without its first message. A No Code user keeps at most 3 Vibe
+  processes, least recently used idle one first, never one in a turn. Each stop
+  writes a "stop" line in `agents/vibe/startup-timings.ndjson`. A start finding
+  its conversation's process still starting waits for it. Cover with
+  `node --test tests/vibe_process_guards.test.js`.
 - Python/Vibe setup is separate from Codex setup. Keep the shared helper logic in
   `agent_bridge_common.js` and provider-specific behavior in the provider files.
 

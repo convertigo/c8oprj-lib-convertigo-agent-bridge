@@ -1211,6 +1211,9 @@ Check or install the local Vibe CLI runtime used by the agent bridge.
 <td>skipSkillsInstall</td><td>When true, skips synchronization of the lib_ConvertigoMCP skill pack into the agent home.</td>
 </tr>
 <tr>
+<td>startupPresenceOnly</td><td>Set true to only check that Vibe is installed, without running it (ignored with install). The Assistant asks it before each message, agent_vibe_start checking it again. The full check runs vibe-acp --version twice, 7 to 10 s.</td>
+</tr>
+<tr>
 <td>userId</td><td>User identifier used for user or conversation scoped homes. The value is hashed in filesystem paths.</td>
 </tr>
 <tr>
@@ -1302,6 +1305,9 @@ Start a long-running vibe-acp process and create an ACP session.
 </tr>
 <tr>
 <td>nocodeMcpTokenHandle</td><td>Opaque server-memory handle for the C8Oforms NoCode MCP bearer token.</td>
+</tr>
+<tr>
+<td>prewarm</td><td>Set true to start the process of a conversation before its first message (the Assistant, when the No Code panel opens). It stops after 3 min idle without a message, and a user keeps one prewarm. The first start or prompt of the conversation takes it.</td>
 </tr>
 <tr>
 <td>projectId</td><td>Optional project identifier included in user or conversation scoped homes.</td>

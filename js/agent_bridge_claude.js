@@ -2087,6 +2087,7 @@
     entry.pidFile = "";
     entry.agentProfile = trim(options.agentProfile || options.skillProfile || options.assistantContext || options.profile);
     entry.skillProfile = normalizeSkillProfile(options);
+    entry.sandbox = agentSessionSandbox(options, "claude", null);
     entry.assistantContext = trim(options.assistantContext);
     entry.assistantSurface = trim(options.assistantSurface);
     entry.userId = trim(options.userId);

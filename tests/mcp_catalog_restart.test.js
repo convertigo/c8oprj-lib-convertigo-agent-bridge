@@ -10,7 +10,7 @@ const vibe = fs.readFileSync(path.join(root, 'js/agent_bridge_vibe.js'), 'utf8')
 const sequence = fs.readFileSync(path.join(root, '_c8oProject/sequences/agent_vibe_start.yaml'), 'utf8');
 
 test('agent_vibe_start passes the catalog key to vibeStart', () => {
-  assert.match(sequence, /mcpCatalogKey: typeof mcpCatalogKey === "undefined" \? "" : mcpCatalogKey\n    \}\);'/);
+  assert.match(sequence, /mcpCatalogKey: typeof mcpCatalogKey === "undefined" \? "" : mcpCatalogKey,\n/);
   assert.match(sequence, /^↓mcpCatalogKey \[variables\.RequestableVariable-\d+\]: $/m);
 });
 
