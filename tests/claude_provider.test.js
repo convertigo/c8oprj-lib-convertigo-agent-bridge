@@ -442,7 +442,7 @@ console.log("Vibe image attachment contract OK");
 
 // Convertigo mode: listed first, announces its harness, key file fallback.
 {
-  assert.match(commonSource, /providers\.push\(vibeSettings\(withVibeProfile\(options, "convertigo"\)\)\);\s*\}\s*if \(!provider\.length \|\| provider === "codex"\)/);
+  assert.match(commonSource, /readProvider\("convertigo", function \(\) \{ return vibeSettings\(withVibeProfile\(options, "convertigo"\)\); \}\);\s*\}\s*if \(!provider\.length \|\| provider === "codex"\)/);
   assert.match(commonSource, /harness: "vibe",/);
   assert.match(commonSource, /function readConvertigoGatewayKeyFile/);
   assert.match(commonSource, /"agents"\), "convertigo"\), "llm-api-key"\)/);
