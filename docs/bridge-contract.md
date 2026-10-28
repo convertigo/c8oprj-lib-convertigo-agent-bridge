@@ -239,6 +239,26 @@ Un process ne mene qu'un tour a la fois : tant qu'un tour tourne,
 fin de la requete du tour en cours (`turn/end` ou `turn/error` du meme
 `requestId`) le termine : le refus d'un second prompt ne le termine pas.
 
+Une session Vibe qui a perdu le MCP Convertigo le reste : un HTTP 401 du MCP
+pendant un appel fait suspendre le serveur pour la session. Jusqu'a Vibe 3.0.2,
+la suspension demande au coeur Rust une reconfiguration qu'il refuse pendant
+l'appel : l'echec dit "Core rejected durable input: RustRejectedApplyResult(...
+code='invalid_state', command_type='reconfigure', state='running'))" (code
+`effect_recovery_failed`), et chaque appel suivant le repete. Depuis 3.0.3,
+l'appel echoue en `mcp_authorization_required`, puis en `mcp_unknown_route`.
+Un `tool/update` en echec qui porte un refus du coeur a `coreRefusal` :
+`rejection`, `code`, `commandType`, `state` et `repr`. Le premier de ces echecs
+(refus du coeur sur tout outil, ou `mcp_authorization_required` /
+`mcp_unknown_route` sur un outil Convertigo) donne un `warning`
+`core_rejected_input` ou `convertigo_mcp_suspended` et marque le process ; un
+tour dont la requete echoue sur un refus du coeur le marque aussi. Au
+troisieme de suite (un appel reussi remet le compte a zero), le Bridge annule
+le tour (`session/cancel`, `turn/interrupt_requested` de raison `mcp_lost`,
+`warning` `mcp_lost_turn_stopped`) et arrete le process si le tour tourne
+encore 15 s plus tard (`mcp_lost_process_stopped`). Le demarrage suivant
+remplace un process marque, sur la meme session (`warning` `mcp_lost_restart`) :
+le nouveau process relit ses outils et son jeton MCP.
+
 Dans ce prototype, les demandes ACP `session/request_permission` sont traitees
 automatiquement en selectionnant l'option `allow_once` ou une option
 equivalente quand elle existe.
