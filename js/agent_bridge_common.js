@@ -11619,6 +11619,122 @@
     };
   }
 
+  // A Vibe session that lost the Convertigo MCP stays without it: every later Convertigo call fails at once, and the
+  // model tries again (52 failed databaseobject-tree-get in 6 minutes for a Studio 8.4.6 user, 28/10). An HTTP 401 of the
+  // MCP during a call makes Vibe suspend the server for the session. Up to Vibe 3.0.2 the suspension asks the Rust core
+  // for a capability reconfigure that it refuses while the call runs, the failure of the call says "Core rejected durable
+  // input: RustRejectedApplyResult(type='rejected', rejection=RustInvalidStateRejection(code='invalid_state',
+  // command_type='reconfigure', state='running'))" (code effect_recovery_failed), and every later call repeats it. From
+  // 3.0.3 the call fails with mcp_authorization_required, then mcp_unknown_route. Either way the process keeps it until
+  // it is replaced: the first such failure marks it for a restart on the same session at the next start, and after
+  // VIBE_MCP_LOST_FAILURES_MAX of them in a row the Bridge ends the turn.
+  var VIBE_CORE_REFUSAL_PATTERN = /Core rejected durable input: (RustRejectedApplyResult\([^\n"]*)/;
+  var VIBE_MCP_LOST_CODES = { mcp_authorization_required: true, mcp_unknown_route: true };
+  // The restart reasons vibeStart honours by replacing the process.
+  var VIBE_MCP_LOST_RESTARTS = { core_rejected_input: true, convertigo_mcp_suspended: true };
+  var VIBE_MCP_LOST_FAILURES_MAX = 3;
+  var VIBE_MCP_LOST_STOP_GRACE_MILLIS = 15000;
+
+  // The core refusal a failed update or a turn error names: its kind and enum fields, or null.
+  function vibeCoreRefusal(value) {
+    var text;
+    try {
+      text = typeof value === "string" ? value : JSON.stringify(value);
+    } catch (_ignoreRefusalText) {
+      text = String(value);
+    }
+    var match = VIBE_CORE_REFUSAL_PATTERN.exec(String(text || ""));
+    if (!match) {
+      return null;
+    }
+    var repr = match[1].replace(/\\'/g, "'");
+    var field = function (name) {
+      var found = new RegExp("\\b" + name + "='([a-z_]+)'").exec(repr.substring(repr.indexOf("rejection=")));
+      return found ? found[1] : "";
+    };
+    var kind = /rejection=Rust(\w+)Rejection\(/.exec(repr);
+    return {
+      rejection: kind ? kind[1].replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase() : "",
+      code: field("code"),
+      commandType: field("command_type"),
+      state: field("state"),
+      repr: repr.length > 400 ? repr.substring(0, 400) : repr
+    };
+  }
+
+  // Why a failed tool call says the session lost the Convertigo MCP: "core_rejected_input" (any tool, Vibe <= 3.0.2),
+  // "convertigo_mcp_suspended" (a Convertigo tool, Vibe >= 3.0.3), or "".
+  function vibeMcpLostReason(title, failure, refusal) {
+    if (refusal !== null) {
+      return "core_rejected_input";
+    }
+    var convertigo = /^(?:mcp_Convertigo\.|Convertigo_)/i.test(trim(title));
+    return convertigo && failure !== null && VIBE_MCP_LOST_CODES[failure.code] === true ? "convertigo_mcp_suspended" : "";
+  }
+
+  // Counts these failures in a row. The first one marks the process for a restart and tells the turn; at
+  // VIBE_MCP_LOST_FAILURES_MAX the Bridge cancels the turn, and stops the process if the cancel is not answered.
+  function noteVibeMcpLost(entry, reason, detail) {
+    entry.mcpLostFailures = Number(entry.mcpLostFailures || 0) + 1;
+    if (!trim(entry.restartReason).length) {
+      entry.restartReason = reason;
+      entry.restartDetail = detail;
+      pushEvent(entry, "warning", {
+        phase: "vibe/mcp",
+        reason: reason,
+        detail: detail,
+        message: "Vibe lost the Convertigo MCP for this session (" + vibeMcpLostLabel(reason, detail)
+          + "): the next message restarts Vibe on this conversation."
+      });
+    }
+    if (entry.mcpLostFailures !== VIBE_MCP_LOST_FAILURES_MAX) {
+      return;
+    }
+    pushEvent(entry, "warning", {
+      phase: "vibe/mcp",
+      reason: "mcp_lost_turn_stopped",
+      count: entry.mcpLostFailures,
+      message: "Vibe failed " + entry.mcpLostFailures + " tool calls in a row without the Convertigo MCP: the Bridge "
+        + "stopped the turn. The next message restarts Vibe on this conversation."
+    });
+    var turnRequestId = trim(entry.turnRequestId);
+    try {
+      TURN_INTERRUPT_ADAPTERS.acp(entry);
+      pushEvent(entry, "turn/interrupt_requested", { protocol: "acp", reason: "mcp_lost" });
+    } catch (_ignoreMcpLostCancel) {}
+    var watchdog = new Thread(new Runnable({
+      run: function () {
+        try {
+          Thread.sleep(VIBE_MCP_LOST_STOP_GRACE_MILLIS);
+        } catch (_ignoreMcpLostSleep) {}
+        if (entry.turnActive === true && trim(entry.turnRequestId) === turnRequestId && processAlive(entry.process)) {
+          pushEvent(entry, "warning", {
+            phase: "vibe/mcp",
+            reason: "mcp_lost_process_stopped",
+            message: "Vibe did not end the turn after the cancel: the Bridge stopped the process."
+          });
+          stopEntry(entry, false);
+        }
+      }
+    }), "lib_ConvertigoAgentBridge-mcp-lost-" + entry.handle);
+    watchdog.setDaemon(true);
+    watchdog.start();
+  }
+
+  function vibeMcpLostLabel(reason, detail) {
+    if (reason !== "core_rejected_input") {
+      return trim(detail && detail.code) || reason;
+    }
+    var parts = [detail.code || detail.rejection || "rejected"];
+    if (detail.commandType) {
+      parts.push(detail.commandType);
+    }
+    if (detail.state) {
+      parts.push("in state " + detail.state);
+    }
+    return "core refusal: " + parts.join(", ");
+  }
+
   function normalizeSessionUpdate(entry, params) {
     var update = params.update || params.sessionUpdate || params;
     var kind = String(update.sessionUpdate || update.session_update || "");
@@ -11660,7 +11776,20 @@
       if (failure !== null) {
         eventData.failure = failure;
       }
+      var refusal = eventData.status === "failed" ? vibeCoreRefusal({ rawOutput: update.rawOutput || update.raw_output || null, content: update.content || null }) : null;
+      if (refusal !== null) {
+        eventData.coreRefusal = refusal;
+      }
+      var lost = eventData.status === "failed"
+        ? vibeMcpLostReason(eventData.title || (entry.toolCallTitles && entry.toolCallTitles[trim(eventData.toolCallId)]) || "", failure, refusal)
+        : "";
       pushEvent(entry, "tool/update", eventData);
+      if (lost.length) {
+        noteVibeMcpLost(entry, lost, refusal !== null ? refusal : { code: failure.code });
+      } else if (eventData.status === "completed") {
+        // a call that went through: only failures in a row count
+        entry.mcpLostFailures = 0;
+      }
       return;
     }
     if (kind === "usage_update") {
@@ -11726,6 +11855,12 @@
         pending.done = true;
         pending.completedAt = now();
         if (pending.method === "session/prompt") {
+          // A turn that failed on a refusal of Vibe's core leaves the process to be replaced at the next start.
+          var turnRefusal = entry.provider === "vibe" && message.error ? vibeCoreRefusal(message.error) : null;
+          if (turnRefusal !== null && !trim(entry.restartReason).length) {
+            entry.restartReason = "core_rejected_input";
+            entry.restartDetail = turnRefusal;
+          }
           if (message.error) {
             pushEvent(entry, "turn/error", {
               requestId: message.id,

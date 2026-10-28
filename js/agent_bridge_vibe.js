@@ -398,6 +398,22 @@
       }
       existing = registry.get(handle);
     }
+    // A process that lost the Convertigo MCP (noteVibeMcpLost) keeps it lost: it is replaced, alive or not, and the
+    // session goes on in the new process, which reads its tools and its MCP token again.
+    if (existing !== null && typeof existing !== "undefined" && VIBE_MCP_LOST_RESTARTS[trim(existing.restartReason)] === true) {
+      if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
+        options.sessionId = trim(existing.sessionId);
+      }
+      pushEvent(existing, "warning", {
+        phase: "vibe/mcp",
+        reason: "mcp_lost_restart",
+        cause: trim(existing.restartReason),
+        detail: existing.restartDetail || null,
+        message: "Vibe restarts on this conversation to get the Convertigo MCP back."
+      });
+      stopEntry(existing, true);
+      existing = null;
+    }
     if (existing !== null && typeof existing !== "undefined" && processAlive(existing.process)) {
       var requestedMcpTokenFingerprint = mcpBearerTokenFingerprint(options);
       var requestedPlaywrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
@@ -1050,6 +1066,7 @@
     }
 
     try {
+      entry.mcpLostFailures = 0;
       var pending = sendAcpRequest(entry, "session/prompt", params);
       pushEvent(entry, "turn/start", {
         requestId: pending.id,
