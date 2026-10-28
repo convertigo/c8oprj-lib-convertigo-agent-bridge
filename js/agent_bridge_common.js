@@ -2024,6 +2024,10 @@
   var STARTUP_TIMINGS_FILE = "startup-timings.ndjson";
   var STARTUP_TIMINGS_MAX_BYTES = 524288;
   var activeStartupTimer = null;
+  // A settings read probes each command once: what is installed does not change during it. The full read of a No Code
+  // user ran `npm --version` six times and the Playwright MCP three times (Codex detected before and after its home is
+  // prepared, then again for Claude), most of its 10 s on test-nocode.
+  var activeProbeMemo = null;
 
   function startupTimer(kind, fields) {
     var timer = { kind: kind, at: now(), fields: fields || {}, marks: [], last: 0 };
@@ -2073,7 +2077,8 @@
   function readJsonFile(file) {
     try {
       var text = readTextFile(file);
-      return trim(text).length ? JSON.parse(text) : null;
+      // not trim(): its regular expression took 7 ms on the 67 KB runtime cache (Rhino), JSON.parse 0.6 ms
+      return /\S/.test(text) ? JSON.parse(text) : null;
     } catch (_ignoreReadJsonFile) {
       return null;
     }
@@ -6919,6 +6924,17 @@
   }
 
   function detectCodexPlaywrightRuntime(options, installDir) {
+    if (activeProbeMemo === null) {
+      return probeCodexPlaywrightRuntime(options, installDir);
+    }
+    var key = "playwright|" + trim(installDir) + "|" + codexPlaywrightMcpPackageSpec(options || {}) + "|" + codexPlaywrightMcpBinaryName(options || {});
+    if (!Object.prototype.hasOwnProperty.call(activeProbeMemo, key)) {
+      activeProbeMemo[key] = probeCodexPlaywrightRuntime(options, installDir);
+    }
+    return activeProbeMemo[key];
+  }
+
+  function probeCodexPlaywrightRuntime(options, installDir) {
     options = options || {};
     var packageSpec = codexPlaywrightMcpPackageSpec(options);
     var packageName = npmPackageNameFromSpec(packageSpec);
@@ -7229,6 +7245,18 @@
   }
 
   function firstWorkingCommand(candidates, versionArgs, extraPath) {
+    if (activeProbeMemo === null) {
+      return probeFirstWorkingCommand(candidates, versionArgs, extraPath);
+    }
+    var key = "command|" + candidates.map(function (candidate) { return trim(candidate); }).join("|") + "|"
+      + (versionArgs || ["--version"]).join(" ") + "|" + trim(extraPath);
+    if (!Object.prototype.hasOwnProperty.call(activeProbeMemo, key)) {
+      activeProbeMemo[key] = probeFirstWorkingCommand(candidates, versionArgs, extraPath);
+    }
+    return activeProbeMemo[key];
+  }
+
+  function probeFirstWorkingCommand(candidates, versionArgs, extraPath) {
     var attempts = [];
     for (var i = 0; i < candidates.length; i++) {
       var candidate = trim(candidates[i]);
@@ -9738,13 +9766,16 @@
   C8O.agentBridge.settings = function (options) {
     var timer = startupTimer("settings", { provider: trim(options && (options.provider || options.agent)) });
     var outer = activeStartupTimer;
+    var outerProbes = activeProbeMemo;
     activeStartupTimer = timer;
+    activeProbeMemo = {};
     var result = null;
     try {
       result = agentSettingsSteps(options);
       return result;
     } finally {
       activeStartupTimer = outer;
+      activeProbeMemo = outerProbes;
       writeStartupTimings(timer, trim(options && options.workspaceRoot), result && result.ok === false ? "error" : "ok");
     }
   };
@@ -9755,18 +9786,28 @@
     var rawProvider = trim(options.provider || options.agent || "").toLowerCase();
     var provider = (!rawProvider.length || rawProvider === "all" || rawProvider === "*" || rawProvider === "any") ? "" : normalizeProvider(rawProvider);
     var providers = [];
+    // what each provider took, in the timings line of the read (providerMs)
+    var providerMs = {};
+    var readProvider = function (id, read) {
+      var started = now();
+      providers.push(read());
+      providerMs[id] = now() - started;
+    };
     // The Convertigo mode comes first: it is the zero-configuration default.
     if (!provider.length || provider === "convertigo") {
-      providers.push(vibeSettings(withVibeProfile(options, "convertigo")));
+      readProvider("convertigo", function () { return vibeSettings(withVibeProfile(options, "convertigo")); });
     }
     if (!provider.length || provider === "codex") {
-      providers.push(codexSettings(options));
+      readProvider("codex", function () { return codexSettings(options); });
     }
     if (!provider.length || provider === "vibe") {
-      providers.push(vibeSettings(withVibeProfile(options, "mistral")));
+      readProvider("vibe", function () { return vibeSettings(withVibeProfile(options, "mistral")); });
     }
     if ((!provider.length || provider === "claude") && typeof claudeSettings === "function") {
-      providers.push(claudeSettings(options));
+      readProvider("claude", function () { return claudeSettings(options); });
+    }
+    if (activeStartupTimer !== null) {
+      activeStartupTimer.fields.providerMs = providerMs;
     }
     startupMark("settings/providers");
     var settingsWorkspaceRoot = trim(options.workspaceRoot);

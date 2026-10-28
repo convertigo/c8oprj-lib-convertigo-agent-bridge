@@ -39,6 +39,13 @@ same context.
 - Startup environment checks must use `runtimePresenceOnly`. This checks known
   managed paths and `PATH` entries without invoking the CLI; full model
   discovery is deferred until configuration is opened or the agent starts.
+- A full settings read probes each command once (`activeProbeMemo`, set by
+  `C8O.agentBridge.settings` for the read only): `firstWorkingCommand` and the
+  Playwright MCP probe answer from it. Codex is detected before and after its
+  home is prepared, then Node and the Playwright MCP again for Claude; without
+  it a No Code read ran `npm --version` six times, 10 s on test-nocode. Its
+  timings line gives each provider's time (`providerMs`). Installs and starts
+  never use the memo. Run `node --test tests/settings_probe_once.test.js`.
 - Provider readiness requires both a usable managed runtime and locally
   configured authentication. Settings expose only authentication presence,
   status, source type, and the required action; never expose credential values.
