@@ -693,6 +693,8 @@
       var previousSessionId = trim(options.sessionId || options.externalSessionId || options.vibeSessionId);
       var canLoadSession = !!(entry.init && entry.init.agentCapabilities && entry.init.agentCapabilities.loadSession === true);
       entry.session = null;
+      // the conversation the MCP calls name (X-Convertigo-Conversation-Id): their retryable answers are kept under it
+      entry.mcpConversationId = mcpConversationId(options);
       if (previousSessionId.length && canLoadSession) {
         entry.phase = "session/load";
         entry.replayingSession = true;

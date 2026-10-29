@@ -11634,9 +11634,29 @@
     entry.toolStartedAt[toolCallId] = now();
   }
 
+  // The retryable answer the Convertigo MCP of this engine gave the conversation (lib_ConvertigoMCP keeps the last one of
+  // each Tigo conversation, X-Convertigo-Conversation-Id, in the store the server shares between projects) between from
+  // and to, or null. Vibe reports any HTTP error of an MCP as mcp_http_error, not retryable, without its status: the 503
+  // of a token C8Oforms could not check while it was deployed read as a lasting failure (test-nocode 28/10, feedback
+  // group 1d0f4cb9).
+  var MCP_RETRYABLE_ANSWERS_KEY = "lib_ConvertigoMCP.retryableAnswers";
+
+  function mcpRetryableAnswer(conversationId, from, to) {
+    try {
+      var store = getServerStore();
+      var answers = store !== null && trim(conversationId).length ? store.get(MCP_RETRYABLE_ANSWERS_KEY) : null;
+      var text = answers === null || typeof answers === "undefined" ? null : answers.get(trim(conversationId));
+      var answer = text === null || typeof text === "undefined" ? null : JSON.parse(String(text));
+      return answer && Number(answer.at) >= from && Number(answer.at) <= to ? answer : null;
+    } catch (_ignoreRetryableAnswer) {
+      return null;
+    }
+  }
+
   // A tool call the agent runtime could not complete. Vibe sends every such failure with the same message, "The provided
   // tool call failed": its error code (mcp_transport_failed, mcp_timeout...), whether it would retry and any details are
-  // the cause, so the update carries them as failure, with the duration of the call.
+  // the cause, so the update carries them as failure, with the duration of the call. An HTTP error the Convertigo MCP
+  // answered the call as retryable (503) is retryable, with the status and the MCP's code as details.
   function acpToolFailure(entry, update, toolCallId, status) {
     var startedAt = entry.toolStartedAt && toolCallId ? entry.toolStartedAt[toolCallId] : null;
     var terminal = status === "failed" || status === "completed" || status === "cancelled";
@@ -11651,13 +11671,25 @@
     if (!error || !trim(error.code).length) {
       return null;
     }
-    return {
+    var failure = {
       code: String(error.code),
       message: trim(error.message),
       retryable: error.retryable === true,
       details: typeof error.details === "undefined" ? null : error.details,
       durationMs: startedAt != null ? Math.max(0, now() - startedAt) : null
     };
+    if (failure.code === "mcp_http_error" && !failure.retryable) {
+      // The MCP notes its answer before Vibe reads it; a call of unknown start looks one minute back.
+      var at = now();
+      var answer = mcpRetryableAnswer(entry.mcpConversationId, startedAt != null ? startedAt - 1000 : at - 60000, at + 1000);
+      if (answer !== null) {
+        failure.retryable = true;
+        if (failure.details === null) {
+          failure.details = { httpStatus: Number(answer.status) || 0, mcpCode: trim(answer.code) };
+        }
+      }
+    }
+    return failure;
   }
 
   // A Vibe session that lost the Convertigo MCP stays without it: every later Convertigo call fails at once, and the

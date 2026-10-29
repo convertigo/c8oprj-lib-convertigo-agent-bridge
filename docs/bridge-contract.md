@@ -234,6 +234,15 @@ repond a tout appel qu'il n'a pas pu mener par le meme message, "The provided
 tool call failed" : la cause est le code (`mcp_transport_failed`,
 `mcp_timeout`, `mcp_authorization_required`...).
 
+Vibe rend toute erreur HTTP d'un MCP en `mcp_http_error`, non reessayable, sans
+le statut ni le corps. lib_ConvertigoMCP garde la derniere reponse
+reessayable (le 503 d'un jeton qu'il n'a pas pu verifier) de chaque
+conversation Tigo (`X-Convertigo-Conversation-Id`) dans `context.server`, sous
+`lib_ConvertigoMCP.retryableAnswers`. Un `mcp_http_error` d'une session dont
+la conversation a recu une telle reponse pendant l'appel est donc
+`retryable: true`, avec `details` `{httpStatus, mcpCode}` quand Vibe n'en
+donne pas.
+
 Un process ne mene qu'un tour a la fois : tant qu'un tour tourne,
 `agent_vibe_prompt` repond `status: "busy"` sans rien envoyer a Vibe. Seule la
 fin de la requete du tour en cours (`turn/end` ou `turn/error` du meme
