@@ -12336,6 +12336,37 @@
     };
   };
 
+  // A request of the Convertigo MCP waiting for the panel of the conversation (lib_ConvertigoAssistant.hostRequests,
+  // shared by the server's projects): a preview capture, or a No Code change waiting for the user's confirmation. The
+  // panel takes it when it reads the turn, after this wait for events: a wait that sees one returns at once, so its card
+  // shows at once instead of after the whole wait (10 s, during which a held call sends no event). Once per request.
+  var HOST_REQUESTS_KEY = "lib_ConvertigoAssistant.hostRequests";
+
+  function hostRequestWaiting(entry) {
+    try {
+      var id = mcpConversationId({ conversationId: entry.mcpConversationId || entry.conversationId, handle: entry.handle });
+      var store = id.length ? getServerStore() : null;
+      var conversations = store !== null ? store.get(HOST_REQUESTS_KEY) : null;
+      var requests = conversations === null || typeof conversations === "undefined" ? null : conversations.get(id);
+      if (requests === null || typeof requests === "undefined") {
+        return false;
+      }
+      var values = requests.values().toArray();
+      for (var i = 0; i < values.length; i++) {
+        var request = JSON.parse(String(values[i]));
+        var requestId = trim(request && request.id);
+        if (request && request.status === "pending" && requestId.length && !(entry.signaledHostRequests && entry.signaledHostRequests[requestId])) {
+          if (!entry.signaledHostRequests || Object.keys(entry.signaledHostRequests).length >= 200) {
+            entry.signaledHostRequests = {};
+          }
+          entry.signaledHostRequests[requestId] = true;
+          return true;
+        }
+      }
+    } catch (_ignoreHostRequests) {}
+    return false;
+  }
+
   C8O.agentBridge.events = function (options) {
     options = options || {};
     var handle = resolveHandle(options.handle);
@@ -12355,7 +12386,7 @@
     var limit = intValue(options.limit, DEFAULT_EVENT_LIMIT, 1, MAX_EVENT_LIMIT);
     var waitMs = intValue(options.waitMs, 25000, 0, 30000);
     var deadline = now() + waitMs;
-    while (entry.nextIndex <= cursor && processAlive(entry.process) && now() < deadline) {
+    while (entry.nextIndex <= cursor && processAlive(entry.process) && now() < deadline && !hostRequestWaiting(entry)) {
       Thread.sleep(100);
     }
     entry.lastAccess = now();
