@@ -66,8 +66,8 @@ test('a No Code session takes the effective policy of its engine, files on an en
   assert.equal(withEngine(undefined, () => noCodeToolPolicyName(noCode)), 'files');
   for (const policy of ['mcp-only', 'files', 'sandboxed-shell', 'full']) {
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(noCode)), policy);
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v3');
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + policy + '-v3', 'an engine that cannot confine');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v4');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + policy + '-v4', 'an engine that cannot confine');
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(studio)), '', 'the Studio session is never limited');
     assert.equal(withEngine(policy, () => vibeToolPolicy(studio)), '');
   }
@@ -90,7 +90,8 @@ test('each policy writes what its config.toml leaves out, before the first table
 
   const shell = withEngine('sandboxed-shell', () => topLevel(writtenConfig(noCode)));
   assert.ok(shell.includes('disabled_tools = ["grep", "web_fetch", "web_search", "task"]'), shell.join('\n'));
-  assert.ok(shell.includes('enable_background_processes = true'));
+  // background processes would bring Vibe's `wait` builtin, which waits for input the Tigo panel never sends mid-turn
+  assert.ok(shell.includes('enable_background_processes = false') && shell.includes('enable_subagents = false'), shell.join('\n'));
 
   for (const [policy, options] of [['full', noCode], ['files', studio]]) {
     const text = withEngine(policy, () => writtenConfig(options));

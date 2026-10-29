@@ -16,5 +16,7 @@ for (const provider of ['vibe', 'codex', 'claude']) {
   assert.match(text, /nocode-report-create when it is listed/, provider);
   assert.match(text, /nocode-app-create, nocode-form-\*/, provider + ': the application fast path is a no-code tool');
   assert.match(text, /call nocode-app-create once with the business spec/, provider);
+  // the panel sends nothing during a turn: a question waits for the next message, not for a tool
+  assert.match(text, /ask it in your final message and end the turn/, provider);
 }
 console.log('no-code agent instructions ok');
