@@ -464,7 +464,7 @@
   // files the Bridge also refuses any permission asked for another tool than a Convertigo MCP one. The Studio's own
   // session (user studio) is never limited. Bumped when a policy changes: No Code homes rewrite config.toml, resident
   // No Code sessions restart.
-  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v3";
+  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v4";
   var VIBE_NOCODE_POLICIES = ["mcp-only", "files", "sandboxed-shell", "full"];
   var VIBE_NOCODE_SHELL_TOOLS = ["bash*", "git_bash*", "powershell*"];
   var VIBE_NOCODE_FILE_TOOLS = ["read_file", "write_file", "edit"];
@@ -692,7 +692,9 @@
   }
 
   // The top-level keys of a No Code config.toml. run_typescript reaches background processes (tools.process) and
-  // subagents (tools.subagent) on their own switches.
+  // subagents (tools.subagent) on their own switches. Both stay off under every policy, the shell included: with
+  // either on, Vibe offers its `wait` builtin, which waits for input sent during the turn, and the Tigo panel sends
+  // none (test-nocode, sandboxed-shell: an agent asked a question then waited 300 s on « Waiting for input »).
   function vibeToolPolicyLines(options) {
     var policy = noCodeToolPolicyName(options);
     if (!policy.length || policy === "full") {
@@ -707,7 +709,7 @@
     }
     return [
       "disabled_tools = " + tomlArray(disabled),
-      "enable_background_processes = " + (policy === "sandboxed-shell" ? "true" : "false"),
+      "enable_background_processes = false",
       "enable_subagents = false"
     ];
   }
@@ -3138,6 +3140,7 @@
         "Read an existing form with nocode-form-get using its document id before auditing, proposing improvements, or editing. Tool names may use underscores instead of hyphens.",
         "Use the current form/page/element context as the default target. Never infer content from the form name alone. Read results describe the saved version, not unsaved editor changes.",
         "A review or request for suggestions does not authorize mutations. Never use an empty edit/update as a read operation.",
+        "When you need the user's answer or choice, ask it in your final message and end the turn: the user answers in their next message, and nothing they type reaches you while a turn runs.",
         "Authentication is supplied by the host. Never request, read, expose, or print credentials. On auth_required ask the user to reconnect; on form_unavailable explain that the form is missing or inaccessible without claiming a proven permission denial.",
         "If the required no-code tool is unavailable, report the missing capability without bypassing it.",
         "Use semantic nocode-form-edit operations for authorized edits. Preserve unrelated fields, pages and sources.",
