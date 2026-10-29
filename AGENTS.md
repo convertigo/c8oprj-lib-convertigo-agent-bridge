@@ -126,6 +126,23 @@ same context.
 - Playwright tool names are `mcp__playwright__browser_*` for Claude; the Flow
   capability pack still requires Codex.
 
+## Requests waiting for the panel
+
+- lib_ConvertigoMCP leaves requests for the Tigo panel of a conversation in the
+  server store `lib_ConvertigoAssistant.hostRequests` (keyed by the
+  `X-Convertigo-Conversation-Id` the Bridge sends): a preview capture, or a No Code
+  write held while the user has "Confirmer avant de modifier" on. The panel takes
+  them when it reads the turn, after `agent_events` returns. `hostRequestWaiting`
+  ends that wait at once for a `pending` request (once per request), so the card
+  shows without waiting 10 s; a held call sends no event meanwhile.
+- The confirmation gate itself is in the MCP router and keys on the No Code token,
+  so the Bridge keeps answering Vibe permission requests itself
+  (`choosePermissionOption`). Only Vibe sends the conversation header in No Code
+  (`buildMcpServers`); Codex and Claude No Code configs are shared by the user's
+  conversations, so they send none, and with the switch on the MCP refuses their
+  writes (`cannot_ask`) instead of writing unconfirmed. Run
+  `node --test tests/host_request_wait.test.js`.
+
 ## Vibe image attachments
 
 - `agent_vibe_prompt` accepts `images` (JSON array of local paths). `vibePrompt`
