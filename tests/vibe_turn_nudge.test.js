@@ -270,3 +270,29 @@ test("a call written out as text (tool name, maybe glued to a stray word, then J
     assert.equal(types(entry, "turn/nudge").length, 0, text);
   }
 });
+
+test("one rule: the recorded printed calls are nudged with their reason, the answers that look like them are not", () => {
+  const printed = [
+    ["run_typescript", "tool_name", "run_typescript"],
+    ["run_typescript rhyumbe", "tool_name", "run_typescript"],
+    ["run_typescriptInteraction", "tool_name", "run_typescript"],
+    ["run_typescript()", "tool_name", "run_typescript"],
+    ['run_typescriptatischeck{"code": "async function main() {}"}', "printed_call", "run_typescript"],
+    ['run_typescript(code="async function main() {\\n  return 1;\\n}")', "printed_call", "run_typescript"],
+    ['mcp_Convertigo.databaseobject_tree_get {"target": "App"}', "printed_call", "mcp_Convertigo.databaseobject_tree_get"]
+  ];
+  let id = 40;
+  for (const [text, reason, tool] of printed) {
+    const entry = turn(++id);
+    play(entry, [say(text), answer(id)]);
+    const nudge = types(entry, "turn/nudge")[0];
+    assert.ok(nudge, text);
+    assert.deepEqual([nudge.data.reason, nudge.data.tool], [reason, tool], text);
+  }
+  for (const text of ["Task completed.", "run_typescript ?", "run_typescript a été lancé et la page est prête",
+    "Voici le plan : d'abord la table, ensuite la page.", 'Le résultat est {"rows": 3}', "Tasks(3)"]) {
+    const entry = turn(++id);
+    play(entry, [say(text), answer(id)]);
+    assert.equal(types(entry, "turn/nudge").length, 0, text);
+  }
+});

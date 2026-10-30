@@ -11826,7 +11826,7 @@
   var VIBE_TURN_NUDGES_MAX = 2;
   var VIBE_BUILTIN_TOOL_NAMES = ["run_typescript", "bash", "git_bash", "powershell", "read_file", "write_file", "edit",
     "grep", "web_fetch", "web_search", "task", "todo", "skill", "search_tool_functions", "process"];
-  var VIBE_MCP_TOOL_NAME = /^(?:mcp_)?(?:Convertigo|playwright)[._][A-Za-z0-9_.\-]+$/i;
+  var VIBE_MCP_TOOL_NAME = /^(?:mcp_)?(?:Convertigo|playwright)[._][A-Za-z0-9_\-]+/i;
   var VIBE_ASKS_USER = /\b(?:confirme[zr]?|confirm|valide[zr]?|dites-moi|dis-moi|voulez-vous|veux-tu|souhaitez-vous|pr\u00e9f\u00e9rez-vous|shall i|should i|do you want|would you like|let me know|tell me)\b/i;
   var VIBE_ANNOUNCES = /\b(?:je vais|je m'appr\u00eate \u00e0|maintenant,? je|ensuite,? je|i will|i'll|i am going to|i'm going to|let me|next,? i|now i)\b/i;
   // A closing that hands over to the user ("je vais maintenant vous laisser tester") announces nothing to do.
@@ -11862,79 +11862,51 @@
     }
   }
 
-  // The name of a tool, alone or followed by one short token with no space: the model printed a call instead of making
-  // it ("run_typescript", "run_typescript rhyumbe" in a replay of 30/10).
-  function vibeToolNameOf(entry, text) {
-    var tokens = trim(text).replace(/^[`'"*\s]+|[`'"*\s.:;!]+$/g, "").split(/\s+/);
-    if (tokens.length > 2 || (tokens.length === 2 && tokens[1].length > 40)) {
-      return "";
+  // A call the agent printed instead of making it, so Vibe ended the turn. The whole message (quotes, backticks and closing
+  // punctuation stripped) is a tool name and, up to its end, nothing, letters glued to it, its JSON arguments (maybe after
+  // glued letters) or its arguments in parentheses, or one short stray token. Replies recorded on 30/10: "run_typescript",
+  // "run_typescript rhyumbe", "run_typescriptInteraction", 'run_typescriptatischeck{"code": "..."}',
+  // 'run_typescript(code="...")'. The name is a known compound one (run_typescript, a tool of the session) or a Convertigo
+  // or Playwright MCP name; task, edit, todo, bash, skill and process are words too and count only alone ("Task
+  // completed." is an answer). Past the name only that one token (never a "?") or one block to the end is allowed, so a
+  // sentence or a question never matches. reason: tool_name for a name, printed_call for a name with its arguments.
+  function vibePrintedCallOf(entry, text) {
+    var body = trim(text).replace(/^[`'"*\s]+|[`'"*\s.:;!]+$/g, "");
+    var alone = body.replace(/\(\s*\)$/, "");
+    if (VIBE_BUILTIN_TOOL_NAMES.indexOf(alone.toLowerCase()) >= 0) {
+      return { reason: "tool_name", tool: alone };
     }
-    var bare = tokens[0].replace(/[`'"*]+$/g, "").replace(/\(\s*\)$/, "");
-    // task, edit, todo, bash, skill and process are words too: "Task completed." is an answer, not a printed call. Two
-    // tokens only after a compound name (run_typescript, mcp_Convertigo.x).
-    if (!/^[A-Za-z_][A-Za-z0-9_.\-]*$/.test(bare) || (tokens.length === 2 && !/[_.]/.test(bare))) {
-      return "";
+    var name = vibeCompoundToolPrefix(entry, body) || (VIBE_MCP_TOOL_NAME.exec(body) || [""])[0];
+    if (!name.length) {
+      return null;
     }
-    var lower = bare.toLowerCase();
-    if (VIBE_BUILTIN_TOOL_NAMES.indexOf(lower) >= 0 || (entry.seenToolNames && entry.seenToolNames[lower] === true)) {
-      return bare;
+    var rest = body.substring(name.length);
+    var json = /^[A-Za-z]{0,40}\s*(\{[\s\S]*\})$/.exec(rest);
+    if (json) {
+      try {
+        JSON.parse(json[1]);
+      } catch (_notArguments) {
+        return null;
+      }
+      return { reason: "printed_call", tool: name };
     }
-    // A compound name glued to a stray word, alone: "run_typescriptInteraction" (a replay of 30/10).
-    var glued = tokens.length === 1 ? vibeCompoundToolPrefix(entry, bare) : "";
-    if (glued.length && /^[A-Za-z]{1,40}$/.test(bare.substring(glued.length))) {
-      return glued;
+    if (/^\(\s*\S[\s\S]*\)$/.test(rest)) {
+      return { reason: "printed_call", tool: name };
     }
-    return VIBE_MCP_TOOL_NAME.test(bare) ? bare : "";
+    return /^(\(\s*\)|[A-Za-z]{1,40}|\s+[^\s?]{1,40})?$/.test(rest) ? { reason: "tool_name", tool: name } : null;
   }
 
-  // The known compound tool name (run_typescript, mcp_Convertigo.x: a "_" or a ".") that starts head, if any. Plain
-  // words like task or edit never match: a sentence can start with them.
+  // The longest known compound tool name (run_typescript, mcp_Convertigo.x: a "_" or a ".") that starts head, if any.
   function vibeCompoundToolPrefix(entry, head) {
     var names = VIBE_BUILTIN_TOOL_NAMES.concat(Object.keys(entry.seenToolNames || {}));
     var lower = String(head).toLowerCase();
+    var found = "";
     for (var i = 0; i < names.length; i++) {
-      if (/[_.]/.test(names[i]) && lower.indexOf(names[i]) === 0) {
-        return head.substring(0, names[i].length);
+      if (/[_.]/.test(names[i]) && lower.indexOf(names[i]) === 0 && names[i].length > found.length) {
+        found = head.substring(0, names[i].length);
       }
     }
-    return "";
-  }
-
-  // A call written out as text: a compound tool name at the start (glued to a stray word or not), then its JSON arguments,
-  // and nothing else ('run_typescriptatischeck{"code": "async function main() {...}"}' in a replay of 30/10).
-  function vibePrintedCallOf(entry, text) {
-    var body = trim(text).replace(/^`+|`+$/g, "");
-    // Or written as a function call, with its arguments in parentheses, and nothing else:
-    // 'run_typescript(code="async function main() {...}")' in a replay of 30/10.
-    var called = /^([A-Za-z_][A-Za-z0-9_.\-]{0,79})\s*\(/.exec(body);
-    if (called && body.charAt(body.length - 1) === ")") {
-      var known = vibeCompoundToolPrefix(entry, called[1]);
-      if (known.length === called[1].length) {
-        return known;
-      }
-      if (VIBE_MCP_TOOL_NAME.test(called[1])) {
-        return called[1];
-      }
-    }
-    var brace = body.indexOf("{");
-    if (brace <= 0 || body.charAt(body.length - 1) !== "}") {
-      return "";
-    }
-    var head = body.substring(0, brace).replace(/\s+$/, "");
-    if (!/^[A-Za-z_][A-Za-z0-9_.\-]*$/.test(head) || head.length > 80) {
-      return "";
-    }
-    try {
-      JSON.parse(body.substring(brace));
-    } catch (_notArguments) {
-      return "";
-    }
-    var compound = vibeCompoundToolPrefix(entry, head);
-    if (compound.length) {
-      return compound;
-    }
-    var mcp = /^(?:mcp_)?(?:Convertigo|playwright)[._][A-Za-z0-9_\-]+/i.exec(head);
-    return mcp ? mcp[0] : "";
+    return found;
   }
 
   function vibeAnnouncesNextStep(text) {
@@ -11954,13 +11926,9 @@
       return null;
     }
     var text = trim(entry.turnTail || "");
-    var tool = text.length ? vibeToolNameOf(entry, text) : "";
-    if (tool.length) {
-      return { reason: "tool_name", tool: tool, text: text };
-    }
-    var printed = text.length ? vibePrintedCallOf(entry, text) : "";
-    if (printed.length) {
-      return { reason: "printed_call", tool: printed, text: text };
+    var printed = text.length ? vibePrintedCallOf(entry, text) : null;
+    if (printed) {
+      return { reason: printed.reason, tool: printed.tool, text: text };
     }
     // An announcement only after the turn acted: a plan or an explanation asked by the user ends on "ensuite, je
     // créerai..." with no call, or after reads only, and a nudge would push the agent into changing the project.
