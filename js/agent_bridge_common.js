@@ -11870,7 +11870,9 @@
       return "";
     }
     var bare = tokens[0].replace(/[`'"*]+$/g, "").replace(/\(\s*\)$/, "");
-    if (!/^[A-Za-z_][A-Za-z0-9_.\-]*$/.test(bare)) {
+    // task, edit, todo, bash, skill and process are words too: "Task completed." is an answer, not a printed call. Two
+    // tokens only after a compound name (run_typescript, mcp_Convertigo.x).
+    if (!/^[A-Za-z_][A-Za-z0-9_.\-]*$/.test(bare) || (tokens.length === 2 && !/[_.]/.test(bare))) {
       return "";
     }
     var lower = bare.toLowerCase();

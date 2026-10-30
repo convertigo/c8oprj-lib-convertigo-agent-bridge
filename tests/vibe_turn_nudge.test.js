@@ -130,6 +130,14 @@ test("any tool of the session counts, not only run_typescript; plain words do no
   const junk = turn(10);
   play(junk, [say("run_typescript rhyumbe"), answer(10)]);
   assert.equal(types(junk, "turn/nudge")[0].data.tool, "run_typescript", "the name and one stray token");
+  for (const [id, text] of [[12, "Task completed."], [13, "Edit terminé"], [14, "todo ok"]]) {
+    const plain = turn(id);
+    play(plain, [say(text), answer(id)]);
+    assert.equal(types(plain, "turn/nudge").length, 0, text + ": a builtin name that is also a word, with another word");
+  }
+  const alone = turn(15);
+  play(alone, [say("task"), answer(15)]);
+  assert.equal(types(alone, "turn/nudge").length, 1, "a builtin name alone is still a printed call");
   const prose = turn(11);
   play(prose, [say("run_typescript a été lancé et la page est prête"), answer(11)]);
   assert.equal(types(prose, "turn/nudge").length, 0, "a sentence that starts with a tool name");
