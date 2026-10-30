@@ -125,6 +125,13 @@
     // mobile-builder-open (wait up to 180 s), builds and batches legitimately run longer.
     env.MCP_TOOL_TIMEOUT = String(intValue(options.claudeMcpToolTimeoutMs || options.mcpToolTimeoutMs, 600000, 60000, 3600000));
     env.MCP_TIMEOUT = String(intValue(options.claudeMcpStartupTimeoutMs || options.mcpStartupTimeoutMs, 60000, 10000, 600000));
+    // Claude Code compacts near the end of its window by default (about 967k tokens of 1M): a long build then re-sends
+    // that much context on every turn. CLAUDE_CODE_AUTO_COMPACT_WINDOW compacts about 33k tokens below the given window
+    // (100k minimum); 0 keeps Claude Code's default.
+    var compactWindow = intValue(options.claudeAutoCompactWindow, 300000, 0, 2000000);
+    if (compactWindow >= 100000) {
+      env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(compactWindow);
+    }
     applyManagedMcpEnvironment(env, options);
     return env;
   }
