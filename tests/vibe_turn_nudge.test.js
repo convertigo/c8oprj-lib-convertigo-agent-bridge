@@ -147,6 +147,23 @@ test("any tool of the session counts, not only run_typescript; plain words do no
   assert.equal(types(word, "turn/end").length, 1);
 });
 
+test("a call written as a function call, with its arguments in parentheses and nothing else, is nudged", () => {
+  const typed = turn(22);
+  play(typed, [say('run_typescript(code="async function main() {\n  const r = await tools.mcp_Convertigo.batch_call({ calls: [] });\n  return r;\n}")'), answer(22)]);
+  const [nudge] = types(typed, "turn/nudge");
+  assert.equal(nudge.data.tool, "run_typescript", "a replay of 30/10");
+  assert.equal(nudge.data.reason, "printed_call");
+  const mcp = turn(23);
+  play(mcp, [say('mcp_Convertigo.project_lint(project="Shop")'), answer(23)]);
+  assert.equal(types(mcp, "turn/nudge")[0].data.tool, "mcp_Convertigo.project_lint");
+  for (const [id, text] of [[24, "run_typescript(code) a échoué, je regarde pourquoi."], [25, "Lancé : run_typescript(code)"],
+    [26, "Tasks(3)"], [27, "run_typescriptx(code=1)"]]) {
+    const prose = turn(id);
+    play(prose, [say(text), answer(id)]);
+    assert.equal(types(prose, "turn/nudge").length, 0, text);
+  }
+});
+
 test("a compound tool name glued to a stray word is nudged; a plain word or a longer name is not", () => {
   const glued = turn(16);
   play(glued, [say("run_typescriptInteraction"), answer(16)]);

@@ -11904,6 +11904,18 @@
   // and nothing else ('run_typescriptatischeck{"code": "async function main() {...}"}' in a replay of 30/10).
   function vibePrintedCallOf(entry, text) {
     var body = trim(text).replace(/^`+|`+$/g, "");
+    // Or written as a function call, with its arguments in parentheses, and nothing else:
+    // 'run_typescript(code="async function main() {...}")' in a replay of 30/10.
+    var called = /^([A-Za-z_][A-Za-z0-9_.\-]{0,79})\s*\(/.exec(body);
+    if (called && body.charAt(body.length - 1) === ")") {
+      var known = vibeCompoundToolPrefix(entry, called[1]);
+      if (known.length === called[1].length) {
+        return known;
+      }
+      if (VIBE_MCP_TOOL_NAME.test(called[1])) {
+        return called[1];
+      }
+    }
     var brace = body.indexOf("{");
     if (brace <= 0 || body.charAt(body.length - 1) !== "}") {
       return "";
