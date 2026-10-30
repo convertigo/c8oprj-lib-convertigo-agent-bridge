@@ -10933,6 +10933,7 @@
         entry.turnTail = "";
         entry.turnWriteRefused = false;
         entry.turnInterrupted = false;
+        entry.turnActed = false;
       }
       entry.turnActive = true;
       keepManagedMcpLease(entry);
@@ -11828,6 +11829,20 @@
   var VIBE_MCP_TOOL_NAME = /^(?:mcp_)?(?:Convertigo|playwright)[._][A-Za-z0-9_.\-]+$/i;
   var VIBE_ASKS_USER = /\b(?:confirme[zr]?|confirm|valide[zr]?|dites-moi|dis-moi|voulez-vous|veux-tu|souhaitez-vous|pr\u00e9f\u00e9rez-vous|shall i|should i|do you want|would you like|let me know|tell me)\b/i;
   var VIBE_ANNOUNCES = /\b(?:je vais|je m'appr\u00eate \u00e0|maintenant,? je|ensuite,? je|i will|i'll|i am going to|i'm going to|let me|next,? i|now i)\b/i;
+  // A closing that hands over to the user ("je vais maintenant vous laisser tester") announces nothing to do.
+  var VIBE_HANDS_OVER = /\b(?:vous laisser|te laisser|laisse(?:r|z)? (?:la main|tester)|let you|leave (?:it|this|the rest) to you|hand (?:it|this) (?:back|over)|m'arr\u00eater|i'll stop|stop here)\b/i;
+  // A call that only reads (a tree, a list, a file, a guide, the lint) is not the agent acting on the project: a turn
+  // that only read and ends on a plan is answering a question, not stopping mid-way.
+  var VIBE_READ_TOOL = /(?:^|[._\-])(?:get|list|search|read|status|describe|find|lint|audit|view|snapshot|tabs|screenshot|evaluate|resources_read)(?:$|[._\-])|^(?:read_file|grep|search_tool_functions|todo|skill|web_fetch|web_search|run_typescript)$/i;
+
+  // A shell command may be a read too: it does not count (if in doubt, no nudge).
+  function vibeToolActs(title) {
+    var name = trim(String(title || "").split(/[\s:(]/)[0]);
+    if (/^(?:write_file|edit)$/i.test(name)) {
+      return true;
+    }
+    return /^[A-Za-z][A-Za-z0-9]*[_.][A-Za-z0-9_.\-]*$/.test(name) && !VIBE_READ_TOOL.test(name);
+  }
 
   function rememberVibeToolName(entry, title) {
     var name = trim(String(title || "").split(/[\s:(]/)[0]);
@@ -11862,7 +11877,7 @@
 
   function vibeAnnouncesNextStep(text) {
     var body = trim(text);
-    if (!body.length || body.length > 600 || body.indexOf("?") >= 0 || VIBE_ASKS_USER.test(body)) {
+    if (!body.length || body.length > 600 || body.indexOf("?") >= 0 || VIBE_ASKS_USER.test(body) || VIBE_HANDS_OVER.test(body)) {
       return false;
     }
     var sentences = body.replace(/[.!\u2026\s]+$/, "").split(/[.!\u2026]\s+/);
@@ -11881,7 +11896,9 @@
     if (tool.length) {
       return { reason: "tool_name", tool: tool, text: text };
     }
-    return vibeAnnouncesNextStep(text) ? { reason: "announcement", tool: "", text: text } : null;
+    // An announcement only after the turn acted: a plan or an explanation asked by the user ends on "ensuite, je
+    // créerai..." with no call, or after reads only, and a nudge would push the agent into changing the project.
+    return entry.turnActed === true && vibeAnnouncesNextStep(text) ? { reason: "announcement", tool: "", text: text } : null;
   }
 
   function sendVibeTurnNudge(entry, message) {
@@ -11892,7 +11909,7 @@
     var count = Number(entry.turnNudges || 0) + 1;
     var prompt = nudge.reason === "tool_name"
       ? "Note from the Agent Bridge: your last message was only the name of the tool `" + nudge.tool + "`, with no call to it, so your turn ended. Call the tool now, or give your final answer."
-      : "Note from the Agent Bridge: your last message announced a next step but made no tool call, so your turn ended. Do that step now with a tool call, or give your final answer.";
+      : "Note from the Agent Bridge: your last message announced a next step but made no tool call, so your turn ended. If you meant to do it, do it now with a tool call. If the user only asked for a plan or an explanation, or you need their answer, reply with one short closing sentence instead.";
     var nudged;
     try {
       nudged = sendAcpRequest(entry, "session/prompt", { sessionId: entry.sessionId, prompt: [{ type: "text", text: prompt }] });
@@ -12056,6 +12073,9 @@
       rememberAcpToolStart(entry, eventData.toolCallId);
       entry.turnTail = "";
       rememberVibeToolName(entry, eventData.title);
+      if (vibeToolActs(eventData.title)) {
+        entry.turnActed = true;
+      }
       pushEvent(entry, "tool/start", eventData);
       return;
     }

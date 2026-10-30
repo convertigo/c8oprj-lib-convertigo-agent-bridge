@@ -133,10 +133,11 @@ test("any tool of the session counts, not only run_typescript; plain words do no
   assert.equal(types(word, "turn/end").length, 1);
 });
 
-test("a short announcement with no call is nudged; a question, a confirmation request or a long report is not", () => {
+test("a short announcement after the turn acted is nudged; a question, a confirmation request or a long report is not", () => {
   const announce = turn(7);
-  play(announce, [call("e1"), say("Le vrai coupable est le filtre. Je vais réécrire le filtre avec une expression plus simple."), answer(7)]);
+  play(announce, [call("e1", "mcp_Convertigo.databaseobject_tree_apply"), say("Le vrai coupable est le filtre. Je vais réécrire le filtre avec une expression plus simple."), answer(7)]);
   assert.equal(types(announce, "turn/nudge")[0].data.reason, "announcement");
+  assert.match(prompts(announce)[0].params.prompt[0].text, /If you meant to do it, do it now with a tool call\. If the user only asked for a plan or an explanation, or you need their answer, reply with one short closing sentence instead\./);
   for (const text of [
     "Je vais modifier le formulaire. Voulez-vous que je continue ?",
     "Je vais supprimer le champ : confirmez-vous avant que je l'applique.",
@@ -145,7 +146,7 @@ test("a short announcement with no call is nudged; a question, a confirmation re
     "x".repeat(700) + ". I will continue."
   ]) {
     const entry = turn(7);
-    play(entry, [say(text), answer(7)]);
+    play(entry, [call("e1", "mcp_Convertigo.databaseobject_tree_apply"), say(text), answer(7)]);
     assert.equal(types(entry, "turn/nudge").length, 0, text.slice(0, 50));
     assert.equal(types(entry, "turn/end").length, 1, text.slice(0, 50));
   }
@@ -183,4 +184,26 @@ test("at most two nudges per turn, then the turn ends as today; the next turn co
   sandbox.pushEvent(entry, "turn/start", { requestId: 20 });
   play(entry, [say("run_typescript"), answer(20)]);
   assert.equal(types(entry, "turn/nudge").length, 3, "a new turn of the user starts at zero");
+});
+
+// Review of 4f945f6 (30/10): asked for a plan only, the agent ends on "Ensuite, je créerai la page de liste." A nudge
+// saying "do that step now" could make it change the project against the request.
+test("a plan or an explanation ends the turn: no tool call, or reads only, before the announcement", () => {
+  const plan = turn(7);
+  play(plan, [say("Voici le plan. D'abord la table, puis les séquences. Ensuite, je créerai la page de liste."), answer(7)]);
+  assert.equal(types(plan, "turn/nudge").length, 0, "no tool call");
+  const reads = turn(8);
+  play(reads, [call("e1", "mcp_Convertigo.databaseobject_tree_get"), call("e2", "mcp_Convertigo.project_lint"),
+    call("e3", "bash: grep -n isbn app.js"), call("e4", "read_file"),
+    say("J'ai lu le projet. Ensuite, je créerai la page de liste."), answer(8)]);
+  assert.equal(types(reads, "turn/nudge").length, 0, "reads only, a shell command counts as a read");
+  assert.equal(types(reads, "turn/end").length, 1);
+});
+
+test("a closing that hands over to the user is not nudged, even after a write", () => {
+  for (const text of ["C'est en place. Je vais maintenant vous laisser tester la page.", "Done. I'll let you test it now."]) {
+    const entry = turn(7);
+    play(entry, [call("e1", "mcp_Convertigo.databaseobject_tree_apply"), say(text), answer(7)]);
+    assert.equal(types(entry, "turn/nudge").length, 0, text);
+  }
 });
