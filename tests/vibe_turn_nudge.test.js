@@ -147,6 +147,20 @@ test("any tool of the session counts, not only run_typescript; plain words do no
   assert.equal(types(word, "turn/end").length, 1);
 });
 
+test("a compound tool name glued to a stray word is nudged; a plain word or a longer name is not", () => {
+  const glued = turn(16);
+  play(glued, [say("run_typescriptInteraction"), answer(16)]);
+  assert.equal(types(glued, "turn/nudge")[0].data.tool, "run_typescript", "the name glued to a word (a replay of 30/10)");
+  const seen = turn(17);
+  play(seen, [call("e2", "mcp_Convertigo.project_lint"), say("mcp_Convertigo.project_lintVerification."), answer(17)]);
+  assert.equal(types(seen, "turn/nudge")[0].data.tool, "mcp_Convertigo.project_lint", "a tool of the session, glued");
+  for (const [id, text] of [[18, "Tasks"], [19, "Editorial"], [20, "run_typescript_helper"], [21, "run_typescriptInteraction terminée avec succès"]]) {
+    const other = turn(id);
+    play(other, [say(text), answer(id)]);
+    assert.equal(types(other, "turn/nudge").length, 0, text);
+  }
+});
+
 test("a short announcement after the turn acted is nudged; a question, a confirmation request or a long report is not", () => {
   const announce = turn(7);
   play(announce, [call("e1", "mcp_Convertigo.databaseobject_tree_apply"), say("Le vrai coupable est le filtre. Je vais réécrire le filtre avec une expression plus simple."), answer(7)]);
