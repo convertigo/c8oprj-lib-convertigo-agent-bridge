@@ -11862,8 +11862,14 @@
     }
   }
 
+  // The name of a tool, alone or followed by one short token with no space: the model printed a call instead of making
+  // it ("run_typescript", "run_typescript rhyumbe" in a replay of 30/10).
   function vibeToolNameOf(entry, text) {
-    var bare = trim(text).replace(/^[`'"*\s]+|[`'"*\s.:;!]+$/g, "").replace(/\(\s*\)$/, "");
+    var tokens = trim(text).replace(/^[`'"*\s]+|[`'"*\s.:;!]+$/g, "").split(/\s+/);
+    if (tokens.length > 2 || (tokens.length === 2 && tokens[1].length > 40)) {
+      return "";
+    }
+    var bare = tokens[0].replace(/[`'"*]+$/g, "").replace(/\(\s*\)$/, "");
     if (!/^[A-Za-z_][A-Za-z0-9_.\-]*$/.test(bare)) {
       return "";
     }

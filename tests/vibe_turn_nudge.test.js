@@ -127,6 +127,12 @@ test("any tool of the session counts, not only run_typescript; plain words do no
   const mcp = turn(8);
   play(mcp, [say("Convertigo_project-lint."), answer(8)]);
   assert.equal(types(mcp, "turn/nudge").length, 1, "a Convertigo MCP tool name");
+  const junk = turn(10);
+  play(junk, [say("run_typescript rhyumbe"), answer(10)]);
+  assert.equal(types(junk, "turn/nudge")[0].data.tool, "run_typescript", "the name and one stray token");
+  const prose = turn(11);
+  play(prose, [say("run_typescript a été lancé et la page est prête"), answer(11)]);
+  assert.equal(types(prose, "turn/nudge").length, 0, "a sentence that starts with a tool name");
   const word = turn(9);
   play(word, [say("Done"), answer(9)]);
   assert.equal(types(word, "turn/nudge").length, 0);
