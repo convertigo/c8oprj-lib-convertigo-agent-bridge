@@ -1681,6 +1681,14 @@
     return normalizeSkillProfile(options || {}) === "flow" && vibeFlowMcpEndpoint(endpoint, options).length > 0;
   }
 
+  // The same facade for a Claude conversation of the `flow` profile: its convertigo-mcp.json declares `convertigo-flow`
+  // (and Playwright) only, its home has the Flow skills only and a CLAUDE.md of its own. A Studio Claude conversation
+  // runs in a home of its own (claudeStart leases its viewer port), so this changes no other conversation. The profile
+  // is `flow` only on an engine with Flow (agentCapabilityProfile).
+  function claudeFlowFacade(options) {
+    return normalizeSkillProfile(options || {}) === "flow";
+  }
+
   // The X-Convertigo-* headers of a managed Vibe MCP server entry in config.toml, in the order the Bridge writes them.
   function vibeConfigMcpHeaderLines(options) {
     var lines = [];
@@ -2215,6 +2223,10 @@
   function managedSkillBundleSlugs(options, provider) {
     if (normalizeSkillProfile(options || {}) === "nocode") {
       return ["convertigo-nocode"];
+    }
+    // A Claude Flow conversation's home has the Flow skills only (claudeFlowFacade); a Claude Studio home none of them.
+    if (normalizeProvider(provider || (options && options.provider)) === "claude" && claudeFlowFacade(options)) {
+      return VIBE_FLOW_SKILL_SLUGS.slice(0);
     }
     var slugs = [
       STUDIO_ROUTER_SKILL_SLUG,

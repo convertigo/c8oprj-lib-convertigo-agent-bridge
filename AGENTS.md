@@ -104,8 +104,9 @@ same context.
   token only exists in the process environment.
 - Skills are delegated to `lib_ConvertigoMCP._setupClaude` with
   `configureMcp=false`; the bridge adds the legacy-only `convertigo-studio`
-  router. Claude never receives the Flow pack or `convertigo-nocode` in the
-  Studio profile.
+  router. A Studio (generalist) Claude home never receives the Flow pack or
+  `convertigo-nocode`; a conversation of the `flow` profile gets the Flow pack
+  only (see "Flow capability pack for Claude").
 - Authentication mirrors Codex: sync `.credentials.json` from `~/.claude` or the
   user-scoped home, or import it from the macOS keychain; verify with
   `claude auth status`. Never log or return token values.
@@ -129,8 +130,9 @@ same context.
   the managed `config.toml` (`transport = "stdio"`). Settings probes
   (`discoverVibeSettings`) must pass `disableViewerDebugPortReservation` so they
   never lease ports.
-- Playwright tool names are `mcp__playwright__browser_*` for Claude; Claude
-  does not get the Flow capability pack (Codex and Vibe do).
+- Playwright tool names are `mcp__playwright__browser_*` for Claude. A Claude
+  conversation gets the Flow capability pack only with the `flow` profile
+  (Codex and Vibe Studio homes get it with any Studio profile).
 
 ## Flow capability pack for Vibe
 
@@ -178,6 +180,56 @@ same context.
   from the MCP resource). A failed `mcp_convertigo_flow.*` call counts as a lost
   MCP like a `mcp_Convertigo.*` one (`vibeMcpLostReason`).
 - Run `node --test tests/vibe_flow_pack.test.js`.
+
+## Flow capability pack for Claude
+
+- A Claude conversation of the `flow` profile (explicit, or a Flow primary
+  project; the profile exists only on an engine with Flow) gets the same one
+  MCP facade as a Vibe one (`claudeFlowFacade`). A Studio Claude conversation
+  always runs in a home of its own (`claudeStart` leases its viewer port), so
+  no other conversation changes. The generalist and No Code profiles keep
+  their homes; `flow` lists `claude` in `supportedProviders`.
+- `bootstrapClaudeHome` writes `convertigo-mcp.json` with the options of the
+  `flow` profile: `convertigo-flow` (HTTP, `/api/flow-mcp?jsonOnly=true`, the
+  same `Bearer ${CONVERTIGO_MCP_TOKEN}` and headers as the Legacy `convertigo`
+  server, `X-Convertigo-Guidance-Version` and `X-Convertigo-Agent-Provider:
+  claude` included) and `playwright`, no `convertigo`. The Flow MCP relays the
+  Convertigo tools a Flow project needs with those headers; the provider header
+  keeps the gateway-model tools (`image-describe`, `browser-verify`,
+  `subagent-run`) out of Claude's catalog.
+- `installClaudeSkills` copies the three Flow skills from
+  `lib_flow_mcp/_flow/resources/skills` (a missing source is a configuration
+  error) and removes `convertigo-studio`, `convertigo-generalist` and
+  `convertigo-nocode`: Claude Code offers every skill of its home.
+  `lib_ConvertigoMCP._setupClaude` is not run for such a home. A Studio home
+  removes the Flow skills of an earlier `flow` profile.
+  `managedSkillBundleSlugs(options, "claude")` is the Flow skills for a Flow
+  conversation; `claudePrompt` reads the bundle with the conversation's
+  profile, since the Assistant's Claude prompt names none.
+- `CLAUDE.md` is `claudeFlowInstructions`: one server, the Flow routing
+  (`## Convertigo Flow routing`), the viewer and working rules, then
+  `## After a context compaction (Convertigo Flow)`. Claude Code reloads
+  CLAUDE.md after a compaction (`InstructionsLoaded`, `load_reason:
+  "compact"`). Claude Code reads MCP resources, so the guides are read as
+  resources (`flow-resource-get` stays a fallback).
+- Permissions: nothing per server. Claude runs with `--permission-mode
+  bypassPermissions --dangerously-skip-permissions --strict-mcp-config`, and the
+  Bridge answers `can_use_tool` with allow, for `mcp__convertigo-flow__*` and
+  `mcp__playwright__*` as for `mcp__convertigo__*`.
+- Lost MCP: the `system/init` check stops the turn for any server that is not
+  `connected`, `convertigo-flow` included. `inspectClaudeMcpConfig` expects the
+  server of the conversation's profile.
+- The gateway home (`claudeGatewayHome`) replaces its skills with the managed
+  home's, so the skills of an earlier profile leave it too.
+- Compaction: the Bridge sets nothing for Claude Code (no threshold, no
+  `autoCompactEnabled`, no hook). Claude Code compacts at the auto-compact
+  window (the model's context window, up to 1M) minus about 33k tokens (20k
+  kept for the answer, 13k of margin); `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or the
+  `autoCompactWindow` setting (100k to 1M tokens) and
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` lower it, `DISABLE_AUTO_COMPACT` turns it
+  off, a `## Compact Instructions` section of CLAUDE.md or a `PreCompact` hook
+  steers the summary (checked in Claude Code 2.1.303).
+- Run `node --test tests/claude_flow_pack.test.js`.
 
 ## Requests waiting for the panel
 

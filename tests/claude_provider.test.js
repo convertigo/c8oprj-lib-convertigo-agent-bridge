@@ -45,9 +45,10 @@ assert.equal(providerLabel("claude"), "Claude");
 assert.equal(agentProxyTargetUrl("claude", {}), "https://api.anthropic.com");
 assert.ok(AGENT_CAPABILITY_PROFILES.generalist.supportedProviders.indexOf("claude") >= 0);
 assert.ok(AGENT_CAPABILITY_PROFILES.nocode.supportedProviders.indexOf("claude") >= 0);
-assert.ok(AGENT_CAPABILITY_PROFILES.flow.supportedProviders.indexOf("claude") >= 0, "Flow is available to Claude");
+assert.ok(AGENT_CAPABILITY_PROFILES.flow.supportedProviders.indexOf("claude") >= 0, "a Claude conversation of the flow profile gets the Flow pack (tests/claude_flow_pack.test.js)");
 
-// When Flow is available, Claude receives the Flow skills and the Legacy/Flow router like Codex.
+// A Claude Studio (generalist) bundle never expects Flow skills, even when Flow is available; a Flow conversation's has
+// the Flow skills only (tests/claude_flow_pack.test.js).
 flowCapabilityAvailability = () => ({ available: true });
 assert.deepEqual(managedSkillBundleSlugs({}, "claude"), ["convertigo-studio", "convertigo-generalist",
   "convertigo-flow-mcp", "convertigo-flow-backend", "convertigo-flow-frontend-svelte"]);

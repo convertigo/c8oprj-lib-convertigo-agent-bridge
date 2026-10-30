@@ -133,6 +133,9 @@
     return new File(effectiveClaudeHomePath(homePath), CLAUDE_MCP_CONFIG_FILE);
   }
 
+  // One Convertigo server, named by the profile: `convertigo` (Legacy) for a Studio conversation, `convertigo-flow` for a
+  // Flow one (claudeFlowFacade, on the Flow endpoint), whose Convertigo tools come through its relay. Both get the same
+  // auth and headers; the Flow MCP forwards them to the Legacy one for a relayed tool.
   function buildClaudeMcpConfig(mcpEndpoint, options, homePath) {
     options = options || {};
     var serverName = managedMcpServerName(options);
@@ -1347,6 +1350,60 @@
     ].filter(function (line) { return line !== ""; }).join("\n");
   }
 
+  // CLAUDE.md of a Flow conversation (claudeFlowFacade), the counterpart of the AGENTS.md of a Flow-only Vibe home
+  // (vibeFlowFacadeAgents): one Convertigo server, the Flow skills, no Legacy guidance. Claude Code reloads CLAUDE.md
+  // after a compaction (InstructionsLoaded, load_reason "compact"), so the rules of its last section survive one.
+  var CLAUDE_FLOW_ROUTING_HEADING = "## Convertigo Flow routing";
+  var CLAUDE_FLOW_COMPACTION_RULES_HEADING = "## After a context compaction (Convertigo Flow)";
+
+  function claudeFlowInstructions(options) {
+    var server = VIBE_FLOW_MCP_SERVER_NAME;
+    return [
+      "# Convertigo Agent Instructions (Flow)",
+      "",
+      "You are Claude Code running inside a Convertigo-integrated local agent session (Tigo).",
+      "",
+      "- Active authoring policy: `flow-only` (Convertigo Flow).",
+      "- This conversation builds with Convertigo Flow. Its one Convertigo MCP server is `" + server + "` (tools named `mcp__" + server + "__*`): the Flow tools, and the Convertigo tools a Flow project needs, relayed (`project-save`, `project-list`, `log-view`, `requestable-execute`, `scheduler-*`, `marketplace-*`, read-only `databaseobject-*`).",
+      "- The `" + server + "` MCP server is the only source of truth for Convertigo projects. If it is unavailable, returns an authorization error (HTTP 401/403), or its tools are missing, stop immediately and report the configuration defect to the user. Never browse the workspace filesystem, project folders, or descriptors as a substitute for MCP.",
+      "",
+      CLAUDE_FLOW_ROUTING_HEADING,
+      "",
+      "- Invoke the `convertigo-flow-mcp` skill first, then the `convertigo-flow-backend` or `convertigo-flow-frontend-svelte` specialist skill the task needs, before the first Flow operation of a conversation.",
+      "- Legacy Convertigo or NGX authoring is not available in this conversation: if the user asks for it, say so instead of working around it.",
+      "- The Flow skills call the Legacy server `convertigo`: this conversation has none, the Convertigo tools they name are the relayed tools of `" + server + "`.",
+      "- Read a Flow guide (`flow://guide/<name>`, `flow://lib/<library>/<guide>`) as an MCP resource of the `" + server + "` server; `flow-resource-get` with its `uri` returns the same text in `structuredContent.text`.",
+      "- Images and sub-agents are yours: read an image or a screenshot with Read, prove pages with the `playwright` tools, and give a piece of work to a sub-agent of your own. The tools that would call a model of the Convertigo gateway (`image-describe`, `browser-verify`, `subagent-run`) are not offered to Claude.",
+      "- Do not fall back to another tool or MCP after a tool error: read the full error `message`, fix the owning capability, or report the configuration defect.",
+      "",
+      "## Studio viewer",
+      "",
+      "- For viewer automation, use the managed `playwright` MCP server tools (`mcp__playwright__browser_snapshot`, `mcp__playwright__browser_click`, `mcp__playwright__browser_evaluate`, ...). They are attached to the Studio JxBrowser viewer over CDP. Do not run ad hoc scripts with `require('playwright')`, raw CDP, or a separate browser.",
+      "- Use Playwright only after `frontend-svelte-action` with `actionId:\"dev.open\"` reports `browserControlReady:true`.",
+      "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
+      "- Playwright MCP files live in `" + claudePlaywrightOutputDir(options) + "`: screenshots go there (read them at that path), and a file the viewer downloads (an export) is saved without any dialog in `" + claudePlaywrightOutputDir(options) + "/downloads/`. Playwright MCP only reads files inside `" + claudeWorkingDir(options) + "`: write `browser_run_code_unsafe` scripts in `" + claudePlaywrightOutputDir(options) + "/scripts/` and pass that path.",
+      "- If the `playwright` MCP server is unavailable, disabled, still on `about:blank`, or attached to another endpoint after readiness, report the host configuration problem to the user instead of bypassing it; if no viewer automation is configured at all, report the result as implemented but functionally unvalidated.",
+      "",
+      "## Working rules",
+      "",
+      "- If a prompt says Convertigo runtime reveal mode is enabled, pass `reveal:true` only on the Flow tools that support it (`code-set`, `code-patch`); do not add it to read-only calls.",
+      "- Work on the selected project unless the user explicitly asks for another project. If no project is selected and the user explicitly asks to create a new project or application, derive a concise valid technical name when needed, check for collisions with `project-list`, and proceed without asking for a project selection.",
+      "- Never hand-edit Convertigo YAML, generated Svelte, `_private/svelte`, build output or Studio metadata: change source objects through the MCP tools.",
+      "- Do not use shell, `rg`, or filesystem scans to rediscover MCP tool signatures already exposed by the MCP schemas and the skills.",
+      "- Reply to the user in their language. Keep progress updates short and factual, and never expose hidden reasoning.",
+      "- When you change a project, validate the result with the available Flow tools before claiming completion.",
+      "- Keep your plan visible: create its steps with TaskCreate and move them with TaskUpdate (pending, in_progress, completed); load the two tools once with ToolSearch \"select:TaskCreate,TaskUpdate\". The Convertigo Assistant shows this list to the user as the plan.",
+      "- To wait for something (a scheduled job, a build, a server), do not run a bare `sleep N`: Claude Code refuses it. Loop on the condition with `until <check>; do sleep 2; done`, or start the command with `run_in_background` and keep working.",
+      "",
+      CLAUDE_FLOW_COMPACTION_RULES_HEADING,
+      "",
+      "- Reload the `convertigo-flow-mcp` skill and the specialist skill of the task, read the project's `docs/generated/PROGRESS.md` when it exists, and read a source with `code-get` before patching it. Never rebuild a name or a revision from memory.",
+      "- Keep the TaskCreate/TaskUpdate plan current after each step.",
+      "",
+      "Provider: Claude"
+    ].join("\n");
+  }
+
   function bootstrapClaudeHome(options, homePath, mcpEndpoint) {
     var report = {
       attempted: false,
@@ -1391,20 +1448,26 @@
         report.reused.push(CLAUDE_STATE_FILE);
       }
       var capabilityProfile = agentCapabilityProfile(options || {});
-      var profileOptions = capabilityProfile.id === "nocode" ? options : copyOptionsWithProfile(options, "generalist");
+      // A Flow conversation declares the `convertigo-flow` server of its profile only (claudeFlowFacade); a Studio one
+      // the Legacy `convertigo` server.
+      var flowFacade = claudeFlowFacade(options);
+      var profileOptions = capabilityProfile.id === "nocode" ? options : copyOptionsWithProfile(options, flowFacade ? "flow" : "generalist");
       var endpoint = capabilityProfile.id === "nocode" ? (trim(mcpEndpoint) || resolveMcpEndpoint(options)) : profileOptions.mcpEndpoint;
       if (writeClaudeMcpConfig(report.home, endpoint, profileOptions)) {
         report.generated.push(CLAUDE_MCP_CONFIG_FILE);
       } else {
         report.reused.push(CLAUDE_MCP_CONFIG_FILE);
       }
-      var instructionsWrite = writeManagedTextFile(new File(homeDir, CLAUDE_INSTRUCTIONS_FILE), claudeInstructions(options, capabilityProfile.id), false);
+      var instructions = flowFacade ? claudeFlowInstructions(options) : claudeInstructions(options, capabilityProfile.id);
+      var instructionsWrite = writeManagedTextFile(new File(homeDir, CLAUDE_INSTRUCTIONS_FILE), instructions, false);
       if (instructionsWrite.status === "unchanged") {
         report.reused.push(CLAUDE_INSTRUCTIONS_FILE);
       } else {
         report.generated.push(CLAUDE_INSTRUCTIONS_FILE);
       }
-      report.message = capabilityProfile.id === "nocode" ? "Scoped NoCode CLAUDE_CONFIG_DIR bootstrapped" : "Scoped Studio CLAUDE_CONFIG_DIR bootstrapped";
+      report.message = capabilityProfile.id === "nocode"
+        ? "Scoped NoCode CLAUDE_CONFIG_DIR bootstrapped"
+        : (flowFacade ? "Scoped Flow CLAUDE_CONFIG_DIR bootstrapped" : "Scoped Studio CLAUDE_CONFIG_DIR bootstrapped");
     } catch (e) {
       report.ok = false;
       report.error = String(e);
@@ -1498,6 +1561,54 @@
     return report;
   }
 
+  // Claude Code offers every skill of its home: a Flow conversation's home keeps none of the Studio and No Code skills,
+  // a Studio home none of the Flow skills.
+  var CLAUDE_STUDIO_SKILL_SLUGS = [STUDIO_ROUTER_SKILL_SLUG, "convertigo-generalist", "convertigo-nocode"];
+
+  function removeClaudeHomeSkills(homeDir, slugs, dryRun) {
+    var result = { removed: [], errors: [] };
+    for (var i = 0; i < slugs.length; i++) {
+      var skillDir = new File(new File(homeDir, "skills"), slugs[i]);
+      if (!skillDir.exists()) {
+        continue;
+      }
+      if (dryRun === true || deleteDirectoryTree(skillDir, [], result.errors)) {
+        result.removed.push("skills/" + slugs[i]);
+      }
+    }
+    return result;
+  }
+
+  // The skills of a Flow conversation (claudeFlowFacade): the three Flow skills of lib_flow_mcp, copied as for a Vibe
+  // home (syncVibeFlowPack). lib_ConvertigoMCP._setupClaude is not run: it writes the Legacy and No Code skills.
+  function installClaudeFlowSkills(options, homeDir, dryRun, report) {
+    for (var i = 0; i < VIBE_FLOW_SKILL_SLUGS.length; i++) {
+      var slug = VIBE_FLOW_SKILL_SLUGS[i];
+      var source = flowSkillSourceFile(options, slug);
+      if (source === null) {
+        throw new Error("Missing Flow skill source: " + slug);
+      }
+      var skillFile = new File(new File(new File(homeDir, "skills"), slug), "SKILL.md");
+      var write = writeManagedTextFile(skillFile, readTextFile(source), dryRun);
+      (write.status === "unchanged" ? report.reused : report.copied).push("skills/" + slug + "/SKILL.md");
+      if (slug === "convertigo-flow-mcp") {
+        report.skillStatus = write.status;
+        report.skillPath = filePath(skillFile);
+      }
+    }
+    var removal = removeClaudeHomeSkills(homeDir, CLAUDE_STUDIO_SKILL_SLUGS, dryRun);
+    if (removal.removed.length) {
+      report.removed = removal.removed;
+    }
+    if (removal.errors.length) {
+      report.ok = false;
+      report.warnings.push("Unable to remove the Studio skills from the Flow home: " + JSON.stringify(removal.errors));
+    }
+    report.source = "lib_flow_mcp";
+    report.flowFacade = true;
+    report.message = "Convertigo Flow skills configured";
+  }
+
   function installClaudeSkills(options, homePath) {
     options = options || {};
     var profile = normalizeSkillProfile(options);
@@ -1547,6 +1658,8 @@
         report.skillPath = filePath(noCodeSkillFile);
         (noCodeWrite.status === "unchanged" ? report.reused : (noCodeSkill.copied === true ? report.copied : report.generated)).push("skills/convertigo-nocode/SKILL.md");
         report.message = "Convertigo NoCode skill configured";
+      } else if (claudeFlowFacade(options)) {
+        installClaudeFlowSkills(options, homeDir, dryRun, report);
       } else {
         var generalistOptions = copyOptionsWithProfile(options, "generalist");
         var skillFile = new File(new File(new File(homeDir, "skills"), "convertigo-generalist"), "SKILL.md");
@@ -1594,6 +1707,15 @@
         if (noCodeRemoval.status === "error") {
           report.ok = false;
           report.warnings.push("Unable to remove the NoCode skill from the Studio home: " + JSON.stringify(noCodeRemoval.errors));
+        }
+        // the Flow skills of a conversation that had the flow profile
+        var flowRemoval = removeClaudeHomeSkills(homeDir, VIBE_FLOW_SKILL_SLUGS, dryRun);
+        if (flowRemoval.removed.length) {
+          report.removed = (report.removed || []).concat(flowRemoval.removed);
+        }
+        if (flowRemoval.errors.length) {
+          report.ok = false;
+          report.warnings.push("Unable to remove the Flow skills from the Studio home: " + JSON.stringify(flowRemoval.errors));
         }
       }
     } catch (e) {
@@ -2273,7 +2395,19 @@
     entry.convertigoRevealMode = revealModeEnabled(options, entry);
     try {
       if (entry.home && trim(entry.home.path).length) {
-        var latestSkillBundle = managedSkillBundleState(options, entry.home.path, "claude");
+        // The Assistant's prompt names no profile: the bundle is the one of the conversation's profile, as for Codex
+        // (a Flow conversation's home has the Flow skills only).
+        var bundleOptions = {};
+        for (var bundleKey in options) {
+          if (Object.prototype.hasOwnProperty.call(options, bundleKey)) {
+            bundleOptions[bundleKey] = options[bundleKey];
+          }
+        }
+        bundleOptions.agentProfile = trim(options.agentProfile || entry.agentProfile || entry.skillProfile);
+        bundleOptions.skillProfile = trim(options.skillProfile || entry.skillProfile || entry.agentProfile);
+        bundleOptions.userId = trim(options.userId || entry.userId);
+        bundleOptions.projectId = trim(options.projectId || entry.projectId);
+        var latestSkillBundle = managedSkillBundleState(bundleOptions, entry.home.path, "claude");
         var previousFingerprint = trim(entry.managedSkillBundleFingerprint);
         if (previousFingerprint.length && trim(latestSkillBundle.fingerprint).length && previousFingerprint !== latestSkillBundle.fingerprint) {
           restartReason = restartReason || "skill_bundle_changed";
@@ -3138,6 +3272,9 @@
         }
       });
       var skills = new File(home, "skills");
+      // the skills of the managed home only: a skill it no longer has (the Flow or the Studio skills of an earlier
+      // profile of the conversation) leaves the gateway home too
+      deleteDirectoryTree(new File(gateway, "skills"), [], []);
       if (skills.isDirectory()) {
         copyDirectoryTree(skills, new File(gateway, "skills"));
       }

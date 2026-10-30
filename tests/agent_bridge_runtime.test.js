@@ -625,7 +625,7 @@ assert.match(flowRevealModePrompt, /`browserControlReady:true`/);
 const flowProfile = agentCapabilityProfile({ agentProfile: "flow", userId: "studio" });
 assert.equal(flowProfile.id, "flow");
 assert.equal(flowProfile.mcpServerName, "convertigo-flow");
-assert.deepEqual(flowProfile.supportedProviders, ["codex", "vibe", "claude"], "Vibe Studio homes get the Flow pack too");
+assert.deepEqual(flowProfile.supportedProviders, ["codex", "vibe", "claude"], "Vibe Studio homes and Claude Flow conversations get the Flow pack too");
 const flowCodexConfig = patchCodexMcpConfigText(
   compactCodexConfig.text,
   "http://localhost:18082/convertigo/api/flow-mcp",

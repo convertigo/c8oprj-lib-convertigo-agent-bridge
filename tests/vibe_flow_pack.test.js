@@ -410,7 +410,7 @@ test("a Studio home gets the Legacy setup then the Flow pack; a Flow conversatio
     calls.length = 0;
     installAgentSkills({ userId: "studio", mcpEndpoint: LEGACY }, "convertigo", "/managed/vibe-home");
     assert.deepEqual(calls, [["legacy", LEGACY], ["flow", LEGACY]], "the gateway (convertigo) profile takes the same path");
-    assert.deepEqual(agentCapabilityProfile({ agentProfile: "flow", userId: "studio" }).supportedProviders, ["codex", "vibe"]);
+    assert.deepEqual(agentCapabilityProfile({ agentProfile: "flow", userId: "studio" }).supportedProviders, ["codex", "vibe", "claude"]);
   } finally {
     setupVibeFromMcpProject = saved.setupVibeFromMcpProject;
     syncVibeFlowPack = saved.syncVibeFlowPack;
