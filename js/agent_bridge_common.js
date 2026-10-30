@@ -11876,9 +11876,26 @@
       return "";
     }
     var lower = bare.toLowerCase();
-    if (VIBE_BUILTIN_TOOL_NAMES.indexOf(lower) >= 0 || (entry.seenToolNames && entry.seenToolNames[lower] === true) ||
-      VIBE_MCP_TOOL_NAME.test(bare)) {
+    if (VIBE_BUILTIN_TOOL_NAMES.indexOf(lower) >= 0 || (entry.seenToolNames && entry.seenToolNames[lower] === true)) {
       return bare;
+    }
+    // A compound name glued to a stray word, alone: "run_typescriptInteraction" (a replay of 30/10).
+    var glued = tokens.length === 1 ? vibeCompoundToolPrefix(entry, bare) : "";
+    if (glued.length && /^[A-Za-z]{1,40}$/.test(bare.substring(glued.length))) {
+      return glued;
+    }
+    return VIBE_MCP_TOOL_NAME.test(bare) ? bare : "";
+  }
+
+  // The known compound tool name (run_typescript, mcp_Convertigo.x: a "_" or a ".") that starts head, if any. Plain
+  // words like task or edit never match: a sentence can start with them.
+  function vibeCompoundToolPrefix(entry, head) {
+    var names = VIBE_BUILTIN_TOOL_NAMES.concat(Object.keys(entry.seenToolNames || {}));
+    var lower = String(head).toLowerCase();
+    for (var i = 0; i < names.length; i++) {
+      if (/[_.]/.test(names[i]) && lower.indexOf(names[i]) === 0) {
+        return head.substring(0, names[i].length);
+      }
     }
     return "";
   }
@@ -11900,11 +11917,9 @@
     } catch (_notArguments) {
       return "";
     }
-    var names = VIBE_BUILTIN_TOOL_NAMES.concat(Object.keys(entry.seenToolNames || {}));
-    for (var i = 0; i < names.length; i++) {
-      if (/[_.]/.test(names[i]) && head.toLowerCase().indexOf(names[i]) === 0) {
-        return head.substring(0, names[i].length);
-      }
+    var compound = vibeCompoundToolPrefix(entry, head);
+    if (compound.length) {
+      return compound;
     }
     var mcp = /^(?:mcp_)?(?:Convertigo|playwright)[._][A-Za-z0-9_\-]+/i.exec(head);
     return mcp ? mcp[0] : "";
