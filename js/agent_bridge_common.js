@@ -10928,6 +10928,11 @@
     if (event.type === "turn/start") {
       if (entry.turnActive !== true) {
         entry.turnRequestId = requestId;
+        // What a Vibe turn-end nudge reads (see vibeTurnEndNudge): reset by each turn the user starts.
+        entry.turnNudges = 0;
+        entry.turnTail = "";
+        entry.turnWriteRefused = false;
+        entry.turnInterrupted = false;
       }
       entry.turnActive = true;
       keepManagedMcpLease(entry);
@@ -10936,6 +10941,9 @@
       entry.turnActive = false;
       entry.turnRequestId = "";
       touchManagedMcpLease(entry, true);
+    }
+    if (event.type === "turn/interrupt_requested") {
+      entry.turnInterrupted = true;
     }
     if (entry.turnActive === true) {
       touchManagedMcpLease(entry, false);
@@ -11808,6 +11816,110 @@
   var VIBE_MCP_LOST_CODES = { mcp_authorization_required: true, mcp_unknown_route: true };
   // The restart reasons vibeStart honours by replacing the process.
   var VIBE_MCP_LOST_RESTARTS = { core_rejected_input: true, convertigo_mcp_suspended: true };
+  // Vibe ends a turn on any assistant message without a tool call. mistral-large-4 ended 3 of its 4 early turns on a
+  // message that was only the name of a tool ("run_typescript", no call), and one on an announcement of its next step;
+  // the user saw "run_typescript" as the answer and had to write "continue" (usage tests 30/10). The Bridge sends one
+  // corrective prompt in the same turn, at most VIBE_TURN_NUDGES_MAX times: always for a bare tool name; for an
+  // announcement only when it is short, asks nothing, and no write was refused in the turn. Never after a stop or an
+  // error. Each nudge is a turn/nudge event and a line of the work log.
+  var VIBE_TURN_NUDGES_MAX = 2;
+  var VIBE_BUILTIN_TOOL_NAMES = ["run_typescript", "bash", "git_bash", "powershell", "read_file", "write_file", "edit",
+    "grep", "web_fetch", "web_search", "task", "todo", "skill", "search_tool_functions", "process"];
+  var VIBE_MCP_TOOL_NAME = /^(?:mcp_)?(?:Convertigo|playwright)[._][A-Za-z0-9_.\-]+$/i;
+  var VIBE_ASKS_USER = /\b(?:confirme[zr]?|confirm|valide[zr]?|dites-moi|dis-moi|voulez-vous|veux-tu|souhaitez-vous|pr\u00e9f\u00e9rez-vous|shall i|should i|do you want|would you like|let me know|tell me)\b/i;
+  var VIBE_ANNOUNCES = /\b(?:je vais|je m'appr\u00eate \u00e0|maintenant,? je|ensuite,? je|i will|i'll|i am going to|i'm going to|let me|next,? i|now i)\b/i;
+
+  function rememberVibeToolName(entry, title) {
+    var name = trim(String(title || "").split(/[\s:(]/)[0]);
+    if (!/^[A-Za-z][A-Za-z0-9]*[_.][A-Za-z0-9_.\-]*$/.test(name)) {
+      return;
+    }
+    entry.seenToolNames = entry.seenToolNames || {};
+    entry.seenToolNames[name.toLowerCase()] = true;
+  }
+
+  // A tool answer of a write the user refused (No Code "confirm before writing"): the turn then ends on purpose.
+  function vibeWriteRefused(update) {
+    try {
+      return /\\?"status\\?"\s*:\s*\\?"refused\\?"/.test(JSON.stringify(update.rawOutput || update.raw_output || update.content || ""));
+    } catch (_ignoreRefusedRead) {
+      return false;
+    }
+  }
+
+  function vibeToolNameOf(entry, text) {
+    var bare = trim(text).replace(/^[`'"*\s]+|[`'"*\s.:;!]+$/g, "").replace(/\(\s*\)$/, "");
+    if (!/^[A-Za-z_][A-Za-z0-9_.\-]*$/.test(bare)) {
+      return "";
+    }
+    var lower = bare.toLowerCase();
+    if (VIBE_BUILTIN_TOOL_NAMES.indexOf(lower) >= 0 || (entry.seenToolNames && entry.seenToolNames[lower] === true) ||
+      VIBE_MCP_TOOL_NAME.test(bare)) {
+      return bare;
+    }
+    return "";
+  }
+
+  function vibeAnnouncesNextStep(text) {
+    var body = trim(text);
+    if (!body.length || body.length > 600 || body.indexOf("?") >= 0 || VIBE_ASKS_USER.test(body)) {
+      return false;
+    }
+    var sentences = body.replace(/[.!\u2026\s]+$/, "").split(/[.!\u2026]\s+/);
+    return VIBE_ANNOUNCES.test(sentences[sentences.length - 1]);
+  }
+
+  function vibeTurnEndNudge(entry, result) {
+    result = result || {};
+    var stopReason = trim(result.stopReason || result.stop_reason || "");
+    if ((stopReason.length && stopReason !== "end_turn") || entry.turnInterrupted === true || entry.turnWriteRefused === true ||
+      Number(entry.turnNudges || 0) >= VIBE_TURN_NUDGES_MAX) {
+      return null;
+    }
+    var text = trim(entry.turnTail || "");
+    var tool = text.length ? vibeToolNameOf(entry, text) : "";
+    if (tool.length) {
+      return { reason: "tool_name", tool: tool, text: text };
+    }
+    return vibeAnnouncesNextStep(text) ? { reason: "announcement", tool: "", text: text } : null;
+  }
+
+  function sendVibeTurnNudge(entry, message) {
+    var nudge = vibeTurnEndNudge(entry, message.result);
+    if (nudge === null || !trim(entry.sessionId).length) {
+      return false;
+    }
+    var count = Number(entry.turnNudges || 0) + 1;
+    var prompt = nudge.reason === "tool_name"
+      ? "Note from the Agent Bridge: your last message was only the name of the tool `" + nudge.tool + "`, with no call to it, so your turn ended. Call the tool now, or give your final answer."
+      : "Note from the Agent Bridge: your last message announced a next step but made no tool call, so your turn ended. Do that step now with a tool call, or give your final answer.";
+    var nudged;
+    try {
+      nudged = sendAcpRequest(entry, "session/prompt", { sessionId: entry.sessionId, prompt: [{ type: "text", text: prompt }] });
+    } catch (_ignoreNudgeSend) {
+      return false;
+    }
+    entry.turnNudges = count;
+    entry.turnRequestId = String(nudged.id);
+    entry.turnTail = "";
+    var said = nudge.text.length > 240 ? nudge.text.substring(0, 240) + "..." : nudge.text;
+    pushEvent(entry, "turn/nudge", {
+      reason: nudge.reason,
+      tool: nudge.tool,
+      count: count,
+      max: VIBE_TURN_NUDGES_MAX,
+      endedRequestId: message.id,
+      requestId: nudged.id,
+      text: said
+    });
+    var line = nudge.reason === "tool_name"
+      ? "Agent Bridge: the agent ended its turn on the tool name `" + nudge.tool + "` without calling it; it was asked to go on (" + count + "/" + VIBE_TURN_NUDGES_MAX + ")."
+      : "Agent Bridge: the agent ended its turn announcing a next step without doing it; it was asked to go on (" + count + "/" + VIBE_TURN_NUDGES_MAX + ").";
+    pushEvent(entry, "progress/message", { text: line, nudge: nudge.reason });
+    try { log.info("(lib_ConvertigoAgentBridge) " + line + " Handle " + entry.handle + ", ended text: " + said); } catch (_ignoreNudgeLog) {}
+    return true;
+  }
+
   var VIBE_MCP_LOST_FAILURES_MAX = 3;
   var VIBE_MCP_LOST_STOP_GRACE_MILLIS = 15000;
 
@@ -11921,6 +12033,8 @@
 
     if (kind === "agent_message_chunk") {
       eventData.text = extractContentText(update.content);
+      // The text since the last tool call: what the turn ends on.
+      entry.turnTail = (String(entry.turnTail || "") + String(eventData.text || "")).slice(-2000);
       pushEvent(entry, "answer/chunk", eventData);
       return;
     }
@@ -11940,6 +12054,8 @@
       eventData.status = update.status || "";
       rememberToolCallTitle(entry, eventData.toolCallId, eventData.title);
       rememberAcpToolStart(entry, eventData.toolCallId);
+      entry.turnTail = "";
+      rememberVibeToolName(entry, eventData.title);
       pushEvent(entry, "tool/start", eventData);
       return;
     }
@@ -11955,6 +12071,9 @@
       var refusal = eventData.status === "failed" ? vibeCoreRefusal({ rawOutput: update.rawOutput || update.raw_output || null, content: update.content || null }) : null;
       if (refusal !== null) {
         eventData.coreRefusal = refusal;
+      }
+      if (vibeWriteRefused(update)) {
+        entry.turnWriteRefused = true;
       }
       var lost = eventData.status === "failed"
         ? vibeMcpLostReason(eventData.title || (entry.toolCallTitles && entry.toolCallTitles[trim(eventData.toolCallId)]) || "", failure, refusal)
@@ -12043,6 +12162,8 @@
               method: pending.method,
               error: message.error
             });
+          } else if (entry.provider === "vibe" && sendVibeTurnNudge(entry, message)) {
+            // The turn goes on with the nudge: its own answer ends it.
           } else {
             pushEvent(entry, "turn/end", {
               requestId: message.id,
