@@ -625,7 +625,7 @@ assert.match(flowRevealModePrompt, /`browserControlReady:true`/);
 const flowProfile = agentCapabilityProfile({ agentProfile: "flow", userId: "studio" });
 assert.equal(flowProfile.id, "flow");
 assert.equal(flowProfile.mcpServerName, "convertigo-flow");
-assert.deepEqual(flowProfile.supportedProviders, ["codex", "claude"]);
+assert.deepEqual(flowProfile.supportedProviders, ["codex", "vibe", "claude"], "Vibe Studio homes get the Flow pack too");
 const flowCodexConfig = patchCodexMcpConfigText(
   compactCodexConfig.text,
   "http://localhost:18082/convertigo/api/flow-mcp",
@@ -653,11 +653,19 @@ assert.equal(
   buildMcpServers("http://localhost:18082/convertigo/api/mcp")[0].url,
   "http://localhost:18082/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersion=2026-09-04.vibe-serial-transport-v1"
 );
+// The session server replaces the config.toml entry whole in Vibe: it carries the headers the engine and the MCP read.
 assert.deepEqual(
   buildMcpServers("http://localhost:18082/convertigo/api/mcp", { mcpBearerToken: "managed-jwt" })[0].headers,
-  [{ name: "Authorization", value: "Bearer managed-jwt" }]
+  [
+    { name: "Authorization", value: "Bearer managed-jwt" },
+    { name: "X-Convertigo-Guidance-Version", value: "2026-09-04.vibe-serial-transport-v1" },
+    { name: "X-Convertigo-No-Log", value: "true" }
+  ]
 );
-assert.deepEqual(buildMcpServers("http://localhost:18082/convertigo/api/mcp")[0].headers, []);
+assert.deepEqual(buildMcpServers("http://localhost:18082/convertigo/api/mcp")[0].headers, [
+  { name: "X-Convertigo-Guidance-Version", value: "2026-09-04.vibe-serial-transport-v1" },
+  { name: "X-Convertigo-No-Log", value: "true" }
+]);
 assert.deepEqual(
   buildMcpServers("https://example.test/unrelated-mcp", { mcpBearerToken: "managed-jwt" })[0].headers,
   [],

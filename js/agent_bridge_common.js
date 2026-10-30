@@ -1192,6 +1192,31 @@
   var FLOW_MINIMUM_CONVERTIGO_VERSION = "8.5.0";
   var FLOW_REQUIRED_PROJECTS = ["lib_flow_engine", "lib_flow_mcp"];
   var flowCapabilityAvailabilityCache = null;
+  // The Flow capability pack of a Vibe Studio home, the counterpart of what lib_flow_mcp._setupCodex installs in a Codex
+  // home: the Flow MCP server, the three Flow skills and their tool permissions. The server is named like the server
+  // the Flow skills name, so its tools read `convertigo-flow_<tool>` next to the Legacy `Convertigo_<tool>`.
+  var VIBE_FLOW_MCP_SERVER_NAME = "convertigo-flow";
+  var VIBE_FLOW_SKILL_SLUGS = ["convertigo-flow-mcp", "convertigo-flow-backend", "convertigo-flow-frontend-svelte"];
+  // Tools of the Flow MCP (tools/list of lib_flow_mcp 0.2.2, legacy relays included) that run without a permission
+  // request, as lib_ConvertigoMCP lists the Legacy ones. A tool missing here still runs: the Bridge answers the
+  // permission request of a Studio session itself.
+  var VIBE_FLOW_TOOL_NAMES = [
+    "authoring-mutate", "authoring-palette", "authoring-tree",
+    "code-analyze", "code-check", "code-discard", "code-get", "code-patch", "code-promote", "code-rg", "code-run",
+    "code-set", "code-status",
+    "databaseobject-schema", "databaseobject-search", "databaseobject-tree-get",
+    "flow-app-progress", "flow-block-get", "flow-block-mock", "flow-block-mock-list", "flow-cache-clear",
+    "flow-cache-info", "flow-catalog", "flow-fullsync-scaffold", "flow-list", "flow-node-output-schema",
+    "flow-object-remove", "flow-output-schema", "flow-project-bootstrap", "flow-project-metadata",
+    "flow-project-reference", "flow-project-remove", "flow-requestable-list", "flow-requestable-schema",
+    "flow-resource-delete", "flow-resource-get", "flow-resource-patch", "flow-resource-search", "flow-schema-reset",
+    "flow-search", "flow-sync-inputs", "flow-test",
+    "frontend-svelte-action", "frontend-svelte-actions", "frontend-svelte-asset-import",
+    "frontend-svelte-fullsync-schema", "frontend-svelte-mutate", "frontend-svelte-tree",
+    "image-describe", "log-view", "marketplace-describe", "marketplace-import", "marketplace-list",
+    "project-list", "project-list-symbols", "project-save", "project-security-audit",
+    "rag-query", "requestable-execute", "scheduler-apply", "scheduler-list", "tags-apply", "tags-get"
+  ];
   var AGENT_CAPABILITY_PROFILES = {
     generalist: {
       id: "generalist",
@@ -1229,7 +1254,7 @@
       authoringPolicy: "flow-only",
       aliases: ["flow", "flowscript", "flow-svelte", "frontbuilder-svelte"],
       capabilityIds: ["convertigo-flow", "flow-backend", "flow-frontend-svelte"],
-      supportedProviders: ["codex", "claude"],
+      supportedProviders: ["codex", "vibe", "claude"],
       mcpPath: FALLBACK_FLOW_MCP_PATH,
       mcpServerName: "convertigo-flow",
       setupProject: "lib_flow_mcp",
@@ -1589,6 +1614,85 @@
     // ignored server side; it exists only to change the cache key.
     var revision = managedMcpCatalogRevision(options);
     return revision.length ? endpointQueryParameter(url, "toolsRevision", revision) : url;
+  }
+
+  // The `Convertigo` server of a Vibe home stays on the Legacy MCP whatever the conversation profile: a `flow` profile
+  // resolves the Flow endpoint, which goes to the `convertigo-flow` server instead.
+  function vibeLegacyMcpEndpoint(endpoint) {
+    return trim(endpoint).replace(/\/api\/flow-mcp(\/?(?:[?#].*)?)$/i, "/api/mcp$1");
+  }
+
+  // The Flow MCP endpoint of the same engine for a Vibe Studio home, "" when the home gets no Flow pack: a No Code
+  // home, an endpoint that is not the Convertigo MCP, or an engine without Flow (FLOW_REQUIRED_PROJECTS, 8.5.0).
+  function vibeFlowMcpEndpoint(endpoint, options) {
+    if (normalizeSkillProfile(options || {}) === "nocode" || !usesProtectedConvertigoMcp(endpoint, options) || !flowCapabilityAvailable()) {
+      return "";
+    }
+    var legacy = vibeLegacyMcpEndpoint(endpoint);
+    var flow = legacy.replace(/\/api\/mcp(?:\/?(?:[?#].*)?)$/i, FALLBACK_FLOW_MCP_PATH);
+    return flow !== legacy ? flow : "";
+  }
+
+  function loadedProjectVersion(name) {
+    try {
+      var manager = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager;
+      var project = manager.getOriginalProjectByName(name);
+      if (project === null || typeof project === "undefined") {
+        project = manager.getProjectByName(name);
+      }
+      return project !== null && typeof project !== "undefined" && project.getVersion ? trim(project.getVersion()) : "";
+    } catch (_ignoreProjectVersion) {
+      return "";
+    }
+  }
+
+  // Identity of the Flow tool catalog and skills, for the same reason as managedMcpCatalogRevision: Vibe keeps the
+  // catalog of a server entry 24 h, and only the url can tell it the Flow stack changed under an existing home.
+  function flowMcpCatalogRevision(options) {
+    var parts = [loadedProjectVersion("lib_flow_mcp"), loadedProjectVersion("lib_flow_engine")];
+    for (var i = 0; i < VIBE_FLOW_SKILL_SLUGS.length; i++) {
+      try {
+        var source = flowSkillSourceFile(options || {}, VIBE_FLOW_SKILL_SLUGS[i]);
+        parts.push(source !== null && source.isFile() ? sha256File(source) : "");
+      } catch (_ignoreFlowSkillHash) {
+        parts.push("");
+      }
+    }
+    return trim(parts.join("")).length ? hashShort(parts.join(":")) : "";
+  }
+
+  // The Flow MCP maps only `request` (FlowMcp url mapper): toolsRevision is inert server side, a cache key for Vibe.
+  function vibeFlowMcpTransportEndpoint(endpoint, options) {
+    var revision = flowMcpCatalogRevision(options);
+    return revision.length ? endpointQueryParameter(endpoint, "toolsRevision", revision) : trim(endpoint);
+  }
+
+  // The url the `convertigo-flow` server of a Vibe home must carry, "" without a Flow pack.
+  function vibeExpectedFlowMcpUrl(endpoint, options) {
+    var flow = vibeFlowMcpEndpoint(endpoint, options);
+    return flow.length ? vibeFlowMcpTransportEndpoint(flow, options) : "";
+  }
+
+  // The X-Convertigo-* headers of a managed Vibe MCP server entry in config.toml, in the order the Bridge writes them.
+  function vibeConfigMcpHeaderLines(options) {
+    var lines = [];
+    var viewerDebugPort = intValue(options && options.viewerDebugPort, 0, 0, 65535);
+    if (normalizeSkillProfile(options) === "nocode") {
+      lines.push('"X-Convertigo-Agent-Profile" = "nocode"');
+    }
+    if (viewerDebugPort >= 1024) {
+      lines.push('"X-Convertigo-Viewer-Debug-Port" = "' + String(viewerDebugPort) + '"');
+      if (mcpConversationId(options).length) {
+        lines.push('"X-Convertigo-Conversation-Id" = "' + mcpConversationId(options) + '"');
+      }
+    }
+    if (revealModeEnabled(options, null)) {
+      lines.push('"X-Convertigo-Reveal-Mode" = "true"');
+    }
+    if (mcpNoLogEnabled(options)) {
+      lines.push('"X-Convertigo-No-Log" = "true"');
+    }
+    return lines;
   }
 
   function intValue(value, defaultValue, minValue, maxValue) {
@@ -2736,6 +2840,187 @@
     return report;
   }
 
+  // Flow capability pack of a Vibe Studio home. The `convertigo-flow` server itself is written with the rest of
+  // config.toml (writeLocalVibeConfig, recorded in the config intent); this adds what `_setupVibe` adds for the
+  // Convertigo server, after it ran: the skills, their place in `enabled_skills` (an explicit list hides every skill
+  // it does not name), the tool permissions, and the routing between the two servers in AGENTS.md. Without Flow, it
+  // removes them.
+  var VIBE_STUDIO_ROUTING_HEADING = "## Convertigo Studio routing: Legacy and Flow";
+
+  function vibeStudioRoutingSection() {
+    return [
+      VIBE_STUDIO_ROUTING_HEADING,
+      "",
+      "This is a Low Code Studio session. Both the `Convertigo` (Legacy) and `" + VIBE_FLOW_MCP_SERVER_NAME + "` (Flow) MCP servers are installed in this Vibe home, on the same engine.",
+      "The No Code capability is unavailable to the Studio user and must never be used from this session. Route once before authoring:",
+      "",
+      "1. An explicit user request for Flow, FlowScript, or Flow Svelte wins: use the `convertigo-flow-mcp` skill, then the `convertigo-flow-backend` or `convertigo-flow-frontend-svelte` specialist skill the task needs, and the `" + VIBE_FLOW_MCP_SERVER_NAME + "` MCP server (`" + VIBE_FLOW_MCP_SERVER_NAME + "_*` tools).",
+      "2. An explicit user request for legacy Convertigo or NGX wins: use the `convertigo-vibe-generalist` skill and the `Convertigo` MCP server (`Convertigo_*` tools).",
+      "3. For an existing project, a FlowEngine or Flow frontend selects Flow; legacy Sequences, Connectors, Application, or NGX objects select Legacy for the corresponding work.",
+      "4. A mixed project may require both routes, but each mutation must use the MCP that owns the target model. Never edit Convertigo YAML or generated files to cross the boundary.",
+      "5. If a new-project request is genuinely ambiguous, prefer the technology named by the user. Ask one short question only when the choice changes the requested product behavior.",
+      "",
+      "- The Flow skills call the Legacy server `convertigo`: in this Vibe home it is `Convertigo`.",
+      "- Treat the conversation profile as a routing hint, not as a tool-access boundary. Keep one conversation and one history when switching between Legacy and Flow.",
+      "- Do not fall back from one MCP to the other after a tool error. Fix the owning capability or report the configuration defect."
+    ].join("\n");
+  }
+
+  // AGENTS.md with the routing section placed before the compaction rules (or at the end), or without it.
+  function mergeVibeStudioRouting(text, enabled) {
+    var source = String(text == null ? "" : text).replace(/\r\n?/g, "\n");
+    var start = source.indexOf(VIBE_STUDIO_ROUTING_HEADING);
+    var without = source;
+    if (start >= 0) {
+      var end = source.indexOf("\n## ", start + VIBE_STUDIO_ROUTING_HEADING.length);
+      without = (source.substring(0, start).replace(/\s+$/, "") + (end >= 0 ? "\n\n" + source.substring(end + 1) : "")).replace(/\s+$/, "") + "\n";
+    }
+    if (!enabled) {
+      return without;
+    }
+    var at = without.indexOf(VIBE_COMPACTION_RULES_HEADING);
+    return at >= 0
+      ? without.substring(0, at).replace(/\s+$/, "") + "\n\n" + vibeStudioRoutingSection() + "\n\n" + without.substring(at)
+      : without.replace(/\s+$/, "") + "\n\n" + vibeStudioRoutingSection() + "\n";
+  }
+
+  function tomlStringArrayValues(body) {
+    var values = [];
+    var pattern = /"((?:[^"\\]|\\.)*)"|'([^']*)'/g;
+    var match;
+    while ((match = pattern.exec(String(body || ""))) !== null) {
+      values.push(match[0].charAt(0) === '"' ? String(match[1]).replace(/\\(.)/g, "$1") : String(match[2]));
+    }
+    return values;
+  }
+
+  function vibeFlowToolTableName(line) {
+    var match = /^\s*\[\s*tools\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*\]\s*$/.exec(String(line || ""));
+    var name = match === null ? "" : String(match[1] || match[2] || "");
+    return name.indexOf(VIBE_FLOW_MCP_SERVER_NAME + "_") === 0 ? name : "";
+  }
+
+  // config.toml with (enabled) or without the Flow skills in `enabled_skills` and the `[tools.convertigo-flow_*]`
+  // permissions. Vibe rewrites the file at each session start (multi-line arrays, bare keys): both forms are read.
+  function mergeVibeFlowPackConfig(text, enabled) {
+    var next = String(text == null ? "" : text).replace(/\r\n?/g, "\n");
+    var skillsMatch = /^enabled_skills\s*=\s*\[([^\]]*)\]/m.exec(next);
+    if (skillsMatch !== null) {
+      var current = tomlStringArrayValues(skillsMatch[1]);
+      var wanted = [];
+      for (var i = 0; i < current.length; i++) {
+        if (VIBE_FLOW_SKILL_SLUGS.indexOf(current[i]) < 0 && wanted.indexOf(current[i]) < 0) {
+          wanted.push(current[i]);
+        }
+      }
+      if (enabled) {
+        wanted = wanted.concat(VIBE_FLOW_SKILL_SLUGS);
+      }
+      if (wanted.join("\n") !== current.join("\n")) {
+        next = next.substring(0, skillsMatch.index) + "enabled_skills = " + tomlArray(wanted)
+          + next.substring(skillsMatch.index + skillsMatch[0].length);
+      }
+    }
+    var lines = next.split("\n");
+    if (!enabled) {
+      var kept = [];
+      var skipping = false;
+      for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+        if (/^\s*\[/.test(lines[lineIndex])) {
+          skipping = vibeFlowToolTableName(lines[lineIndex]).length > 0;
+        }
+        if (!skipping) {
+          kept.push(lines[lineIndex]);
+        }
+      }
+      return kept.length === lines.length ? next : kept.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n*$/, "\n");
+    }
+    var present = {};
+    for (var presentIndex = 0; presentIndex < lines.length; presentIndex++) {
+      var tableName = vibeFlowToolTableName(lines[presentIndex]);
+      if (tableName.length) {
+        present[tableName] = true;
+      }
+    }
+    var added = [];
+    for (var toolIndex = 0; toolIndex < VIBE_FLOW_TOOL_NAMES.length; toolIndex++) {
+      var toolName = VIBE_FLOW_MCP_SERVER_NAME + "_" + VIBE_FLOW_TOOL_NAMES[toolIndex];
+      if (present[toolName] !== true) {
+        added.push("[tools." + toolName + "]", 'permission = "always"', "");
+      }
+    }
+    if (!added.length) {
+      return next;
+    }
+    return next.replace(/\n*$/, "\n\n") + added.join("\n").replace(/\n*$/, "\n");
+  }
+
+  function syncVibeFlowPack(options, vibeHome, mcpEndpoint, report) {
+    options = options || {};
+    if (report.ok !== true || boolValue(options.dryRun, false)) {
+      return report;
+    }
+    var flowMcpUrl = vibeExpectedFlowMcpUrl(mcpEndpoint, options);
+    var enabled = flowMcpUrl.length > 0;
+    try {
+      var skillsDir = new File(vibeHome, "skills");
+      var removed = [];
+      var errors = [];
+      for (var i = 0; i < VIBE_FLOW_SKILL_SLUGS.length; i++) {
+        var slug = VIBE_FLOW_SKILL_SLUGS[i];
+        var entry = "skills/" + slug + "/SKILL.md";
+        if (enabled) {
+          var source = flowSkillSourceFile(options, slug);
+          if (source === null) {
+            throw new Error("Missing Flow skill source: " + slug);
+          }
+          var write = writeManagedTextFile(new File(new File(skillsDir, slug), "SKILL.md"), readTextFile(source), false);
+          (write.status === "unchanged" ? report.reused : report.copied).push(entry);
+        } else {
+          var skillDir = new File(skillsDir, slug);
+          if (skillDir.exists()) {
+            deleteDirectoryTree(skillDir, removed, errors);
+          }
+        }
+      }
+      if (errors.length) {
+        throw new Error("Unable to remove the Flow skills: " + JSON.stringify(errors));
+      }
+      var configFile = new File(vibeHome, "config.toml");
+      if (configFile.isFile()) {
+        var config = String(readTextFile(configFile));
+        var mergedConfig = mergeVibeFlowPackConfig(config, enabled);
+        if (mergedConfig !== config.replace(/\r\n?/g, "\n")) {
+          writeTextFile(configFile, mergedConfig);
+          report.generated.push("config.toml (" + (enabled ? "Flow capability pack" : "Flow capability pack removed") + ")");
+        }
+      }
+      var agentsFile = new File(vibeHome, "AGENTS.md");
+      if (agentsFile.isFile()) {
+        var agents = String(readTextFile(agentsFile));
+        var mergedAgents = mergeVibeStudioRouting(agents, enabled);
+        if (mergedAgents !== agents) {
+          writeTextFile(agentsFile, mergedAgents);
+          report.generated.push("AGENTS.md (" + VIBE_STUDIO_ROUTING_HEADING.replace(/^#+\s*/, "") + ")");
+        }
+      }
+      report.flowPackStatus = enabled ? "installed" : (removed.length ? "removed" : "absent");
+      if (enabled) {
+        report.resolvedFlowMcpUrl = flowMcpUrl;
+        report.message = "Convertigo Vibe skills synchronized with Legacy and Flow capabilities";
+      }
+      if (removed.length) {
+        report.removed = removed;
+      }
+    } catch (e) {
+      report.ok = false;
+      report.flowPackStatus = "error";
+      report.error = String(e);
+      report.message = "Unable to install the Flow capability pack in the Vibe home";
+    }
+    return report;
+  }
+
   function setupCodexFromMcpProject(options, codexHome, mcpEndpoint, profile) {
     var capabilityProfile = agentCapabilityProfile({ agentProfile: profile });
     var skillKey = capabilityProfile.setupSkillKey;
@@ -2945,7 +3230,8 @@
       candidates.push(new File(explicitFile, "_flow/resources/skills/" + skillSlug + "/SKILL.md"));
       candidates.push(new File(new File(new File(new File(explicitFile, "libs"), "flow"), "resources"), "skills/" + skillSlug + "/SKILL.md"));
     }
-    // lib_flow_mcp serves its skills from _flow/resources/skills; libs/flow/resources/skills is the former layout
+    // `_flow/resources/skills` is where lib_flow_mcp._setupCodex reads them since the `_flow` layout,
+    // `libs/flow/resources/skills` the layout before it.
     var projectDir = projectDirectoryByName("lib_flow_mcp");
     if (projectDir !== null) {
       candidates.push(new File(projectDir, "_flow/resources/skills/" + skillSlug + "/SKILL.md"));
@@ -4676,12 +4962,6 @@
       report.message = "Skill synchronization disabled by request";
       return report;
     }
-    if (profile === "flow") {
-      report.ok = false;
-      report.skipped = true;
-      report.message = "The Flow capability pack currently requires the Codex provider";
-      return report;
-    }
     var home = trim(homePath);
     if (!home.length) {
       report.skipped = true;
@@ -4689,7 +4969,11 @@
       return report;
     }
     if (profile !== "nocode") {
-      return setupVibeFromMcpProject(options, new File(home), resolveMcpEndpoint(options));
+      // A Studio home, as for Codex (setupCodexStudio): the Legacy pack of lib_ConvertigoMCP._setupVibe, then the Flow
+      // pack when the engine has Flow. The `flow` profile is a routing hint and gets the same home.
+      var studioMcpEndpoint = resolveMcpEndpoint(options);
+      var studioReport = setupVibeFromMcpProject(options, new File(home), vibeLegacyMcpEndpoint(studioMcpEndpoint));
+      return syncVibeFlowPack(options, new File(home), studioMcpEndpoint, studioReport);
     }
     report.attempted = true;
     try {
@@ -7659,6 +7943,7 @@
       providerNames: "",
       revealMode: false,
       noLog: false,
+      flowEndpoint: "",
       valid: false
     };
     if (!info.exists) {
@@ -7666,6 +7951,15 @@
     }
     var text = readTextFile(file);
     info.hasMcpServers = text.indexOf("[[mcp_servers]]") >= 0;
+    var flowPattern = /\[\[mcp_servers\]\]([\s\S]*?)(?=\n\[\[mcp_servers\]\]|$)/g;
+    var flowMatch;
+    while ((flowMatch = flowPattern.exec(text)) !== null) {
+      if (new RegExp("name\\s*=\\s*[\"']" + VIBE_FLOW_MCP_SERVER_NAME + "[\"']").test(flowMatch[1])) {
+        var flowUrlMatch = flowMatch[1].match(/url\s*=\s*["']([^"']+)["']/);
+        info.flowEndpoint = flowUrlMatch ? flowUrlMatch[1] : "";
+        break;
+      }
+    }
     var blockPattern = /\[\[mcp_servers\]\]([\s\S]*?)(?=\n\[\[mcp_servers\]\]|$)/g;
     var blockMatch;
     while ((blockMatch = blockPattern.exec(text)) !== null) {
@@ -7726,11 +8020,12 @@
   // every single start rewrote a byte-identical file and pruned the MCP descriptor cache.
   // The intent is recorded beside config.toml instead, in a file nothing else touches.
   var VIBE_CONFIG_INTENT_FILE = ".convertigo-bridge-config";
-  // The subset of the intent that describes the Convertigo/Playwright MCP server entries.
+  // The subset of the intent that describes the Convertigo/Flow/Playwright MCP server entries.
   // Only a change here invalidates the descriptor cache Vibe keyed on the previous entry.
   var VIBE_CONFIG_MCP_INTENT_KEYS = {
     bearerTokenEnv: true,
     endpoint: true,
+    flowEndpoint: true,
     noLog: true,
     playwrightCommand: true,
     playwrightEndpoint: true,
@@ -8113,41 +8408,45 @@
       '[[mcp_servers]]',
       'name = "Convertigo"',
       'transport = "http"',
-      'url = "' + tomlString(vibeMcpTransportEndpoint(mcpEndpoint, options)) + '"',
+      'url = "' + tomlString(vibeMcpTransportEndpoint(vibeLegacyMcpEndpoint(mcpEndpoint), options)) + '"',
       'startup_timeout_sec = 60.0',
       ''
     );
-    var viewerDebugPort = intValue(options && options.viewerDebugPort, 0, 0, 65535);
+    var authBlockLines = [
+      '[mcp_servers.auth]',
+      'type = "static"',
+      'api_key_env = "' + tomlString(mcpBearerTokenEnv(options)) + '"',
+      'api_key_header = "Authorization"',
+      'api_key_format = "Bearer {token}"',
+      ''
+    ];
     if (usesProtectedConvertigoMcp(mcpEndpoint, options)) {
-      lines.push(
-        '[mcp_servers.auth]',
-        'type = "static"',
-        'api_key_env = "' + tomlString(mcpBearerTokenEnv(options)) + '"',
-        'api_key_header = "Authorization"',
-        'api_key_format = "Bearer {token}"',
-        ''
-      );
-      var authHeaderLines = [];
-      if (normalizeSkillProfile(options) === "nocode") {
-        authHeaderLines.push('"X-Convertigo-Agent-Profile" = "nocode"');
-      }
-      if (viewerDebugPort >= 1024) {
-        authHeaderLines.push('"X-Convertigo-Viewer-Debug-Port" = "' + String(viewerDebugPort) + '"');
-        if (mcpConversationId(options).length) {
-          authHeaderLines.push('"X-Convertigo-Conversation-Id" = "' + mcpConversationId(options) + '"');
-        }
-      }
-      if (revealModeEnabled(options, null)) {
-        authHeaderLines.push('"X-Convertigo-Reveal-Mode" = "true"');
-      }
-      if (mcpNoLogEnabled(options)) {
-        authHeaderLines.push('"X-Convertigo-No-Log" = "true"');
-      }
+      lines = lines.concat(authBlockLines);
+      var authHeaderLines = vibeConfigMcpHeaderLines(options);
       if (authHeaderLines.length) {
         lines.push('[mcp_servers.auth.headers]');
         lines = lines.concat(authHeaderLines);
         lines.push('');
       }
+    }
+    // The Flow server of a Studio home: same engine, same token (CONVERTIGO_MCP_TOKEN) and the same headers as the
+    // Convertigo server, plus the guidance version `_setupVibe` adds to that one. It is declared here only, never as
+    // an ACP session server: a session server replaces the whole config entry, timeouts included.
+    var flowMcpUrl = vibeExpectedFlowMcpUrl(mcpEndpoint, options);
+    if (flowMcpUrl.length) {
+      lines.push(
+        '[[mcp_servers]]',
+        'name = "' + VIBE_FLOW_MCP_SERVER_NAME + '"',
+        'transport = "http"',
+        'url = "' + tomlString(flowMcpUrl) + '"',
+        'startup_timeout_sec = 60.0',
+        'tool_timeout_sec = 600.0',
+        ''
+      );
+      lines = lines.concat(authBlockLines);
+      lines.push('[mcp_servers.auth.headers]');
+      lines = lines.concat(vibeConfigMcpHeaderLines(options));
+      lines.push('"X-Convertigo-Guidance-Version" = "' + tomlString(mcpProjectGuidanceVersion()) + '"', '');
     }
     var playwright = vibePlaywrightServer(options);
     if (playwright !== null) {
@@ -12485,10 +12784,32 @@
         value: mcpConversationId(options)
       });
     }
+    // Vibe merges the session servers over config.toml by name and keeps the session entry whole: the headers of the
+    // `Convertigo` entry of config.toml never reach the engine. The ones the engine and the MCP read go here too, or
+    // every MCP request is logged in full (X-Convertigo-No-Log) and Reveal mode is lost. The No Code profile header is
+    // left as it was: it narrows the MCP catalog, a change of its own.
+    if (usesProtectedConvertigoMcp(mcpEndpoint, options)) {
+      headers.push({
+        name: "X-Convertigo-Guidance-Version",
+        value: mcpProjectGuidanceVersion()
+      });
+      if (revealModeEnabled(options, null)) {
+        headers.push({
+          name: "X-Convertigo-Reveal-Mode",
+          value: "true"
+        });
+      }
+      if (mcpNoLogEnabled(options)) {
+        headers.push({
+          name: "X-Convertigo-No-Log",
+          value: "true"
+        });
+      }
+    }
     return [{
       type: "http",
       name: "Convertigo",
-      url: vibeMcpTransportEndpoint(mcpEndpoint, options),
+      url: vibeMcpTransportEndpoint(vibeLegacyMcpEndpoint(mcpEndpoint), options),
       headers: headers
     }].concat(typeof tigoVibeServers === "function" ? tigoVibeServers(options) : []);
   }

@@ -129,8 +129,38 @@ same context.
   the managed `config.toml` (`transport = "stdio"`). Settings probes
   (`discoverVibeSettings`) must pass `disableViewerDebugPortReservation` so they
   never lease ports.
-- Playwright tool names are `mcp__playwright__browser_*` for Claude; the Flow
-  capability pack still requires Codex.
+- Playwright tool names are `mcp__playwright__browser_*` for Claude; Claude
+  does not get the Flow capability pack (Codex and Vibe do).
+
+## Flow capability pack for Vibe
+
+- A Vibe Studio home (provider `vibe` or the `convertigo` gateway, any non
+  No Code profile, `flow` included) gets the Flow pack when
+  `flowCapabilityAvailable()` holds, as `setupCodexStudio` does for Codex.
+- `writeLocalVibeConfig` declares a second `[[mcp_servers]]`,
+  `name = "convertigo-flow"` (the server the Flow skills name; its tools read
+  `convertigo-flow_<tool>`), on `/api/flow-mcp` of the same engine with
+  `toolsRevision=<flowMcpCatalogRevision()>`, the same static auth
+  (`api_key_env = "CONVERTIGO_MCP_TOKEN"`) and X-Convertigo-* headers as
+  `Convertigo`, plus `X-Convertigo-Guidance-Version`. The `Convertigo` server
+  always stays on `/api/mcp` (`vibeLegacyMcpEndpoint`), even for a `flow`
+  profile. The recorded intent carries `flowEndpoint` (only when the pack is
+  present, so homes without Flow are not rewritten), and the reuse check reads
+  the Flow url back from config.toml.
+- After `_setupVibe`, `syncVibeFlowPack` copies the three Flow skills from
+  `lib_flow_mcp/_flow/resources/skills`, adds them to `enabled_skills` (an
+  explicit list hides every skill it does not name), adds
+  `[tools.convertigo-flow_*]` permissions for `VIBE_FLOW_TOOL_NAMES` and the
+  routing section of AGENTS.md (before the compaction rules). Without Flow it
+  removes all of it. A missing Flow skill source is a configuration error.
+- The Flow server is never an ACP session server. Vibe merges the session
+  servers over config.toml by name (`WithUnionMerge(merge_key="name")`) and keeps
+  the session entry whole: its config headers, `tool_timeout_sec` and
+  `startup_timeout_sec` are dropped. That is also why `buildMcpServers` repeats
+  `X-Convertigo-No-Log`, `X-Convertigo-Reveal-Mode` and
+  `X-Convertigo-Guidance-Version` on the session `Convertigo` server: the ones
+  of config.toml never reached the engine.
+- Run `node --test tests/vibe_flow_pack.test.js`.
 
 ## Requests waiting for the panel
 

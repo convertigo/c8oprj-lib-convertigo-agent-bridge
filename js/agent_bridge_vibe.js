@@ -80,7 +80,9 @@
         // A home written before the `mistral-direct` provider existed only declares `mistral`:
         // rewrite it once so the managed GLM presets get the generic backend, then reuse it.
         var expectedProviderNames = expectedVibeProviderNames(profile);
-        var expectedEndpoint = vibeMcpTransportEndpoint(setup.mcpEndpoint, options);
+        var expectedEndpoint = vibeMcpTransportEndpoint(vibeLegacyMcpEndpoint(setup.mcpEndpoint), options);
+        // The Flow server of a Studio home with Flow ("" otherwise): its url carries the Flow catalog revision.
+        var expectedFlowEndpoint = vibeExpectedFlowMcpUrl(setup.mcpEndpoint, options);
         var expectedModel = options.model || options.agentModel;
         // What a write would produce. `lib_ConvertigoMCP._setupVibe` post-processes config.toml
         // after the write (see VIBE_CONFIG_INTENT_FILE), so the full MCP url can only be
@@ -107,6 +109,10 @@
         if (expectedToolPolicy.length) {
           intentFields.toolPolicy = expectedToolPolicy;
         }
+        // Only a home with the Flow pack records it, so homes without Flow keep the intent they were written with.
+        if (expectedFlowEndpoint.length) {
+          intentFields.flowEndpoint = expectedFlowEndpoint;
+        }
         var expectedIntent = vibeConfigIntent(intentFields);
         var recordedIntent = readVibeConfigIntent(setup.vibeHome);
         // The file-derived checks stay: they catch a config.toml deleted or hand-edited behind
@@ -116,6 +122,7 @@
             && recordedIntent === expectedIntent
             && trim(setup.config.selected.providerNames) === expectedProviderNames
             && mcpEndpointBaseUrl(setup.config.selected.endpoint) === mcpEndpointBaseUrl(expectedEndpoint)
+            && mcpEndpointBaseUrl(setup.config.selected.flowEndpoint) === mcpEndpointBaseUrl(expectedFlowEndpoint)
             && trim(setup.config.selected.bearerTokenEnv) === expectedBearerEnv
             && Number(setup.config.selected.viewerDebugPort || 0) === (expectedBearerEnv.length ? expectedViewerDebugPort : 0)
             && trim(setup.config.selected.playwrightEndpoint) === expectedPlaywrightEndpoint
