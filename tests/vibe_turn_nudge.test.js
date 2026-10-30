@@ -221,3 +221,21 @@ test("a closing that hands over to the user is not nudged, even after a write", 
     assert.equal(types(entry, "turn/nudge").length, 0, text);
   }
 });
+
+// A replay of 30/10 ended a turn on 'run_typescriptatischeck{"code": "async function main() {...}"}': the call written out.
+test("a call written out as text (tool name, maybe glued to a stray word, then JSON arguments) is nudged", () => {
+  const glued = turn(7);
+  play(glued, [say('run_typescriptatischeck{"code": "async function main() {\\n  await tools.mcp_playwright.browser_snapshot({});\\n}"}'), answer(7)]);
+  const nudge = types(glued, "turn/nudge")[0].data;
+  assert.equal(nudge.reason, "printed_call");
+  assert.equal(nudge.tool, "run_typescript");
+  assert.match(prompts(glued)[0].params.prompt[0].text, /wrote a call to the tool `run_typescript` as text instead of making it/);
+  const mcp = turn(8);
+  play(mcp, [say('mcp_Convertigo.databaseobject_tree_get {"target": "App"}'), answer(8)]);
+  assert.equal(types(mcp, "turn/nudge")[0].data.tool, "mcp_Convertigo.databaseobject_tree_get");
+  for (const [id, text] of [[9, 'Le résultat est {"rows": 3}'], [10, 'task{"a": 1}'], [11, 'run_typescript{not json}'], [12, 'Voici la config : {"a": 1}']]) {
+    const entry = turn(id);
+    play(entry, [say(text), answer(id)]);
+    assert.equal(types(entry, "turn/nudge").length, 0, text);
+  }
+});

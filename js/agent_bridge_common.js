@@ -11883,6 +11883,33 @@
     return "";
   }
 
+  // A call written out as text: a compound tool name at the start (glued to a stray word or not), then its JSON arguments,
+  // and nothing else ('run_typescriptatischeck{"code": "async function main() {...}"}' in a replay of 30/10).
+  function vibePrintedCallOf(entry, text) {
+    var body = trim(text).replace(/^`+|`+$/g, "");
+    var brace = body.indexOf("{");
+    if (brace <= 0 || body.charAt(body.length - 1) !== "}") {
+      return "";
+    }
+    var head = body.substring(0, brace).replace(/\s+$/, "");
+    if (!/^[A-Za-z_][A-Za-z0-9_.\-]*$/.test(head) || head.length > 80) {
+      return "";
+    }
+    try {
+      JSON.parse(body.substring(brace));
+    } catch (_notArguments) {
+      return "";
+    }
+    var names = VIBE_BUILTIN_TOOL_NAMES.concat(Object.keys(entry.seenToolNames || {}));
+    for (var i = 0; i < names.length; i++) {
+      if (/[_.]/.test(names[i]) && head.toLowerCase().indexOf(names[i]) === 0) {
+        return head.substring(0, names[i].length);
+      }
+    }
+    var mcp = /^(?:mcp_)?(?:Convertigo|playwright)[._][A-Za-z0-9_\-]+/i.exec(head);
+    return mcp ? mcp[0] : "";
+  }
+
   function vibeAnnouncesNextStep(text) {
     var body = trim(text);
     if (!body.length || body.length > 600 || body.indexOf("?") >= 0 || VIBE_ASKS_USER.test(body) || VIBE_HANDS_OVER.test(body)) {
@@ -11904,6 +11931,10 @@
     if (tool.length) {
       return { reason: "tool_name", tool: tool, text: text };
     }
+    var printed = text.length ? vibePrintedCallOf(entry, text) : "";
+    if (printed.length) {
+      return { reason: "printed_call", tool: printed, text: text };
+    }
     // An announcement only after the turn acted: a plan or an explanation asked by the user ends on "ensuite, je
     // créerai..." with no call, or after reads only, and a nudge would push the agent into changing the project.
     return entry.turnActed === true && vibeAnnouncesNextStep(text) ? { reason: "announcement", tool: "", text: text } : null;
@@ -11917,6 +11948,8 @@
     var count = Number(entry.turnNudges || 0) + 1;
     var prompt = nudge.reason === "tool_name"
       ? "Note from the Agent Bridge: your last message was only the name of the tool `" + nudge.tool + "`, with no call to it, so your turn ended. Call the tool now, or give your final answer."
+      : nudge.reason === "printed_call"
+      ? "Note from the Agent Bridge: your last message wrote a call to the tool `" + nudge.tool + "` as text instead of making it, so your turn ended. Make the call now, or give your final answer."
       : "Note from the Agent Bridge: your last message announced a next step but made no tool call, so your turn ended. If you meant to do it, do it now with a tool call. If the user only asked for a plan or an explanation, or you need their answer, reply with one short closing sentence instead.";
     var nudged;
     try {
@@ -11939,6 +11972,8 @@
     });
     var line = nudge.reason === "tool_name"
       ? "Agent Bridge: the agent ended its turn on the tool name `" + nudge.tool + "` without calling it; it was asked to go on (" + count + "/" + VIBE_TURN_NUDGES_MAX + ")."
+      : nudge.reason === "printed_call"
+      ? "Agent Bridge: the agent ended its turn on a call to `" + nudge.tool + "` written as text; it was asked to make it (" + count + "/" + VIBE_TURN_NUDGES_MAX + ")."
       : "Agent Bridge: the agent ended its turn announcing a next step without doing it; it was asked to go on (" + count + "/" + VIBE_TURN_NUDGES_MAX + ").";
     pushEvent(entry, "progress/message", { text: line, nudge: nudge.reason });
     try { log.info("(lib_ConvertigoAgentBridge) " + line + " Handle " + entry.handle + ", ended text: " + said); } catch (_ignoreNudgeLog) {}
