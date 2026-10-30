@@ -160,6 +160,23 @@ same context.
   `X-Convertigo-No-Log`, `X-Convertigo-Reveal-Mode` and
   `X-Convertigo-Guidance-Version` on the session `Convertigo` server: the ones
   of config.toml never reached the engine.
+- One MCP facade for a Flow conversation (`vibeFlowFacade`): when the
+  conversation profile is `flow` (explicit, or a Flow primary project), the
+  Vibe home declares `convertigo-flow` only, in config.toml (no `Convertigo`
+  entry, no ACP session server), and the Convertigo tools a Flow project needs
+  come through the relay of lib_flow_mcp (`LEGACY_RELAY_TOOLS`).
+  `lib_ConvertigoMCP._setupVibe` is not run for such a home:
+  `setupVibeFlowFacadeHome` writes its AGENTS.md (no Legacy guidance), the
+  plan sync hook, `enabled_skills` with the Flow skills only and the built-in
+  tool permissions `_setupVibe` would give. `inspectVibeConfig` reads the auth
+  and headers of a Flow-only config from `convertigo-flow` (`flowOnly`), and
+  the expected `endpoint` of its intent is "". Codex keeps both servers: its
+  Studio home is shared by the user's conversations, and profiles are routing
+  hints there.
+- Vibe has no MCP `resources/read`: AGENTS.md tells the agent to read a Flow
+  guide with `flow-resource-get` and its `uri` (lib_flow_mcp 0.2.4 answers it
+  from the MCP resource). A failed `mcp_convertigo_flow.*` call counts as a lost
+  MCP like a `mcp_Convertigo.*` one (`vibeMcpLostReason`).
 - Run `node --test tests/vibe_flow_pack.test.js`.
 
 ## Requests waiting for the panel

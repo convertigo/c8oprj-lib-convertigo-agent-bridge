@@ -116,16 +116,85 @@ test("without the Flow projects, or in No Code, the home has no Flow server", ()
   withFlow(false);
 });
 
-test("a flow profile keeps Convertigo on the Legacy MCP and the Flow MCP on convertigo-flow", () => {
+test("the Convertigo server of a Studio home always stays on the Legacy MCP", () => {
   withFlow(true);
   assert.equal(vibeLegacyMcpEndpoint(FLOW), LEGACY);
   assert.equal(vibeLegacyMcpEndpoint(LEGACY + "?jsonOnly=true"), LEGACY + "?jsonOnly=true");
   assert.equal(vibeFlowMcpEndpoint(LEGACY + "?jsonOnly=true", {}), FLOW);
-  const blocks = serverBlocks(vibeConfig(FLOW, { agentProfile: "flow", userId: "studio" }));
+  const blocks = serverBlocks(vibeConfig(FLOW, { userId: "studio" }));
   assert.match(blocks.Convertigo, /^url = "http:\/\/localhost:18080\/convertigo\/api\/mcp\?/m);
   assert.match(blocks["convertigo-flow"], /^url = "http:\/\/localhost:18080\/convertigo\/api\/flow-mcp\?toolsRevision=rev123"$/m);
-  assert.match(buildMcpServers(FLOW, { agentProfile: "flow", userId: "studio" })[0].url, /\/api\/mcp\?/);
+  assert.match(buildMcpServers(FLOW, { userId: "studio" })[0].url, /\/api\/mcp\?/);
   withFlow(false);
+});
+
+test("a Flow conversation (flow profile) gets one MCP facade: convertigo-flow only", () => {
+  withFlow(true);
+  const options = { agentProfile: "flow", userId: "studio", viewerDebugPort: 45991, conversationId: "agent-9", mcpBearerToken: "secret-jwt" };
+  assert.equal(vibeFlowFacade(LEGACY, options), true);
+  assert.equal(vibeFlowFacade(LEGACY, { userId: "studio" }), false, "a Studio conversation keeps both servers");
+  const text = vibeConfig(LEGACY, options);
+  const blocks = serverBlocks(text);
+  assert.deepEqual(Object.keys(blocks), ["convertigo-flow"], "no Convertigo server");
+  assert.match(blocks["convertigo-flow"], /api_key_env = "CONVERTIGO_MCP_TOKEN"/);
+  assert.match(blocks["convertigo-flow"], /"X-Convertigo-No-Log" = "true"/);
+  assert.match(blocks["convertigo-flow"], /"X-Convertigo-Conversation-Id" = "agent-9"/);
+  assert.doesNotMatch(text, /name = "Convertigo"|secret-jwt/);
+  assert.deepEqual(buildMcpServers(LEGACY, options), [], "no session server: it would replace the config entry whole");
+  withFlow(false);
+  assert.equal(vibeFlowFacade(LEGACY, options), false, "without Flow on the engine, the profile falls back");
+  assert.deepEqual(Object.keys(serverBlocks(vibeConfig(LEGACY, options))), ["Convertigo"]);
+});
+
+test("a Flow-only config.toml enables the Flow skills only and allows the built-in tools", () => {
+  const bare = '# Generated\nactive_model = "glm-5-3"\n\n[[mcp_servers]]\nname = "convertigo-flow"\n';
+  const merged = mergeVibeFlowPackConfig(bare, true, true);
+  assert.ok(merged.startsWith('enabled_skills = ["convertigo-flow-mcp", "convertigo-flow-backend", "convertigo-flow-frontend-svelte"]\n'));
+  for (const tool of ["skill", "read", "grep", "bash", "write_file", "edit"]) {
+    assert.match(merged, new RegExp("\\[tools\\." + tool + '\\]\npermission = "always"'), tool);
+  }
+  assert.match(merged, /\[tools\.convertigo-flow_project-save\]/);
+  assert.equal(mergeVibeFlowPackConfig(merged, true, true), merged, "idempotent");
+  const legacy = mergeVibeFlowPackConfig(VIBE_REWRITTEN, true, true);
+  assert.match(legacy, /^enabled_skills = \["convertigo-flow-mcp", "convertigo-flow-backend", "convertigo-flow-frontend-svelte"\]$/m,
+    "the Legacy skill of an earlier profile of the home is no longer enabled");
+  assert.equal(legacy.split("[tools.skill]").length, 2, "an existing permission is not repeated");
+});
+
+test("a Flow-only Vibe home is read back as valid, with its headers", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibe-flow-only-"));
+  const file = path.join(dir, "config.toml");
+  const saved = { readTextFile };
+  readTextFile = (f) => fs.readFileSync(f.p, "utf8");
+  try {
+    withFlow(true);
+    fs.writeFileSync(file, vibeConfig(LEGACY, { agentProfile: "flow", userId: "studio", viewerDebugPort: 45991, conversationId: "agent-9" }));
+    const info = inspectVibeConfig(new FakeFile(file));
+    assert.equal(info.valid, true);
+    assert.equal(info.flowOnly, true);
+    assert.equal(info.hasConvertigoServer, false);
+    assert.equal(info.endpoint, "");
+    assert.equal(info.flowEndpoint, FLOW + "?toolsRevision=rev123");
+    assert.equal(info.bearerTokenEnv, "CONVERTIGO_MCP_TOKEN");
+    assert.equal(info.viewerDebugPort, 45991);
+    assert.equal(info.conversationId, "agent-9");
+    assert.equal(info.noLog, true);
+    // re-serialized by Vibe: bare header keys
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/"(X-Convertigo-[A-Za-z-]+)"/g, "$1"));
+    assert.equal(inspectVibeConfig(new FakeFile(file)).noLog, true);
+  } finally {
+    readTextFile = saved.readTextFile;
+    withFlow(false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed call of a Flow tool counts as a lost MCP, as a Convertigo one", () => {
+  const failure = { code: Object.keys(VIBE_MCP_LOST_CODES)[0] };
+  assert.equal(vibeMcpLostReason("mcp_convertigo_flow.project_save", failure, null), "convertigo_mcp_suspended");
+  assert.equal(vibeMcpLostReason("convertigo-flow_project-save", failure, null), "convertigo_mcp_suspended");
+  assert.equal(vibeMcpLostReason("mcp_Convertigo.project_save", failure, null), "convertigo_mcp_suspended");
+  assert.equal(vibeMcpLostReason("mcp_playwright.browser_click", failure, null), "");
 });
 
 const VIBE_REWRITTEN = [
@@ -289,7 +358,7 @@ test("the reuse check of a Vibe home covers the Flow server", () => {
   assert.match(vibeSource, /var expectedFlowEndpoint = vibeExpectedFlowMcpUrl\(setup\.mcpEndpoint, options\);/);
   assert.match(vibeSource, /if \(expectedFlowEndpoint\.length\) \{\s*intentFields\.flowEndpoint = expectedFlowEndpoint;/);
   assert.match(vibeSource, /mcpEndpointBaseUrl\(setup\.config\.selected\.flowEndpoint\) === mcpEndpointBaseUrl\(expectedFlowEndpoint\)/);
-  assert.match(vibeSource, /var expectedEndpoint = vibeMcpTransportEndpoint\(vibeLegacyMcpEndpoint\(setup\.mcpEndpoint\), options\);/);
+  assert.match(vibeSource, /var expectedEndpoint = vibeFlowFacade\(setup\.mcpEndpoint, options\)\s*\?\s*""\s*:\s*vibeMcpTransportEndpoint\(vibeLegacyMcpEndpoint\(setup\.mcpEndpoint\), options\);/);
   // a home written before the pack (no flowEndpoint line) differs from one with the pack, and not from one without
   const before = vibeConfigIntent({ endpoint: "e", noLog: true });
   assert.notEqual(vibeConfigIntent({ endpoint: "e", noLog: true, flowEndpoint: FLOW }), before);
@@ -316,8 +385,8 @@ test("the session-level Convertigo server carries No-Log, Reveal and the guidanc
   withFlow(false);
 });
 
-test("a Vibe Studio home with the flow profile gets the Legacy setup on /api/mcp, then the Flow pack", () => {
-  const saved = { setupVibeFromMcpProject, syncVibeFlowPack };
+test("a Studio home gets the Legacy setup then the Flow pack; a Flow conversation gets the Flow-only home", () => {
+  const saved = { setupVibeFromMcpProject, syncVibeFlowPack, setupVibeFlowFacadeHome };
   const calls = [];
   setupVibeFromMcpProject = (_options, _home, endpoint) => {
     calls.push(["legacy", endpoint]);
@@ -328,12 +397,16 @@ test("a Vibe Studio home with the flow profile gets the Legacy setup on /api/mcp
     report.flowPackStatus = "installed";
     return report;
   };
+  setupVibeFlowFacadeHome = (_options, _home, endpoint) => {
+    calls.push(["facade", endpoint]);
+    return { ok: true, flowPackStatus: "installed", flowFacade: true };
+  };
   try {
     withFlow(true);
     const report = installAgentSkills({ agentProfile: "flow", userId: "studio", mcpEndpoint: FLOW }, "vibe", "/managed/vibe-home");
     assert.equal(report.ok, true);
-    assert.equal(report.flowPackStatus, "installed");
-    assert.deepEqual(calls, [["legacy", LEGACY], ["flow", FLOW]]);
+    assert.equal(report.flowFacade, true);
+    assert.deepEqual(calls, [["facade", FLOW]], "a Flow conversation does not run the Legacy setup");
     calls.length = 0;
     installAgentSkills({ userId: "studio", mcpEndpoint: LEGACY }, "convertigo", "/managed/vibe-home");
     assert.deepEqual(calls, [["legacy", LEGACY], ["flow", LEGACY]], "the gateway (convertigo) profile takes the same path");
@@ -341,6 +414,56 @@ test("a Vibe Studio home with the flow profile gets the Legacy setup on /api/mcp
   } finally {
     setupVibeFromMcpProject = saved.setupVibeFromMcpProject;
     syncVibeFlowPack = saved.syncVibeFlowPack;
+    setupVibeFlowFacadeHome = saved.setupVibeFlowFacadeHome;
     withFlow(false);
+  }
+});
+
+test("the Flow-only home gets its AGENTS.md, the Flow skills and the Flow pack", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibe-flow-facade-"));
+  const home = path.join(dir, ".vibe-home");
+  const sources = path.join(dir, "skills");
+  for (const slug of VIBE_FLOW_SKILL_SLUGS) {
+    fs.mkdirSync(path.join(sources, slug), { recursive: true });
+    fs.writeFileSync(path.join(sources, slug, "SKILL.md"), "---\nname: " + slug + "\n---\n");
+  }
+  const saved = { File, readTextFile, writeTextFile, ensureDirectory, flowSkillSourceFile, installVibePlanSyncHook };
+  File = FakeFile;
+  readTextFile = (file) => (file.exists() ? fs.readFileSync(file.p, "utf8") : "");
+  writeTextFile = (file, text) => { fs.mkdirSync(path.dirname(file.p), { recursive: true }); fs.writeFileSync(file.p, String(text)); };
+  ensureDirectory = (file) => fs.mkdirSync(file.p, { recursive: true });
+  flowSkillSourceFile = (_options, slug) => new FakeFile(sources, slug + "/SKILL.md");
+  installVibePlanSyncHook = () => "updated";
+  try {
+    withFlow(true);
+    const options = { agentProfile: "flow", userId: "studio" };
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(home, "config.toml"), vibeConfig(LEGACY, options));
+    const report = setupVibeFlowFacadeHome(options, new FakeFile(home), LEGACY);
+    assert.equal(report.ok, true, report.error);
+    assert.equal(report.flowFacade, true);
+    assert.equal(report.resolvedMcpUrl, FLOW);
+    const agents = fs.readFileSync(path.join(home, "AGENTS.md"), "utf8");
+    assert.match(agents, /Its one Convertigo MCP server is `convertigo-flow`/);
+    assert.match(agents, /flow-resource-get` and its `uri`/);
+    assert.doesNotMatch(agents, /convertigo-vibe-generalist|databaseobject-tree-apply|NGX pages load/, "no Legacy guidance");
+    for (const slug of VIBE_FLOW_SKILL_SLUGS) {
+      assert.ok(fs.existsSync(path.join(home, "skills", slug, "SKILL.md")), slug);
+    }
+    const config = fs.readFileSync(path.join(home, "config.toml"), "utf8");
+    assert.match(config, /^enabled_skills = \["convertigo-flow-mcp", "convertigo-flow-backend", "convertigo-flow-frontend-svelte"\]$/m);
+    assert.match(config, /\[tools\.bash\]\npermission = "always"/);
+    assert.doesNotMatch(config, /name = "Convertigo"/);
+    const again = setupVibeFlowFacadeHome(options, new FakeFile(home), LEGACY);
+    assert.equal(again.generated.filter((entry) => !/hooks\.toml/.test(entry)).length, 0, "a current home is left alone: " + again.generated);
+  } finally {
+    File = saved.File;
+    readTextFile = saved.readTextFile;
+    writeTextFile = saved.writeTextFile;
+    ensureDirectory = saved.ensureDirectory;
+    flowSkillSourceFile = saved.flowSkillSourceFile;
+    installVibePlanSyncHook = saved.installVibePlanSyncHook;
+    withFlow(false);
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

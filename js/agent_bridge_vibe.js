@@ -80,7 +80,10 @@
         // A home written before the `mistral-direct` provider existed only declares `mistral`:
         // rewrite it once so the managed GLM presets get the generic backend, then reuse it.
         var expectedProviderNames = expectedVibeProviderNames(profile);
-        var expectedEndpoint = vibeMcpTransportEndpoint(vibeLegacyMcpEndpoint(setup.mcpEndpoint), options);
+        // A Flow-only home (vibeFlowFacade) has no `Convertigo` server: its expected url is "".
+        var expectedEndpoint = vibeFlowFacade(setup.mcpEndpoint, options)
+          ? ""
+          : vibeMcpTransportEndpoint(vibeLegacyMcpEndpoint(setup.mcpEndpoint), options);
         // The Flow server of a Studio home with Flow ("" otherwise): its url carries the Flow catalog revision.
         var expectedFlowEndpoint = vibeExpectedFlowMcpUrl(setup.mcpEndpoint, options);
         var expectedModel = options.model || options.agentModel;
