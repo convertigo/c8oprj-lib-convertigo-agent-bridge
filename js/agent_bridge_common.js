@@ -11871,6 +11871,9 @@
   // Convertigo or Playwright MCP name; task, edit, todo, bash, skill and process are words too and count only alone
   // ("Task completed." is an answer). Past the name only that junk, that one token or one block to the end is allowed, so
   // a sentence or a question never matches. reason: tool_name for a name, printed_call for a name with its arguments.
+  // The start of an arguments block written with extra escapes: an optional \( or {, then a quoted key and its colon.
+  var VIBE_ESCAPED_ARGUMENTS = /^\s*\\?[({]?\s*\\?"[A-Za-z_]\w*\\?"\s*:/;
+
   function vibePrintedCallOf(entry, text) {
     var body = trim(text).replace(/^[`'"*\s]+|[`'"*\s.:;!]+$/g, "");
     var alone = body.replace(/\(\s*\)$/, "");
@@ -11888,7 +11891,11 @@
         try {
           JSON.parse(block[1]);
         } catch (_notArguments) {
-          return null;
+          // Arguments escaped once too often are not JSON but still start with a key (PCA eval 30/10, m2:
+          // run_typescript{\("code\": \"async function main() {...}\"\)}): the turn ended and no nudge came.
+          if (!VIBE_ESCAPED_ARGUMENTS.test(block[1].substring(1))) {
+            return null;
+          }
         }
       }
       return { reason: "printed_call", tool: name };

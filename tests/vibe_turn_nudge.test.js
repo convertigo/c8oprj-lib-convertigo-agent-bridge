@@ -284,7 +284,10 @@ test("one rule: the recorded printed calls are nudged with their reason, the ans
     ["run_typescriptx(code=1)", "printed_call", "run_typescript"],
     ["run_typescript_helper", "tool_name", "run_typescript"],
     ['run_typescript(code="async function main() {\\n  return 1;\\n}")', "printed_call", "run_typescript"],
-    ['mcp_Convertigo.databaseobject_tree_get {"target": "App"}', "printed_call", "mcp_Convertigo.databaseobject_tree_get"]
+    ['mcp_Convertigo.databaseobject_tree_get {"target": "App"}', "printed_call", "mcp_Convertigo.databaseobject_tree_get"],
+    // PCA eval 30/10 (m2): the arguments escaped once too often, so not JSON; the turn ended with no nudge.
+    ['run_typescript{\\("code\\": \\"async function main() {\\\\n  return 1;\\\\n}\\"\\)}', "printed_call", "run_typescript"],
+    ['run_typescript{\\"code\\": \\"async function main() {}\\"}', "printed_call", "run_typescript"]
   ];
   let id = 40;
   for (const [text, reason, tool] of printed) {
@@ -294,7 +297,7 @@ test("one rule: the recorded printed calls are nudged with their reason, the ans
     assert.ok(nudge, text);
     assert.deepEqual([nudge.data.reason, nudge.data.tool], [reason, tool], text);
   }
-  for (const text of ["Task completed.", "run_typescript ?", "run_typescript_1? ok", "run_typescript{not json}",
+  for (const text of ["Task completed.", "run_typescript ?", "run_typescript_1? ok", "run_typescript{not json}", "run_typescript{(pas un appel)}",
     "run_typescript a été lancé et la page est prête",
     "Voici le plan : d'abord la table, ensuite la page.", 'Le résultat est {"rows": 3}', "Tasks(3)"]) {
     const entry = turn(++id);
