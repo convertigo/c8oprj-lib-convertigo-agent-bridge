@@ -25,4 +25,8 @@ assert.equal(agentCapabilityProfile({ agentProfile: 'flow' }).id, 'flow');
 assert.doesNotMatch(flow, /browser-verify/, 'Flow sessions do not use the legacy MCP tool');
 assert.match(flow, /For a functional proof \(a login/);
 assert.doesNotMatch(flow, /constructor sub-agent/, 'Flow sessions do not use the legacy MCP tools');
+// A download of the Studio viewer raises no Playwright download event: the instructions say to read the folder.
+for (const text of [flow, agentSkillInstructions('claude', 'flow'), agentSkillInstructions('codex', '')]) {
+  assert.match(text, /`page\.waitForEvent\('download'\)` never fires there: click, then wait for the file to appear in `\.playwright-mcp\/downloads\/`/);
+}
 console.log('browser-verify guidance ok');

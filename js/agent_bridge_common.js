@@ -3576,7 +3576,7 @@
       isFlow ? "- Import generated or supplied images with `frontend-svelte-asset-import`, use its returned `resources/...` URL unchanged, and never copy assets with shell commands or into generated static folders." : "",
       isFlow ? "" : "- If `mobile-builder-open(stateOnly=true)` returns `status:\"stopped\"`, immediately call it once with `stateOnly=false, wait=false`; do not spend a timeout polling an inactive builder.",
       "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
-      "- Playwright MCP files live in `.playwright-mcp/` under your working directory: pass `filename:\".playwright-mcp/<name>.png\"` to `browser_take_screenshot` (a bare file name lands in the working directory itself); to reload the viewer, call `browser_navigate` with its URL, never `location.reload()` inside `browser_evaluate` (the navigation destroys the evaluation context); and a file the viewer downloads (an export) is saved without any dialog in `.playwright-mcp/downloads/`, where you can read it. Playwright MCP only reads files inside your working directory: write `browser_run_code_unsafe` scripts in `.playwright-mcp/scripts/` and pass that relative path.",
+      "- Playwright MCP files live in `.playwright-mcp/` under your working directory: pass `filename:\".playwright-mcp/<name>.png\"` to `browser_take_screenshot` (a bare file name lands in the working directory itself); to reload the viewer, call `browser_navigate` with its URL, never `location.reload()` inside `browser_evaluate` (the navigation destroys the evaluation context); and a file the viewer downloads (an export) is saved without any dialog in `.playwright-mcp/downloads/`, where you can read it. Playwright does not manage downloads of the attached Studio browser: `page.waitForEvent('download')` never fires there; click, poll the downloads folder with a bounded wait and read the completed file. Playwright MCP only reads files inside your working directory: write `browser_run_code_unsafe` scripts in `.playwright-mcp/scripts/` and pass that relative path.",
       "- For viewer automation, use the Playwright MCP tools exposed by the managed Codex configuration. Do not run ad hoc shell scripts with `require('playwright')`, and do not launch a separate browser unless explicitly needed.",
       isFlow ? "- Use Playwright only after the capability pack reports that the dev viewer is ready and the managed browser target shows that viewer." : "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`.",
       "- Known-good fast check: `playwright.browser_tabs({action:\"list\"})`, then `playwright.browser_find({text:\"<visible text>\"})`; use `playwright.browser_evaluate({function:\"...\"})` only for DOM state or timing. Do not probe unsupported browser features first.",
@@ -4098,7 +4098,9 @@
   }
 
   // Playwright MCP runs this module on each page it drives (--init-page). Attached over CDP,
-  // Playwright leaves downloads to the embedder, and JxBrowser then opens its modal Save panel
+  // Playwright leaves downloads to the embedder (no download event: the setting below belongs to
+  // this session, whose download events Playwright never receives, hence the instruction to read
+  // the folder instead of waiting for page.waitForEvent('download')), and JxBrowser then opens its modal Save panel
   // on the Studio UI thread: every engine request, the MCP included, waits until someone closes
   // it (run 9b lost 2 h 46 on a CSV export). The module has Chromium save downloads in
   // .playwright-mcp/downloads instead, through a browser CDP session kept open while Playwright
