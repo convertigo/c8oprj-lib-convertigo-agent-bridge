@@ -157,21 +157,21 @@ test("a call written as a function call, with its arguments in parentheses and n
   play(mcp, [say('mcp_Convertigo.project_lint(project="Shop")'), answer(23)]);
   assert.equal(types(mcp, "turn/nudge")[0].data.tool, "mcp_Convertigo.project_lint");
   for (const [id, text] of [[24, "run_typescript(code) a échoué, je regarde pourquoi."], [25, "Lancé : run_typescript(code)"],
-    [26, "Tasks(3)"], [27, "run_typescriptx(code=1)"]]) {
+    [26, "Tasks(3)"]]) {
     const prose = turn(id);
     play(prose, [say(text), answer(id)]);
     assert.equal(types(prose, "turn/nudge").length, 0, text);
   }
 });
 
-test("a compound tool name glued to a stray word is nudged; a plain word or a longer name is not", () => {
+test("a compound tool name glued to a stray word is nudged; a plain word or a sentence is not", () => {
   const glued = turn(16);
   play(glued, [say("run_typescriptInteraction"), answer(16)]);
   assert.equal(types(glued, "turn/nudge")[0].data.tool, "run_typescript", "the name glued to a word (a replay of 30/10)");
   const seen = turn(17);
   play(seen, [call("e2", "mcp_Convertigo.project_lint"), say("mcp_Convertigo.project_lintVerification."), answer(17)]);
   assert.equal(types(seen, "turn/nudge")[0].data.tool, "mcp_Convertigo.project_lint", "a tool of the session, glued");
-  for (const [id, text] of [[18, "Tasks"], [19, "Editorial"], [20, "run_typescript_helper"], [21, "run_typescriptInteraction terminée avec succès"]]) {
+  for (const [id, text] of [[18, "Tasks"], [19, "Editorial"], [21, "run_typescriptInteraction terminée avec succès"]]) {
     const other = turn(id);
     play(other, [say(text), answer(id)]);
     assert.equal(types(other, "turn/nudge").length, 0, text);
@@ -280,6 +280,9 @@ test("one rule: the recorded printed calls are nudged with their reason, the ans
     ['run_typescriptatischeck{"code": "async function main() {}"}', "printed_call", "run_typescript"],
     ['run_typescript進{"code": "async function main() {}"}', "printed_call", "run_typescript"],
     ["run_typescripté", "tool_name", "run_typescript"],
+    ['run_typescript_1:{"code": "async function main() {}"}', "printed_call", "run_typescript"],
+    ["run_typescriptx(code=1)", "printed_call", "run_typescript"],
+    ["run_typescript_helper", "tool_name", "run_typescript"],
     ['run_typescript(code="async function main() {\\n  return 1;\\n}")', "printed_call", "run_typescript"],
     ['mcp_Convertigo.databaseobject_tree_get {"target": "App"}', "printed_call", "mcp_Convertigo.databaseobject_tree_get"]
   ];
@@ -291,7 +294,8 @@ test("one rule: the recorded printed calls are nudged with their reason, the ans
     assert.ok(nudge, text);
     assert.deepEqual([nudge.data.reason, nudge.data.tool], [reason, tool], text);
   }
-  for (const text of ["Task completed.", "run_typescript ?", "run_typescript a été lancé et la page est prête",
+  for (const text of ["Task completed.", "run_typescript ?", "run_typescript_1? ok", "run_typescript{not json}",
+    "run_typescript a été lancé et la page est prête",
     "Voici le plan : d'abord la table, ensuite la page.", 'Le résultat est {"rows": 3}', "Tasks(3)"]) {
     const entry = turn(++id);
     play(entry, [say(text), answer(id)]);
