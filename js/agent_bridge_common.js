@@ -11862,14 +11862,15 @@
     }
   }
 
-  // A call the agent printed instead of making it, so Vibe ended the turn. The whole message (quotes, backticks and closing
-  // punctuation stripped) is a tool name and, up to its end, nothing, letters glued to it, its JSON arguments (maybe after
-  // glued letters) or its arguments in parentheses, or one short stray token. Replies recorded on 30/10: "run_typescript",
-  // "run_typescript rhyumbe", "run_typescriptInteraction", 'run_typescriptatischeck{"code": "..."}',
-  // 'run_typescript(code="...")'. The name is a known compound one (run_typescript, a tool of the session) or a Convertigo
-  // or Playwright MCP name; task, edit, todo, bash, skill and process are words too and count only alone ("Task
-  // completed." is an answer). Past the name only that one token (never a "?") or one block to the end is allowed, so a
-  // sentence or a question never matches. reason: tool_name for a name, printed_call for a name with its arguments.
+  // A call the agent printed instead of making it, so Vibe ended the turn. The whole message (quotes, backticks and
+  // closing punctuation stripped) is a tool name and, up to its end, nothing, letters (any script) glued to it, its JSON
+  // arguments (maybe after glued letters) or its arguments in parentheses, or one short stray token. Replies recorded on
+  // 30/10: "run_typescript", "run_typescript rhyumbe", "run_typescriptInteraction", 'run_typescriptatischeck{"code":
+  // "..."}', 'run_typescript\u9032{"code": "..."}', 'run_typescript(code="...")'. The name is a known compound one
+  // (run_typescript, a tool of the session) or a Convertigo or Playwright MCP name; task, edit, todo, bash, skill and
+  // process are words too and count only alone ("Task completed." is an answer). Past the name only that one token (never
+  // a "?") or one block to the end is allowed, so a sentence or a question never matches. reason: tool_name for a name,
+  // printed_call for a name with its arguments.
   function vibePrintedCallOf(entry, text) {
     var body = trim(text).replace(/^[`'"*\s]+|[`'"*\s.:;!]+$/g, "");
     var alone = body.replace(/\(\s*\)$/, "");
@@ -11881,7 +11882,7 @@
       return null;
     }
     var rest = body.substring(name.length);
-    var json = /^[A-Za-z]{0,40}\s*(\{[\s\S]*\})$/.exec(rest);
+    var json = /^[A-Za-z\u00c0-\uffff]{0,40}\s*(\{[\s\S]*\})$/.exec(rest);
     if (json) {
       try {
         JSON.parse(json[1]);
@@ -11893,7 +11894,7 @@
     if (/^\(\s*\S[\s\S]*\)$/.test(rest)) {
       return { reason: "printed_call", tool: name };
     }
-    return /^(\(\s*\)|[A-Za-z]{1,40}|\s+[^\s?]{1,40})?$/.test(rest) ? { reason: "tool_name", tool: name } : null;
+    return /^(\(\s*\)|[A-Za-z\u00c0-\uffff]{1,40}|\s+[^\s?]{1,40})?$/.test(rest) ? { reason: "tool_name", tool: name } : null;
   }
 
   // The longest known compound tool name (run_typescript, mcp_Convertigo.x: a "_" or a ".") that starts head, if any.

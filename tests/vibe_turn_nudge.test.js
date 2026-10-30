@@ -278,6 +278,8 @@ test("one rule: the recorded printed calls are nudged with their reason, the ans
     ["run_typescriptInteraction", "tool_name", "run_typescript"],
     ["run_typescript()", "tool_name", "run_typescript"],
     ['run_typescriptatischeck{"code": "async function main() {}"}', "printed_call", "run_typescript"],
+    ['run_typescript進{"code": "async function main() {}"}', "printed_call", "run_typescript"],
+    ["run_typescripté", "tool_name", "run_typescript"],
     ['run_typescript(code="async function main() {\\n  return 1;\\n}")', "printed_call", "run_typescript"],
     ['mcp_Convertigo.databaseobject_tree_get {"target": "App"}', "printed_call", "mcp_Convertigo.databaseobject_tree_get"]
   ];
