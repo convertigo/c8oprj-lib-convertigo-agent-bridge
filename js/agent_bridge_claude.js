@@ -2065,6 +2065,7 @@
     entry.noCodeMcpTokenHandle = trim(options.noCodeMcpTokenHandle);
     entry.mcpBearerTokenHandle = trim(options.mcpBearerTokenHandle);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
+    entry.mcpLeaseTokenId = managedMcpTokenId(options);
     entry.mcpEndpoint = resolveMcpEndpoint(options);
     entry.mcpConfigFile = setup.setup.mcp && setup.setup.mcp.path ? setup.setup.mcp.path : "";
     entry.viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);

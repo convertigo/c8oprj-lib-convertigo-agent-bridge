@@ -3294,6 +3294,101 @@
     return token.length ? hashShort(token) : "";
   }
 
+  // lib_ConvertigoMCP leases the managed token of the Tigo panel (C8O.mcpAuth, MANAGED_LEASES_KEY): it stays valid while
+  // a turn uses it and ends its idle time after the last activity. The MCP slides the lease on each call it
+  // authenticates; the events of a running turn slide it too, so a long tool, a wait or a sub-agent without MCP call
+  // does not end it (PCA eval 29/10: GLM lost every Convertigo tool 2 h into its turn, the token had a fixed expiry).
+  // Same store contract as the MCP: a ConcurrentHashMap from the token id (JWT kid) to a JSON string
+  // {idleMs, expiresAt, maxAt}, only replaced over the exact previous string, so an ended or revoked lease stays so.
+  var MCP_MANAGED_LEASES_KEY = "lib_ConvertigoMCP.managedTokenLeases";
+  var MCP_LEASE_TOUCH_INTERVAL_MS = 30000;
+
+  // The managed_ id of the agent's token, "" for a token without lease (No Code, a fixed-expiry or an external token).
+  function managedMcpTokenId(options) {
+    try {
+      var token = normalizeSkillProfile(options || {}) === "nocode" ? "" : managedMcpBearerToken(options || {});
+      var parts = token.split(".");
+      if (parts.length !== 3) {
+        return "";
+      }
+      var header = parseJsonSafe(String(new Packages.java.lang.String(Base64.getUrlDecoder().decode(String(parts[0])), StandardCharsets.UTF_8)), null);
+      var payload = decodeJwtPayload(token);
+      var kid = header && typeof header.kid === "string" ? header.kid : "";
+      return /^managed_[0-9a-f]{32}$/.test(kid) && payload && payload.lease === "turn" ? kid : "";
+    } catch (_ignoreTokenId) {
+      return "";
+    }
+  }
+
+  // Moves the end of the entry's live lease to now + its idle time (within its cap), at most every
+  // MCP_LEASE_TOUCH_INTERVAL_MS unless force (the end of a turn starts its idle time). Never revives an ended lease.
+  // store: the server store, for the keeper thread that runs after its request.
+  function touchManagedMcpLease(entry, force, store) {
+    try {
+      var tokenId = trim(entry && entry.mcpLeaseTokenId);
+      var at = now();
+      if (!tokenId.length || (force !== true && at - Number(entry.mcpLeaseTouchedAt || 0) < MCP_LEASE_TOUCH_INTERVAL_MS)) {
+        return false;
+      }
+      entry.mcpLeaseTouchedAt = at;
+      store = store || getServerStore();
+      var leases = store !== null && typeof store !== "undefined" ? store.get(MCP_MANAGED_LEASES_KEY) : null;
+      if (leases === null || typeof leases === "undefined") {
+        return false;
+      }
+      for (var attempt = 0; attempt < 3; attempt++) {
+        var current = leases.get(tokenId);
+        var lease = current === null || typeof current === "undefined" ? null : parseJsonSafe(String(current), null);
+        if (!lease || !(at < Number(lease.expiresAt))) {
+          return false;
+        }
+        var next = at + Number(lease.idleMs);
+        if (Number(lease.maxAt) > 0) {
+          next = Math.min(next, Number(lease.maxAt));
+        }
+        if (next <= Number(lease.expiresAt)) {
+          return true;
+        }
+        lease.expiresAt = next;
+        if (leases.replace(tokenId, current, JSON.stringify(lease))) {
+          return true;
+        }
+      }
+    } catch (_ignoreLeaseTouch) {}
+    return false;
+  }
+
+  // While a turn runs, a daemon thread slides the lease every MCP_LEASE_TOUCH_INTERVAL_MS: a tool that runs longer than
+  // the idle time without an event (a sleep, a build) must not end it. It stops with the turn or the process.
+  function keepManagedMcpLease(entry) {
+    if (!trim(entry && entry.mcpLeaseTokenId).length || entry.mcpLeaseKeeper === true) {
+      return;
+    }
+    entry.mcpLeaseKeeper = true;
+    var store = getServerStore();
+    try {
+      var keeper = new Thread(new Runnable({
+        run: function () {
+          try {
+            while (entry.turnActive === true && processAlive(entry.process)) {
+              Thread.sleep(MCP_LEASE_TOUCH_INTERVAL_MS);
+              if (entry.turnActive === true) {
+                touchManagedMcpLease(entry, true, store);
+              }
+            }
+          } catch (_ignoreKeeperStop) {
+          } finally {
+            entry.mcpLeaseKeeper = false;
+          }
+        }
+      }), "lib_ConvertigoAgentBridge-mcp-lease-" + entry.handle);
+      keeper.setDaemon(true);
+      keeper.start();
+    } catch (_ignoreKeeperStart) {
+      entry.mcpLeaseKeeper = false;
+    }
+  }
+
   function usesProtectedConvertigoMcp(mcpEndpoint, options) {
     return /\/api\/(?:flow-)?mcp\/?(?:[?#].*)?$/i.test(trim(mcpEndpoint));
   }
@@ -10835,10 +10930,15 @@
         entry.turnRequestId = requestId;
       }
       entry.turnActive = true;
+      keepManagedMcpLease(entry);
     } else if (event.type === "system/closed" || ((event.type === "turn/end" || event.type === "turn/error") &&
         (!requestId.length || !trim(entry.turnRequestId).length || requestId === entry.turnRequestId))) {
       entry.turnActive = false;
       entry.turnRequestId = "";
+      touchManagedMcpLease(entry, true);
+    }
+    if (entry.turnActive === true) {
+      touchManagedMcpLease(entry, false);
     }
     entry.events.add(event);
     while (entry.events.size() > MAX_EVENT_BUFFER) {
