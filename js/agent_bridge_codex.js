@@ -2216,6 +2216,7 @@
     entry.noCodeMcpTokenHandle = trim(options.noCodeMcpTokenHandle);
     entry.mcpBearerTokenHandle = trim(options.mcpBearerTokenHandle);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
+    entry.mcpLeaseTokenId = managedMcpTokenId(options);
     entry.mcpEndpoint = resolveMcpEndpoint(options);
     entry.browserDebugUrl = trim(options.browserDebugUrl);
     entry.browserDevToolsJsonUrl = trim(options.browserDevToolsJsonUrl);

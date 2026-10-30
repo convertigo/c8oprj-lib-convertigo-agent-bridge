@@ -627,6 +627,7 @@
     entry.vibeHome = vibeHome;
     entry.vibeProfile = resolveVibeProfile(options);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
+    entry.mcpLeaseTokenId = managedMcpTokenId(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
     entry.mcpCatalogKey = trim(options.mcpCatalogKey);
