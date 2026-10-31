@@ -2373,6 +2373,10 @@
     if (!trim(promptText).length) {
       return { ok: false, status: "error", handle: handle, error: "prompt is required", timestamp: now() };
     }
+    // A turn held for a background agent ends on its answer before the user's turn starts; the automatic continues
+    // count again from this prompt.
+    claudeEndHeldTurn(entry, "user_prompt");
+    entry.claudeAutoContinues = 0;
     var requestedSession = trim(options.claudeSessionId || options.sessionId || options.externalSessionId);
     if (requestedSession.length && !trim(entry.sessionId).length) {
       entry.sessionId = requestedSession;
@@ -3022,12 +3026,16 @@
     }
     var finalText = trim(text).length ? text : String(entry.claudePendingNarration || "");
     entry.claudePendingNarration = "";
-    if (entry.claudeTurnCommand === "compact") {
+    var turnCommand = String(entry.claudeTurnCommand || "");
+    if (turnCommand === "compact") {
       // The result of /compact repeats the output of the command before it (a /context table): Tigo says the
       // context was compacted instead.
       finalText = "";
     }
     entry.claudeTurnCommand = "";
+    if (!turnCommand.length && claudeHoldTurnForBackground(entry, finalText, message)) {
+      return;
+    }
     if (trim(finalText).length) {
       pushEvent(entry, "answer/chunk", { text: finalText, phase: "final_answer", source: "result", provider: "claude" });
     }
@@ -3041,6 +3049,223 @@
       durationMs: Number(message.duration_ms || 0),
       numTurns: Number(message.num_turns || 0)
     });
+  }
+
+  // Background sub-agents --------------------------------------------------
+  //
+  // An agent started with the Agent tool in the background reports with a task notification. In this stream-json mode
+  // Claude Code takes that notification on its own and runs a new turn (queue-operation "task-notification" in the
+  // transcript), but the Bridge had already sent turn/end for the turn that launched the agent: the Assistant stops
+  // reading events at turn/end, so that turn ran unseen and the user had to write "Continue" (PCA run of 31/10: turn
+  // ended 07:07:32Z on "J'attends sa notification", two self-started turns at 07:20:39Z and 07:26:11Z, no read of
+  // agent_events between 07:07:34Z and the "Continue" of 07:29:28Z).
+  // The signal is Claude Code's own events: system/task_started (is_backgrounded, task_type local_agent) opens a task,
+  // system/task_notification closes it, task_progress or task_updated reopen one resumed by SendMessage. A result
+  // while one of them is still running keeps the Assistant's turn open (no turn/end, a note in the work log); the next
+  // main-agent output means Claude Code resumed by itself, and its own result ends the turn. If Claude Code does not
+  // resume within CLAUDE_BACKGROUND_RESUME_GRACE_MS of a notification, the Bridge writes a short user message, at most
+  // CLAUDE_BACKGROUND_CONTINUES_MAX times per user prompt; past that the held answer ends the turn. A user prompt or
+  // a stop ends the held turn first. Background shells (local_bash) are left out: a dev server never ends.
+  var CLAUDE_BACKGROUND_TASK_TYPES = { local_agent: true, remote_agent: true };
+  var CLAUDE_BACKGROUND_RESUME_GRACE_MS = 20000;
+  var CLAUDE_BACKGROUND_CONTINUES_MAX = 3;
+  // A task silent this long (no task_progress) is not waited for: a lost notification must not hold every later turn.
+  var CLAUDE_BACKGROUND_STALE_MS = 30 * 60 * 1000;
+
+  function claudeBackgroundTasks(entry) {
+    if (!entry.claudeBackgroundTasks) {
+      entry.claudeBackgroundTasks = {};
+    }
+    return entry.claudeBackgroundTasks;
+  }
+
+  function claudeLiveBackgroundTasks(entry) {
+    var tasks = claudeBackgroundTasks(entry);
+    var live = [];
+    for (var id in tasks) {
+      if (Object.prototype.hasOwnProperty.call(tasks, id) && tasks[id].live === true &&
+          now() - Number(tasks[id].seenAt || 0) < CLAUDE_BACKGROUND_STALE_MS) {
+        live.push(tasks[id]);
+      }
+    }
+    return live;
+  }
+
+  function claudeBackgroundLabel(tasks) {
+    var names = [];
+    for (var i = 0; i < tasks.length && names.length < 3; i++) {
+      names.push("\"" + (trim(tasks[i].description) || tasks[i].id) + "\"");
+    }
+    return names.join(", ") + (tasks.length > names.length ? " (+" + (tasks.length - names.length) + ")" : "");
+  }
+
+  // The system/task_* events of the main conversation. Returns true for a notification of a tracked task.
+  function claudeTrackBackgroundTask(entry, message) {
+    var subtype = String(message.subtype || "");
+    var id = trim(message.task_id);
+    if (!id.length) {
+      return false;
+    }
+    var tasks = claudeBackgroundTasks(entry);
+    if (subtype === "task_started") {
+      // A task an agent started for itself notifies that agent, not the main conversation.
+      if (message.is_backgrounded === true && message.owned_by_subagent !== true &&
+          CLAUDE_BACKGROUND_TASK_TYPES[String(message.task_type || "")] === true) {
+        tasks[id] = { id: id, description: trim(message.description), toolUseId: trim(message.tool_use_id), live: true, seenAt: now() };
+      }
+      return false;
+    }
+    var task = Object.prototype.hasOwnProperty.call(tasks, id) ? tasks[id] : null;
+    if (task === null) {
+      return false;
+    }
+    task.seenAt = now();
+    if (subtype === "task_progress") {
+      task.live = true;
+      return false;
+    }
+    if (subtype === "task_updated") {
+      var status = String(message.patch && message.patch.status || "");
+      if (status === "running" || status === "pending") {
+        task.live = true;
+      } else if (status.length) {
+        task.live = false;
+      }
+      return false;
+    }
+    if (subtype === "task_notification") {
+      task.live = false;
+      task.status = String(message.status || "");
+      claudeBackgroundTaskEnded(entry, task);
+      return true;
+    }
+    return false;
+  }
+
+  function claudeHoldTurnForBackground(entry, finalText, message) {
+    var live = claudeLiveBackgroundTasks(entry);
+    if (!live.length || entry.turnActive !== true) {
+      return false;
+    }
+    entry.claudeBackgroundWait = {
+      text: String(finalText || ""),
+      subtype: String(message.subtype || ""),
+      durationMs: Number(message.duration_ms || 0),
+      numTurns: Number(message.num_turns || 0),
+      since: now()
+    };
+    entry.claudeTurnEnded = false;
+    entry.status = "running";
+    entry.phase = "background";
+    pushEvent(entry, "turn/background_wait", {
+      provider: "claude",
+      tasks: live.map(function (task) { return { id: task.id, description: task.description }; }),
+      continues: Number(entry.claudeAutoContinues || 0),
+      max: CLAUDE_BACKGROUND_CONTINUES_MAX
+    });
+    pushEvent(entry, "progress/message", {
+      text: "Agent Bridge: the turn stays open until the background agent " + claudeBackgroundLabel(live) + " reports.",
+      provider: "claude",
+      backgroundWait: true
+    });
+    return true;
+  }
+
+  // The main agent wrote again after a held result: Claude Code resumed on its own. The held text was narration.
+  function claudeBackgroundResumed(entry) {
+    var wait = entry.claudeBackgroundWait;
+    if (!wait) {
+      return;
+    }
+    entry.claudeBackgroundWait = null;
+    entry.phase = "turn";
+    if (trim(wait.text).length) {
+      pushEvent(entry, "progress/message", { text: wait.text, provider: "claude", source: "held_result" });
+    }
+    pushEvent(entry, "turn/background_resumed", { provider: "claude", waitedMs: now() - wait.since });
+  }
+
+  // Ends the Assistant's turn on the held result (a user prompt, a stop, or no resume after the last continue).
+  function claudeEndHeldTurn(entry, reason) {
+    var wait = entry.claudeBackgroundWait;
+    if (!wait) {
+      return false;
+    }
+    entry.claudeBackgroundWait = null;
+    if (trim(wait.text).length) {
+      pushEvent(entry, "answer/chunk", { text: wait.text, phase: "final_answer", source: "result", provider: "claude" });
+    }
+    entry.claudeTurnEnded = true;
+    entry.status = "completed";
+    entry.phase = "completed";
+    pushEvent(entry, "turn/end", {
+      provider: "claude",
+      sessionId: entry.sessionId,
+      subtype: wait.subtype,
+      durationMs: wait.durationMs,
+      numTurns: wait.numTurns,
+      backgroundWait: String(reason || "")
+    });
+    return true;
+  }
+
+  function claudeBackgroundTaskEnded(entry, task) {
+    var wait = entry.claudeBackgroundWait;
+    if (!wait) {
+      return;
+    }
+    wait.notified = (wait.notified || 0) + 1;
+    var notified = wait.notified;
+    var watcher = new Thread(new Runnable({
+      run: function () {
+        try {
+          Thread.sleep(CLAUDE_BACKGROUND_RESUME_GRACE_MS);
+        } catch (_ignoreBackgroundSleep) {}
+        claudeBackgroundResumeCheck(entry, wait, notified, task);
+      }
+    }), "lib_ConvertigoAgentBridge-claude-background-" + entry.handle);
+    watcher.setDaemon(true);
+    watcher.start();
+  }
+
+  // Runs CLAUDE_BACKGROUND_RESUME_GRACE_MS after a notification: nothing to do if Claude Code resumed, a user prompt or
+  // a stop ended the wait, or a later notification has its own check.
+  function claudeBackgroundResumeCheck(entry, wait, notified, task) {
+    if (entry.claudeBackgroundWait !== wait || wait.notified !== notified || entry.turnActive !== true ||
+        !processAlive(entry.process)) {
+      return false;
+    }
+    var count = Number(entry.claudeAutoContinues || 0);
+    if (count >= CLAUDE_BACKGROUND_CONTINUES_MAX) {
+      pushEvent(entry, "progress/message", {
+        text: "Agent Bridge: the background agent finished but the agent did not resume after " + count + " automatic continues; the turn ends.",
+        provider: "claude"
+      });
+      return claudeEndHeldTurn(entry, "continues_exhausted");
+    }
+    var label = trim(task && task.description) || trim(task && task.id);
+    var prompt = "Note from the Agent Bridge: the background agent \"" + label + "\" finished (" +
+      (trim(task && task.status) || "completed") + "); its result is in your task notifications. Continue.";
+    try {
+      writeJson(entry, { type: "user", message: { role: "user", content: [{ type: "text", text: prompt }] } });
+    } catch (continueError) {
+      pushEvent(entry, "warning", { message: "Agent Bridge: the automatic continue failed: " + String(continueError), provider: "claude" });
+      return claudeEndHeldTurn(entry, "continue_failed");
+    }
+    entry.claudeAutoContinues = count + 1;
+    wait.continued = entry.claudeAutoContinues;
+    pushEvent(entry, "turn/auto_continue", {
+      provider: "claude",
+      reason: "background_task_finished",
+      taskId: trim(task && task.id),
+      count: entry.claudeAutoContinues,
+      max: CLAUDE_BACKGROUND_CONTINUES_MAX
+    });
+    var line = "Agent Bridge: the background agent \"" + label + "\" finished and the agent did not resume; it was asked to continue (" +
+      entry.claudeAutoContinues + "/" + CLAUDE_BACKGROUND_CONTINUES_MAX + ").";
+    pushEvent(entry, "progress/message", { text: line, provider: "claude", autoContinue: true });
+    try { log.info("(lib_ConvertigoAgentBridge) " + line + " Handle " + entry.handle); } catch (_ignoreContinueLog) {}
+    return true;
   }
 
   function claudeHandleControlRequest(entry, message) {
@@ -3152,10 +3377,16 @@
         return;
       }
       pushEvent(entry, "claude/event", { method: "system/" + subtype, params: message, provider: "claude" });
+      if (subtype.indexOf("task_") === 0) {
+        claudeTrackBackgroundTask(entry, message);
+      }
       return;
     }
     if (type === "rate_limit_event") {
       recordClaudeQuota(entry, message.rate_limit_info || message.rateLimitInfo || {}); return;
+    }
+    if (entry.claudeBackgroundWait && (type === "stream_event" || type === "assistant" || type === "result") && !message.parent_tool_use_id) {
+      claudeBackgroundResumed(entry);
     }
     if (type === "stream_event") {
       claudeHandleStreamEvent(entry, message.event || {});

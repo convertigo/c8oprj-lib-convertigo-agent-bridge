@@ -13050,6 +13050,10 @@
     },
     "claude-stream-json": function (entry) {
       writeJson(entry, { type: "control_request", request_id: "interrupt-" + String(UUID.randomUUID()), request: { subtype: "interrupt" } });
+      // A turn held for a background agent has no Claude Code turn to stop: it ends here (agent_bridge_claude.js).
+      if (entry.claudeBackgroundWait && typeof claudeEndHeldTurn === "function") {
+        claudeEndHeldTurn(entry, "interrupted");
+      }
       return true;
     }
   };
