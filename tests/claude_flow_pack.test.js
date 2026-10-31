@@ -227,6 +227,10 @@ test("the CLAUDE.md of a Flow conversation routes to the Flow skills and keeps t
     assert.match(instructions.substring(compaction), /Reload the `convertigo-flow-mcp` skill and the specialist skill of the task, read the project's `docs\/generated\/PROGRESS\.md`/);
     assert.match(instructions.substring(compaction), /code-get/);
     assert.doesNotMatch(instructions, /convertigo-generalist|convertigo-studio|mobile-builder-open|databaseobject-tree-apply/, "no Legacy guidance");
+    // The CLAUDE.md of a Claude home, not only the shared skill text, says that a viewer download raises no Playwright event.
+    for (const text of [instructions, claudeInstructions(conversation({ cwd: "/ws" }), "generalist")]) {
+      assert.match(text, /`page\.waitForEvent\('download'\)` never fires there: click, then wait for the file to appear in `[^`]*\/\.playwright-mcp\/downloads\/`/);
+    }
 
     const studio = prepareHome(home, conversation({ cwd: "/ws" })).instructions;
     assert.equal(studio, claudeInstructions(conversation({ cwd: "/ws" }), "generalist"));
