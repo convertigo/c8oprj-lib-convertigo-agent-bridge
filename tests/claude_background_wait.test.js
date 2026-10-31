@@ -1,6 +1,6 @@
 // A Claude turn that ends while one of its background agents (Agent tool, run_in_background) still runs. Claude Code
 // takes the task notification on its own and runs a new turn, but the Bridge used to send turn/end first, so the
-// Assistant stopped reading and the user had to write "Continue" (PCA run of 31/10, conversation 9dd1e610). The Bridge
+// Assistant stopped reading and the user had to write "Continue" (a trial run of 31/10). The Bridge
 // now keeps the turn open on Claude Code's system/task_* events, and writes a short continue itself, at most three
 // times per user prompt, when Claude Code does not resume after a notification. The event shapes are those of Claude
 // Code 2.1.314.
@@ -88,7 +88,7 @@ const play = (entry, lines) => lines.forEach((text) => sandbox.handleClaudeStrea
 const types = (entry, type) => entry._events.filter((event) => event.type === type);
 const userMessages = (entry) => entry._written.map((w) => JSON.parse(w)).filter((m) => m.type === "user");
 const started = (id, extra) => line(Object.assign({ type: "system", subtype: "task_started", task_id: id,
-  tool_use_id: "toolu_" + id, description: "Frontend Svelte PCA lots 4-5", subagent_type: "general-purpose",
+  tool_use_id: "toolu_" + id, description: "Frontend Svelte lots 4-5", subagent_type: "general-purpose",
   is_backgrounded: true, spawn_depth: 1, task_type: "local_agent" }, extra || {}));
 const notified = (id) => line({ type: "system", subtype: "task_notification", task_id: id, tool_use_id: "toolu_" + id,
   status: "completed", output_file: "/tmp/tasks/" + id + ".output", summary: "Agent finished" });
@@ -112,9 +112,9 @@ test("a result while a background agent runs keeps the turn open, and Claude Cod
   assert.equal(entry.phase, "background");
   assert.equal(types(entry, "answer/chunk").length, 0, "the waiting message is not the answer");
   // Objects of the sandbox realm: compared through JSON.
-  assert.deepEqual(JSON.parse(JSON.stringify(types(entry, "turn/background_wait")[0].data.tasks)), [{ id: "a87dc", description: "Frontend Svelte PCA lots 4-5" }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(types(entry, "turn/background_wait")[0].data.tasks)), [{ id: "a87dc", description: "Frontend Svelte lots 4-5" }]);
   assert.match(types(entry, "progress/message")[0].data.text,
-    /^Agent Bridge: the turn stays open until the background agent "Frontend Svelte PCA lots 4-5" reports\.$/);
+    /^Agent Bridge: the turn stays open until the background agent "Frontend Svelte lots 4-5" reports\.$/);
 
   play(entry, [notified("a87dc")]);
   assert.equal(threads.length, 1, "a resume check is scheduled after the notification");
@@ -138,7 +138,7 @@ test("without a resume after the notification the Bridge writes a continue, at m
   const sent = userMessages(entry);
   assert.equal(sent.length, 1);
   assert.match(sent[0].message.content[0].text,
-    /^Note from the Agent Bridge: the background agent "Frontend Svelte PCA lots 4-5" finished \(completed\); its result is in your task notifications\. Continue\.$/);
+    /^Note from the Agent Bridge: the background agent "Frontend Svelte lots 4-5" finished \(completed\); its result is in your task notifications\. Continue\.$/);
   assert.equal(types(entry, "turn/auto_continue")[0].data.count, 1);
   assert.ok(types(entry, "progress/message").some((event) => /it was asked to continue \(1\/3\)\.$/.test(event.data.text)));
   assert.equal(types(entry, "turn/end").length, 0, "the continue runs in the same Assistant turn");
@@ -203,7 +203,7 @@ test("background shells, an agent's own tasks and finished agents do not hold th
   assert.equal(types(resumed, "turn/end").length, 1, "an unknown task id is ignored");
   done._events.length = 0;
   sandbox.pushEvent(done, "turn/start", { requestId: 2, provider: "claude" });
-  play(done, [line({ type: "system", subtype: "task_progress", task_id: "h1", description: "Frontend Svelte PCA lots 4-5" }), result(waiting)]);
+  play(done, [line({ type: "system", subtype: "task_progress", task_id: "h1", description: "Frontend Svelte lots 4-5" }), result(waiting)]);
   assert.equal(types(done, "turn/end").length, 0);
   assert.equal(types(done, "turn/background_wait").length, 1);
 });

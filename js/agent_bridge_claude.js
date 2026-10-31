@@ -3056,7 +3056,7 @@
   // An agent started with the Agent tool in the background reports with a task notification. In this stream-json mode
   // Claude Code takes that notification on its own and runs a new turn (queue-operation "task-notification" in the
   // transcript), but the Bridge had already sent turn/end for the turn that launched the agent: the Assistant stops
-  // reading events at turn/end, so that turn ran unseen and the user had to write "Continue" (PCA run of 31/10: turn
+  // reading events at turn/end, so that turn ran unseen and the user had to write "Continue" (a trial run of 31/10: turn
   // ended 07:07:32Z on "J'attends sa notification", two self-started turns at 07:20:39Z and 07:26:11Z, no read of
   // agent_events between 07:07:34Z and the "Continue" of 07:29:28Z).
   // The signal is Claude Code's own events: system/task_started (is_backgrounded, task_type local_agent) opens a task,
