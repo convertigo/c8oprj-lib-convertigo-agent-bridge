@@ -695,3 +695,16 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   claiming the upstream model cannot see images.
 - `node tests/gateway_models.test.js` checks metadata refresh, offline startup,
   stale-catalog fallback and the outbound ACP image payload without inference.
+
+
+## Studio native tools
+
+Every Studio skill profile keeps the Studio native tool policy; only No Code is restricted.
+Prefer the owning Convertigo MCP tools for authoring, without disabling native tools for Flow.
+
+## Printed Vibe todo calls
+
+`vibePrintedCallOf` recognizes a complete `todo {JSON}` or `todo … {JSON}` response and reuses the existing
+bounded turn nudge (two per turn, never after Stop/refusal/error). The Bridge asks for a real tool call;
+it never executes printed arguments. Keep ordinary answers, questions and malformed JSON outside this rule.
+Run `node --test tests/vibe_turn_nudge.test.js` and the Bridge suite after changing it.

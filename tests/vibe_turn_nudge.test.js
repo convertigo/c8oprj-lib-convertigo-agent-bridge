@@ -305,3 +305,24 @@ test("one rule: the recorded printed calls are nudged with their reason, the ans
     assert.equal(types(entry, "turn/nudge").length, 0, text);
   }
 });
+
+
+test("a todo JSON call printed as text is nudged without executing its arguments", () => {
+ for (const text of ['todo {"todos":[{"content":"Continue","status":"in_progress"}]}', 'todo … {"todos":[]}', 'todo...{"todos":[]}']) {
+  const entry=turn(7);play(entry,[say(text),answer(7)]);
+  assert.equal(types(entry,'turn/end').length,0,text);
+  const nudge=types(entry,'turn/nudge')[0];assert.ok(nudge,text);
+  assert.deepEqual([nudge.data.reason,nudge.data.tool],['printed_call','todo']);
+  assert.match(prompts(entry)[0].params.prompt[0].text,/as text instead of making it/);
+  assert.equal(entry._written.map(w=>JSON.parse(w)).some(m=>m.method==='tools/call'),false,'arguments are never executed by the Bridge');
+ }
+ for (const text of ['todo {not json}', 'The todo state is {"done":true}', 'todo {"todos":[]} — should I continue?', 'Task completed.']) {
+  const entry=turn(7);play(entry,[say(text),answer(7)]);assert.equal(types(entry,'turn/nudge').length,0,text);
+ }
+});
+
+test("printed todo continuation respects Stop and the two-nudge limit",()=>{
+ const text='todo … {"todos":[]}';const stopped=turn(7);sandbox.pushEvent(stopped,'turn/interrupt_requested',{protocol:'acp'});play(stopped,[say(text),answer(7)]);assert.equal(types(stopped,'turn/nudge').length,0);
+ const entry=turn(7);play(entry,[say(text),answer(7)]);play(entry,[say(text),answer(types(entry,'turn/nudge')[0].data.requestId)]);play(entry,[say(text),answer(types(entry,'turn/nudge')[1].data.requestId)]);
+ assert.equal(types(entry,'turn/nudge').length,2);assert.equal(types(entry,'turn/end').length,1);
+});

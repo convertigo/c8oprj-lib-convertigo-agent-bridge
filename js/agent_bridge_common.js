@@ -12311,7 +12311,7 @@
   // and one short stray token. Replies recorded on 30/10: "run_typescript", "run_typescript rhyumbe",
   // "run_typescriptInteraction", 'run_typescriptatischeck{"code": "..."}', 'run_typescript\u9032{"code": "..."}',
   // 'run_typescript(code="...")'. The name is a known compound one (run_typescript, a tool of the session) or a
-  // Convertigo or Playwright MCP name; task, edit, todo, bash, skill and process are words too and count only alone
+  // Convertigo or Playwright MCP name; task, edit, bash, skill and process are words too and count only alone; todo also takes a complete JSON plan object
   // ("Task completed." is an answer). Past the name only that junk, that one token or one block to the end is allowed, so
   // a sentence or a question never matches. reason: tool_name for a name, printed_call for a name with its arguments.
   // The start of an arguments block written with extra escapes: an optional \( or {, then a quoted key and its colon.
@@ -12322,6 +12322,13 @@
     var alone = body.replace(/\(\s*\)$/, "");
     if (VIBE_BUILTIN_TOOL_NAMES.indexOf(alone.toLowerCase()) >= 0) {
       return { reason: "tool_name", tool: alone };
+    }
+    // A todo call is a short name too, but a complete JSON argument object makes it a printed plan update.
+    // Keep the existing bounded nudge: never execute text as a tool call or expand the turn's permissions.
+    var todo = /^todo\s*(?:\u2026|\.\.\.)?\s*(\{[\s\S]*\})$/i.exec(body);
+    if (todo) {
+      try { JSON.parse(todo[1]); return { reason: "printed_call", tool: "todo" }; }
+      catch (_invalidTodoJson) { return null; }
     }
     var name = vibeCompoundToolPrefix(entry, body) || (VIBE_MCP_TOOL_NAME.exec(body) || [""])[0];
     if (!name.length) {
