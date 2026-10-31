@@ -11006,7 +11006,7 @@
   var VIBE_METRICS_MAX_PENDING = 500;
 
   function emptyVibeMetrics() {
-    return { minTime: 0, maxTime: 0, activeMs: 0, requests: 0, toolCalls: 0, toolFailures: 0, tools: {}, finishReasons: {},
+    return { version: 2, modelRequests: [], omittedModelRequests: 0, awaitingModelEnd: [], minTime: 0, maxTime: 0, activeMs: 0, requests: 0, toolCalls: 0, toolFailures: 0, tools: {}, finishReasons: {},
       sleeps: { count: 0, durationMs: 0 }, builderWaits: { count: 0, durationMs: 0 }, turns: {}, turnOrder: [], pending: {}, awaitingStart: [], awaitingEnd: [] };
   }
 
@@ -11035,7 +11035,67 @@
     tools[name] = tool;
   }
 
-  function addVibeJournalMetrics(metrics, text) {
+  var VIBE_METRICS_MAX_REQUESTS = 1000;
+  function vibeModelRequest(metrics, id, turn, model) {
+    metrics.modelRequests = metrics.modelRequests || [];
+    for(var i=0;i<metrics.modelRequests.length;i++) if(metrics.modelRequests[i].id===id) return metrics.modelRequests[i];
+    var row = {id: id, turn: turn || null, model: model || null, status: "running", startedAt: null, firstTokenAt: null,
+      endedAt: null, durationMs: null, timeToFirstTokenMs: null, providerLatencyMs: null, inputTokens: null,
+      cachedTokens: null, outputTokens: null, reasoningTokens: null, timingSource: "journal_boundary"};
+    metrics.modelRequests.push(row);
+    if(metrics.modelRequests.length>VIBE_METRICS_MAX_REQUESTS) {metrics.modelRequests.shift();metrics.omittedModelRequests=(metrics.omittedModelRequests||0)+1;}
+    return row;
+  }
+  function vibeRequestEnd(row, time) {
+    if(time>0) row.endedAt=time;
+    if(row.startedAt!==null && row.endedAt!==null && row.endedAt>=row.startedAt) row.durationMs=row.endedAt-row.startedAt;
+    if(row.firstTokenAt!==null && row.startedAt!==null && row.firstTokenAt>=row.startedAt) row.timeToFirstTokenMs=row.firstTokenAt-row.startedAt;
+  }
+  function optionalMetric(value) {
+    return value!==null && value!==undefined && value!=="" && isFinite(Number(value)) && Number(value)>=0 ? Number(value) : null;
+  }
+  function vibeRequestUsage(row, result) {
+    var usage=result.usage || {},timings=result.timings || {};
+    row.inputTokens=optionalMetric(usage.input_tokens === undefined ? usage.prompt_tokens : usage.input_tokens);
+    row.cachedTokens=optionalMetric(usage.cached_input_tokens === undefined ? (usage.prompt_tokens_details||{}).cached_tokens : usage.cached_input_tokens);
+    row.outputTokens=optionalMetric(usage.output_tokens === undefined ? usage.completion_tokens : usage.output_tokens);
+    row.reasoningTokens=optionalMetric(usage.reasoning_tokens === undefined ? (usage.completion_tokens_details||{}).reasoning_tokens : usage.reasoning_tokens);
+    row.firstTokenAt=optionalMetric(timings.first_token_at_ms);
+    row.timeToFirstTokenMs=optionalMetric(timings.time_to_first_token_ms);
+    row.providerLatencyMs=optionalMetric(timings.provider_latency_ms);
+    row.finishReason=result.finish_reason || null;
+  }
+
+  // A completed provider call may still contain an MCP failure. Inspect protocol envelopes, not domain values.
+  function mcpResultError(value, depth) {
+    depth = depth || 0;
+    if (value === null || typeof value === "undefined" || depth > 6) return null;
+    if (typeof value === "string") {
+      if (value.length > 65536) return null;
+      var code = /^Error \[([A-Z][A-Z0-9_]*)\]\s*([\s\S]*)$/.exec(value.trim());
+      if (code) return {code: code[1], message: code[2]};
+      if (/^\s*[\[{]/.test(value)) { try { return mcpResultError(JSON.parse(value), depth + 1); } catch (_notJson) {} }
+      return null;
+    }
+    if (Array.isArray(value)) {
+      for (var i=0; i<Math.min(20,value.length); i++) { var found=mcpResultError(value[i],depth+1); if(found)return found; }
+      return null;
+    }
+    if (typeof value !== "object") return null;
+    var structured = value.structuredContent || value.structured_content;
+    if (value.isError === true || value.is_error === true || structured && (structured.error || structured.ok === false)) {
+      var error = structured && structured.error || value.error || {};
+      return {code: String(error.code || "MCP_TOOL_ERROR"), message: String(error.message || "MCP tool failed."), hint: String(error.hint || ""), details: error.details || null};
+    }
+    var keys = ["result", "rawOutput", "raw_output", "content", "text"];
+    for (var k=0;k<keys.length;k++) {
+      if (Object.prototype.hasOwnProperty.call(value,keys[k])) { var nested=mcpResultError(value[keys[k]],depth+1);if(nested)return nested; }
+    }
+    return null;
+  }
+
+  function addVibeJournalMetrics(metrics, text, model) {
+    metrics.awaitingModelEnd = metrics.awaitingModelEnd || [];
     var lines = String(text || "").split("\n");
     var timePattern = /"(?:time_unix_ms|createdAt)":\s*(1[0-9]{12})/g;
     for (var i = 0; i < lines.length; i++) {
@@ -11071,7 +11131,12 @@
           var started = metrics.pending[metrics.awaitingStart.shift()];
           if (started && !started.start) {
             started.start = recordTime;
+            if(started.kind === "completion") vibeModelRequest(metrics,started.modelRequestId,started.turn,started.model).startedAt=recordTime;
           }
+        }
+        while(metrics.awaitingModelEnd.length) {
+          var modelEnd=metrics.awaitingModelEnd.shift();
+          vibeRequestEnd(vibeModelRequest(metrics,modelEnd.id,modelEnd.turn,modelEnd.model),recordTime);
         }
         while (metrics.awaitingEnd.length) {
           var ended = metrics.awaitingEnd.shift();
@@ -11119,6 +11184,13 @@
             sleep: payload.kind === "tool" && /(^|[;&|(\s])sleep\s+[0-9.]+/.test(command),
             builderWait: /mobile[_-]builder[_-]open$/.test(name) && !!args.wait && String(args.wait) !== "false"
           };
+          if(payload.kind === "completion") {
+            var modelRequestId=String(payload.action_id);
+            var requestModel=trim(request.model || request.model_id || model) || null;
+            metrics.pending[payload.action_id].modelRequestId=modelRequestId;
+            metrics.pending[payload.action_id].model=requestModel;
+            vibeModelRequest(metrics,modelRequestId,request.turn_id,requestModel);
+          }
           metrics.awaitingStart.push(payload.action_id);
         }
         continue;
@@ -11133,13 +11205,20 @@
       if (pending) {
         delete metrics.pending[payload.action_id];
       }
-      if (resultType === "completion_succeeded") {
+      if (resultType === "completion_succeeded" || resultType === "completion_failed") {
+        var row=vibeModelRequest(metrics,String(payload.action_id || "journal-"+(metrics.requests+1)),pending ? pending.turn : "",pending ? pending.model : model);
+        if(row.status !== "running") continue;
+        row.status=resultType === "completion_succeeded" ? "completed" : "failed";
+        vibeRequestUsage(row,result);
+        if(pending && pending.start) row.startedAt=pending.start;
+        if(recordTime) vibeRequestEnd(row,recordTime);
+        else metrics.awaitingModelEnd.push({id:row.id,turn:row.turn,model:row.model});
         metrics.requests++;
         var reason = String(result.finish_reason || "unknown");
         metrics.finishReasons[reason] = (metrics.finishReasons[reason] || 0) + 1;
         vibeMetricsTurn(metrics, pending ? pending.turn : "").requests++;
       } else if (resultType === "tool_succeeded" || resultType === "tool_failed") {
-        var failed = resultType === "tool_failed";
+        var failed = resultType === "tool_failed" || mcpResultError(result) !== null;
         var toolTurn = vibeMetricsTurn(metrics, pending ? pending.turn : "");
         metrics.toolCalls++;
         toolTurn.toolCalls++;
@@ -11190,6 +11269,8 @@
       activeMs: metrics.activeMs,
       wallMs: metrics.maxTime && metrics.minTime ? metrics.maxTime - metrics.minTime : 0,
       requests: metrics.requests,
+      modelRequests: metrics.modelRequests || [],
+      omittedModelRequests: metrics.omittedModelRequests || 0,
       finishReasons: metrics.finishReasons,
       toolCalls: metrics.toolCalls,
       toolFailures: metrics.toolFailures,
@@ -11245,7 +11326,7 @@
     var segments = state.segments && typeof state.segments === "object" ? state.segments : {};
     var changed = false;
     // Measures started with this version: a state without them reads the segments still present from their start.
-    var metricsFresh = !state.metrics || typeof state.metrics !== "object";
+    var metricsFresh = !state.metrics || typeof state.metrics !== "object" || state.metrics.version !== 2;
     var metrics = metricsFresh ? emptyVibeMetrics() : state.metrics;
     names = Array.prototype.slice.call(names).map(String).sort();
     var seenCallIds = {};
@@ -11302,7 +11383,7 @@
           }
           var metricsStart = metricsOffset - from;
           if (metricsStart <= end) {
-            addVibeJournalMetrics(metrics, String(new java.lang.String(bytes, metricsStart, end + 1 - metricsStart, StandardCharsets.UTF_8)));
+            addVibeJournalMetrics(metrics, String(new java.lang.String(bytes, metricsStart, end + 1 - metricsStart, StandardCharsets.UTF_8)), model);
             segment.metricsOffset = from + end + 1;
           }
           changed = true;
@@ -11314,7 +11395,8 @@
     }
     if (changed) {
       try {
-        writeJsonFile(stateFile, { version: 2, sessionId: session, segments: segments, metrics: metrics });
+        writeJsonFile(stateFile, { version: 3, sessionId: session, segments: segments, metrics: metrics,
+          previousMetrics: metricsFresh && state.metrics ? state.metrics : state.previousMetrics || null });
       } catch (_ignoreUsageStateWrite) {}
     }
     // The images the Agent Bridge had described for a model that cannot see (describeImagesForBlindModel) are not in
@@ -11337,6 +11419,7 @@
       view.turnCount = view.turns.length;
       delete view.turns;
     }
+    if(view && !(options && (options.withRequests === true || options.withTurns === true))) delete view.modelRequests;
     total.metrics = view;
     return total;
   }
@@ -12325,9 +12408,9 @@
     }
     // A todo call is a short name too, but a complete JSON argument object makes it a printed plan update.
     // Keep the existing bounded nudge: never execute text as a tool call or expand the turn's permissions.
-    var todo = /^todo\s*(?:\u2026|\.\.\.)?\s*(\{[\s\S]*\})$/i.exec(body);
+    var todo = /^todo\s*(?:\u2026|\.\.\.)?\s*(?:(\{[\s\S]*\})|\(\s*(\{[\s\S]*\})\s*\))$/i.exec(body);
     if (todo) {
-      try { JSON.parse(todo[1]); return { reason: "printed_call", tool: "todo" }; }
+      try { JSON.parse(todo[1] || todo[2]); return { reason: "printed_call", tool: "todo" }; }
       catch (_invalidTodoJson) { return null; }
     }
     var name = vibeCompoundToolPrefix(entry, body) || (VIBE_MCP_TOOL_NAME.exec(body) || [""])[0];
@@ -12579,7 +12662,10 @@
       eventData.title = update.title || "";
       eventData.status = update.status || "";
       rememberToolCallTitle(entry, eventData.toolCallId, eventData.title);
-      var failure = acpToolFailure(entry, update, eventData.toolCallId, eventData.status);
+      var semanticError = mcpResultError(update.rawOutput || update.raw_output || update.content || null);
+      if (eventData.status === "completed" && semanticError !== null) eventData.status = "failed";
+      var failureUpdate = semanticError ? Object.assign({}, update, {rawOutput: {error: semanticError}}) : update;
+      var failure = acpToolFailure(entry, failureUpdate, eventData.toolCallId, eventData.status);
       if (failure !== null) {
         eventData.failure = failure;
       }
@@ -12680,10 +12766,20 @@
           } else if (entry.provider === "vibe" && sendVibeTurnNudge(entry, message)) {
             // The turn goes on with the nudge: its own answer ends it.
           } else {
+            var ended = message.result || {};
+            var printed = entry.provider === "vibe" && !entry.turnInterrupted && !entry.turnWriteRefused &&
+              (!ended.stopReason || ended.stopReason === "end_turn") ? vibePrintedCallOf(entry, entry.turnTail || "") : null;
+            if (printed) {
+              ended = Object.assign({}, ended, {incomplete: true, error: {code: "PRINTED_TOOL_CALL", tool: printed.tool,
+                message: "The agent printed a tool call without executing it. Automatic continuation did not complete it."}});
+              pending.response.result = ended;
+              pushEvent(entry, "turn/incomplete", ended.error);
+              pushEvent(entry, "progress/message", {text: ended.error.message, code: "PRINTED_TOOL_CALL"});
+            }
             pushEvent(entry, "turn/end", {
               requestId: message.id,
               method: pending.method,
-              result: message.result || {}
+              result: ended
             });
           }
         }

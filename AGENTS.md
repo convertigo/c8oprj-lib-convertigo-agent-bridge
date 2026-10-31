@@ -708,3 +708,19 @@ Prefer the owning Convertigo MCP tools for authoring, without disabling native t
 bounded turn nudge (two per turn, never after Stop/refusal/error). The Bridge asks for a real tool call;
 it never executes printed arguments. Keep ordinary answers, questions and malformed JSON outside this rule.
 Run `node --test tests/vibe_turn_nudge.test.js` and the Bridge suite after changing it.
+
+## Flow MCP failures and per-request journal measures
+
+Flow MCP errors keep `isError:true` for every provider. `mcpResultError` recognizes MCP envelopes in
+provider results; both ACP events and journal metrics classify a nominal `completed`/`tool_succeeded`
+containing such an error as failed. Do not treat an application result's ordinary `error` property as a tool failure.
+
+Usage state v3 / metrics v2 retains bounded `modelRequests` (1000 rows) with observed journal start/end,
+duration and available input/cached/output/reasoning tokens. Prompt text and tool arguments never enter these rows.
+First-token and provider-latency fields remain null unless the provider reports them; journal boundaries are
+labelled `journal_boundary` and are not provider latency. Request details travel in explicit exports, not every
+usage update. Migration rereads retained journal segments and preserves the previous metrics snapshot.
+Run `node --test tests/vibe_mcp_metrics.test.js` and `tests/agent_quota.test.js` after changing this contract.
+
+Printed `todo({...})` calls are recognized too. After bounded nudges fail, the turn ends with
+`incomplete:true` and `PRINTED_TOOL_CALL`, and emits a progress diagnostic; it never executes printed arguments.

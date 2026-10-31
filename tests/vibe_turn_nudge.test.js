@@ -62,7 +62,7 @@ const packages = new Proxy({}, {
 const sandbox = { Packages: packages, context: javaProxy, request: javaProxy, log: javaProxy, C8O: { agentBridge: {} } };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
-vm.runInContext(fs.readFileSync(path.join(root, "js/agent_bridge_common.js"), "utf8"), sandbox, { filename: "agent_bridge_common.js" });
+vm.runInContext(fs.readFileSync(process.env.BRIDGE_COMMON_PATH || path.join(root, "js/agent_bridge_common.js"), "utf8"), sandbox, { filename: "agent_bridge_common.js" });
 const stopped = [];
 sandbox.processAlive = () => true;
 sandbox.stopEntry = (entry) => { stopped.push(entry.handle); sandbox.pushEvent(entry, "system/closed", { handle: entry.handle }); };
@@ -325,4 +325,15 @@ test("printed todo continuation respects Stop and the two-nudge limit",()=>{
  const text='todo … {"todos":[]}';const stopped=turn(7);sandbox.pushEvent(stopped,'turn/interrupt_requested',{protocol:'acp'});play(stopped,[say(text),answer(7)]);assert.equal(types(stopped,'turn/nudge').length,0);
  const entry=turn(7);play(entry,[say(text),answer(7)]);play(entry,[say(text),answer(types(entry,'turn/nudge')[0].data.requestId)]);play(entry,[say(text),answer(types(entry,'turn/nudge')[1].data.requestId)]);
  assert.equal(types(entry,'turn/nudge').length,2);assert.equal(types(entry,'turn/end').length,1);
+});
+
+test("printed todo call syntax is nudged and an exhausted continuation is explicitly incomplete",()=>{
+ const text='todo({"todos":[]})';const entry=turn(7);play(entry,[say(text),answer(7)]);
+ assert.equal(types(entry,'turn/nudge').length,1);
+ play(entry,[say(text),answer(types(entry,'turn/nudge')[0].data.requestId)]);
+ play(entry,[say(text),answer(types(entry,'turn/nudge')[1].data.requestId)]);
+ assert.equal(types(entry,'turn/incomplete')[0].data.code,'PRINTED_TOOL_CALL');
+ assert.equal(types(entry,'turn/end')[0].data.result.incomplete,true);
+ assert.equal(types(entry,'turn/end')[0].data.result.error.tool,'todo');
+ assert.equal(prompts(entry).length,2);
 });
