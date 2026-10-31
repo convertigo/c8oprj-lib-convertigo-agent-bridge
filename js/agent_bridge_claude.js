@@ -1350,7 +1350,7 @@
       "- Do not use shell, `rg`, or filesystem scans to rediscover MCP tool signatures already exposed by the MCP schemas and the skills.",
       "- Reply to the user in their language. Keep progress updates short and factual, and never expose hidden reasoning.",
       "- When you change a project, validate the result with the available Convertigo tools before claiming completion.",
-      "- Keep your plan visible: create its steps with TaskCreate and move them with TaskUpdate (pending, in_progress, completed); load the two tools once with ToolSearch \"select:TaskCreate,TaskUpdate\". The Convertigo Assistant shows this list to the user as the plan.",
+      "- Keep your plan visible: when the TaskCreate and TaskUpdate tools load (once, with ToolSearch \"select:TaskCreate,TaskUpdate\"), create its steps with TaskCreate and move them with TaskUpdate (pending, in_progress, completed); the Convertigo Assistant shows this list to the user as the plan. A sub-agent without these tools does not look for them: it lists its steps and their status in its final answer.",
       "- To wait for something (a scheduled job, a build, a server), do not run a bare `sleep N`: Claude Code refuses it. Loop on the condition with `until <check>; do sleep 2; done`, or start the command with `run_in_background` and keep working.",
       "",
       "Provider: Claude"
@@ -1399,13 +1399,13 @@
       "- Do not use shell, `rg`, or filesystem scans to rediscover MCP tool signatures already exposed by the MCP schemas and the skills.",
       "- Reply to the user in their language. Keep progress updates short and factual, and never expose hidden reasoning.",
       "- When you change a project, validate the result with the available Flow tools before claiming completion.",
-      "- Keep your plan visible: create its steps with TaskCreate and move them with TaskUpdate (pending, in_progress, completed); load the two tools once with ToolSearch \"select:TaskCreate,TaskUpdate\". The Convertigo Assistant shows this list to the user as the plan.",
+      "- Keep the plan in the project's `docs/generated/PROGRESS.md`: its steps and their status, updated with `flow-resource-patch` after each step. TaskCreate and TaskUpdate are optional: when they load (once, with ToolSearch \"select:TaskCreate,TaskUpdate\"), mirror the plan there too, as the Convertigo Assistant shows that list to the user. A sub-agent, which may not have them, does not look for them and leaves `PROGRESS.md` to the agent that started it: it gives its steps and their status in its final answer.",
       "- To wait for something (a scheduled job, a build, a server), do not run a bare `sleep N`: Claude Code refuses it. Loop on the condition with `until <check>; do sleep 2; done`, or start the command with `run_in_background` and keep working.",
       "",
       CLAUDE_FLOW_COMPACTION_RULES_HEADING,
       "",
       "- Reload the `convertigo-flow-mcp` skill and the specialist skill of the task, read the project's `docs/generated/PROGRESS.md` when it exists, and read a source with `code-get` before patching it. Never rebuild a name or a revision from memory.",
-      "- Keep the TaskCreate/TaskUpdate plan current after each step.",
+      "- Keep the plan of `docs/generated/PROGRESS.md` current after each step (and the TaskCreate/TaskUpdate list when your session has these tools).",
       "",
       "Provider: Claude"
     ].join("\n");

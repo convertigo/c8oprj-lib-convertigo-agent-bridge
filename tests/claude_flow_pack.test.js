@@ -216,7 +216,11 @@ test("the CLAUDE.md of a Flow conversation routes to the Flow skills and keeps t
     assert.match(instructions, /as an MCP resource of the `convertigo-flow` server; `flow-resource-get`/);
     assert.match(instructions, /`frontend-svelte-action` with `actionId:"dev\.open"` reports `browserControlReady:true`/);
     assert.match(instructions, /mcp__playwright__browser_snapshot/);
-    assert.match(instructions, /TaskCreate/);
+    assert.match(instructions, /Keep the plan in the project's `docs\/generated\/PROGRESS\.md`/);
+    assert.match(instructions, /TaskCreate and TaskUpdate are optional/);
+    assert.match(instructions, /A sub-agent, which may not have them, does not look for them/);
+    assert.doesNotMatch(instructions, /Keep the TaskCreate\/TaskUpdate plan current/, "the plan never depends on host task tools");
+    assert.match(instructions.substring(instructions.indexOf("\n## After a context compaction (Convertigo Flow)\n")), /plan of `docs\/generated\/PROGRESS\.md` current/);
     const routing = instructions.indexOf("\n## Convertigo Flow routing\n");
     const compaction = instructions.indexOf("\n## After a context compaction (Convertigo Flow)\n");
     assert.ok(routing > 0 && compaction > routing, "routing, then the compaction rules");
