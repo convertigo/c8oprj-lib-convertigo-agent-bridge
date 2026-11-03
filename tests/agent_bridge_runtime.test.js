@@ -97,7 +97,7 @@ const basicProxyEnv = proxyEnvironmentFromSettings({
 assert.equal(basicProxyEnv.HTTPS_PROXY, "http://domain%2Fuser:p%40ss%3Aword@proxy.example:3128");
 assert.equal(basicProxyEnv.PIP_PROXY, basicProxyEnv.HTTPS_PROXY);
 assert.equal(basicProxyEnv.npm_config_https_proxy, basicProxyEnv.HTTPS_PROXY);
-assert.equal(basicProxyEnv.NO_PROXY, "localhost,127.0.0.1");
+assert.equal(basicProxyEnv.NO_PROXY, "localhost,127.0.0.1,::1");
 
 const ntlmProxyEnv = proxyEnvironmentFromSettings({
   enabled: true,
@@ -108,7 +108,9 @@ const ntlmProxyEnv = proxyEnvironmentFromSettings({
   localProxyUrl: "http://127.0.0.1:19128"
 });
 assert.equal(ntlmProxyEnv.HTTP_PROXY, "http://127.0.0.1:19128");
-assert.deepEqual(proxyEnvironmentFromSettings({ enabled: true, direct: true }), {});
+assert.deepEqual(proxyEnvironmentFromSettings({ enabled: true, direct: true }), {
+  NO_PROXY: "localhost,127.0.0.1,::1", no_proxy: "localhost,127.0.0.1,::1"
+});
 
 assert.equal(
   redirectLocationValue({ getValue: () => "https://release-assets.example/runtime.tar.gz" }),

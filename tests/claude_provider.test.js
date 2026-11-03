@@ -552,7 +552,7 @@ console.log("Vibe image attachment contract OK");
     assert.equal(result.model, "glm-5-2");
     writeLocalVibeConfig("/managed/vibe-home", "http://localhost:18080/convertigo/api/mcp", "glm-5-3",
       { vibeProfile: "convertigo", gatewayModelIds: ["mistral/zai-glm-5-2", "mistral/zai-glm-5-3"] });
-    assert.match(written, /^active_model = "glm-5-3"\napi_timeout = 720\.0\nauto_compact_threshold = 950000$/m, "GLM 5.3 active: global threshold 950k");
+    assert.match(written, /^active_model = "glm-5-3"\napi_timeout = 720\.0\nenable_system_trust_store = true\nauto_compact_threshold = 950000$/m, "GLM 5.3 active: global threshold 950k with system trust");
     assert.match(written, /alias = "glm-5-3"[\s\S]*?auto_compact_threshold = 950000/);
   } finally {
     writeTextFile = originalWrite;
