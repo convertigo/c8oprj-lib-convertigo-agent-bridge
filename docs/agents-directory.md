@@ -26,7 +26,7 @@ conversations and attachments, gateway credentials and TigoAccess metadata,
 personal prompt/skill/MCP resources, feedback and agent process guards. Vision
 and browser helpers resolve their keys and runtime paths there too. Existing
 project assets and the engine's separate `subagents/` run directory are not
-relocated. No secret value is returned to the frontend by this setting.
+relocated. The engine-wide Node.js distribution also keeps its engine-managed location; provider npm packages use the selected agents directory. No secret value is returned to the frontend by this setting.
 
 ## New installation
 
@@ -41,7 +41,7 @@ Stop active agent conversations/processes before changing the setting. No
 automatic migration or fallback to the previous directory is performed. Keep
 the previous directory intact until the new setup has been checked.
 
-For a clean runtime retry, let the Bridge reinstall its managed Python/Node/CLI
+For a clean runtime retry, let the Bridge reinstall its managed Python and provider packages
 at the new location. Do not move an installed Python virtual environment: it
 can embed absolute paths. Authentication and existing conversations/resources
 need an explicit, reviewed transfer or fresh sign-in. In particular, preserve
