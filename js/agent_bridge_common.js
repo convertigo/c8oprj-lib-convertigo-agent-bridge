@@ -756,7 +756,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // the only folder it writes with that home.
   function noCodeScratchDir(options, vibeHome) {
     var key = trim(options && options.conversationId) || trim(options && options.handle) || "session";
-    return childPath(childPath(filePath(new File(vibeHome).getParentFile()), "scratch"), stableId("conversation", key));
+    return isWindows() ? childPath(childPath(vibeHome, "s"), stableId("conversation", key)) : childPath(childPath(filePath(new File(vibeHome).getParentFile()), "scratch"), stableId("conversation", key));
   }
 
   // The folders a confined vibe-acp reads besides the system: its runtime (the venv of the managed Vibe, the Python
@@ -5453,7 +5453,27 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   function stableId(prefix, value) {
     var text = trim(value) || "default";
     var uuid = UUID.nameUUIDFromBytes(new java.lang.String(text).getBytes(StandardCharsets.UTF_8));
+    // Keep all 128 UUID bits, with a case-insensitive filesystem-safe alphabet.
+    // Conversation IDs in protocol/state remain unchanged; only directory names shrink.
+    if (String(prefix) === "conversation" && isWindows()) {
+      return compactUuidDirectoryName(String(uuid));
+    }
     return String(prefix) + "-" + String(uuid);
+  }
+
+  function compactUuidDirectoryName(uuid) {
+    var hex = String(uuid).replace(/-/g, "").toLowerCase();
+    if (!/^[0-9a-f]{32}$/.test(hex)) { throw new Error("Invalid conversation directory UUID"); }
+    var alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+    var bits = 0, value = 0, out = "";
+    for (var i = 0; i < hex.length; i++) {
+      value = (value << 4) | parseInt(hex.charAt(i), 16);
+      bits += 4;
+      while (bits >= 5) { bits -= 5; out += alphabet.charAt((value >> bits) & 31); }
+      value &= (1 << bits) - 1;
+    }
+    if (bits) { out += alphabet.charAt((value << (5 - bits)) & 31); }
+    return out;
   }
 
   function hashShort(value) {
@@ -5626,6 +5646,14 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
 
     var conv = resolveConversationIdOption(options);
     var convBase;
+    if (isWindows()) {
+      // Encode the full UUID derived from the owner/profile/conversation tuple.
+      // Keep credential homes unchanged; only new managed conversation homes flatten.
+      var identity = JSON.stringify([isConvertigoGatewayProfile(options) ? "convertigo" : "mistral", user, conv]);
+      var token = compactUuidDirectoryName(stableId("home", identity).substring(5));
+      return { scope: "conversation", path: childPath(childPath(installDir, "c"), token), explicit: false,
+        userId: user, conversationId: conv, projectId: project, error: "" };
+    }
     if (user.length) {
       convBase = childPath(childPath(root, "users"), userPathSlug(user));
       convBase = childPath(childPath(convBase, "conversations"), stableId("conversation", conv));
@@ -7398,10 +7426,30 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     }
   }
 
+  function agentsDirectoryPathBudget(workspaceRoot, options) {
+    var root = filePath(agentsDirectory(workspaceRoot));
+    var token = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    var tail = "logs/session/unified/00000000-0000-0000-0000-000000000000/chunks/" +
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json.aaaaaaaaaaaaaaaa.tmp";
+    var sample = childPath(childPath(childPath(childPath(root, "vibe"), "c"), token), tail);
+    var overhead = sample.length - root.length;
+    var explicitHome = trim(options && options.vibeHome);
+    var explicitInstall = trim(options && options.installDir);
+    if (explicitInstall.length) { sample = childPath(childPath(childPath(explicitInstall, "c"), token), tail); }
+    if (explicitHome.length) { sample = childPath(explicitHome, tail); }
+    var maxRoot = 259 - overhead - 32;
+    var configured = false;
+    try { configured = trim(Engine.theApp.databaseObjectsManager.symbolsGetValue("assistant.agents.directory")).length > 0; } catch (_missingAgentsDirectorySymbol) {}
+    return { symbol: "assistant.agents.directory", configured: configured, directory: root, rootLength: root.length,
+      estimatedLongestPathLength: sample.length, pathLimit: 259, safetyMargin: 32, recommendedMaxRootLength: maxRoot,
+      status: sample.length > 259 ? "too_long" : (sample.length + 32 <= 259 ? "within_budget" : "low_margin"),
+      recommendation: "C:\\Tigo", estimateScope: explicitHome.length ? "explicit-vibe-home-journal" : (explicitInstall.length ? "explicit-vibe-install-journal" : "managed-vibe-3.0.4-journal") };
+  }
+
   function windowsRuntimeDiagnostics(options, workspaceRoot) {
     if (!isWindows()) { return null; }
     options = options || {};
-    var result = null, cache = null, cacheKey = "windows-path-diagnostics:" + hashShort(workspaceRoot);
+    var result = null, cache = null, cacheKey = "windows-path-diagnostics:" + hashShort(workspaceRoot + "|" + filePath(agentsDirectory(workspaceRoot)));
     try {
       cache = getRuntimeUpdateCache();
       var raw = cache.get(cacheKey);
@@ -7421,6 +7469,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     result = result || { registryEnabled: null, fileSystemProbe: "not_checked", testedLength: 0, checkedAt: 0 };
     return {
       platform: "windows",
+      agentsDirectory: agentsDirectoryPathBudget(workspaceRoot, options),
       longPaths: result,
       pathIssues: runtimePathIssues.slice(0),
       documentationUrl: WINDOWS_LONG_PATHS_DOC_URL
@@ -12514,6 +12563,12 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // from its journal. The conversation is the Assistant thread id (agent-…) or the Vibe session id.
   function findVibeSessionDir(workspaceRoot, sessionId) {
     var vibeRoot = new File(agentsDirectory(workspaceRoot), "vibe");
+    var compactHomes = new File(vibeRoot, "c").listFiles();
+    for (var compactIndex = 0; compactHomes !== null && compactIndex < compactHomes.length; compactIndex++) {
+      if (new File(compactHomes[compactIndex], "logs/session/unified/" + sessionId + "/journal").isDirectory()) {
+        return compactHomes[compactIndex];
+      }
+    }
     var homes = vibeRoot.listFiles();
     for (var h = 0; homes !== null && h < homes.length; h++) {
       if (!homes[h].isDirectory() || !/^homes-/.test(String(homes[h].getName()))) {

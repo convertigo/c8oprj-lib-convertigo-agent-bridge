@@ -58,3 +58,26 @@ Offline tests cover default behavior, short POSIX/Windows/UNC destinations and
 invalid-path rejection. No Code image ownership checks also cover an external
 storage root. Native Windows/Citrix installation remains an acceptance test on
 the target environment; a successful macOS test does not certify Windows.
+
+## Windows managed conversation paths
+
+New Windows Vibe conversation homes use `<agents>/vibe/c/<token>` instead of the
+nested home/user/conversation hierarchy. The token encodes the complete
+deterministic UUID of the owner, provider profile and conversation tuple in
+26 lowercase Base32 characters; it is not the first segment of a UUID. Logical
+conversation IDs and user credential homes remain unchanged. Distinct owners,
+profiles and conversations receive distinct homes. No Code scratch files stay
+inside the compact home. Session reporting recognizes both layouts.
+
+The known Vibe 3.0.4 journal filename pattern is estimated at 197 characters
+with `C:\Tigo` as the agents root. The diagnostic reserves another 32 characters
+and recommends a root no longer than 37 characters for this pattern. It reports
+`within_budget`, `low_margin` or `too_long`, including an explicitly restored
+conversation home when supplied. These are conservative journal estimates, not
+a certification of every Python/npm dependency or future provider filename.
+
+Prefer Windows long-path support when enterprise policy allows it. Otherwise,
+set the symbol to a short, writable dedicated directory and check diagnostics
+again. Changing the root invalidates the cached filesystem diagnostic. Stop
+active turns before updating and validate with a new conversation. Existing
+conversation directories are retained and are not moved automatically.

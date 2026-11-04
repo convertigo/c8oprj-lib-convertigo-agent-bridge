@@ -165,3 +165,46 @@ test("presence-only startup never starts registry or filesystem probes; full che
   scope.windowsRuntimeDiagnostics({ runtimePresenceOnly: 'true' }, 'C:\\Studio');
   assert.equal(commands, 1); assert.equal(probes, 1);
 });
+
+test('agents directory budget measures the selected root and reserves journal headroom', () => {
+ const {scope}=runtimeSearch();
+ let selected='C:\\Tigo';
+ scope.agentsDirectory=()=>new scope.File(selected);
+ scope.Engine={theApp:{databaseObjectsManager:{symbolsGetValue:()=>selected}}};
+ const short=scope.agentsDirectoryPathBudget('C:\\workspace');
+ assert.equal(short.configured,true);assert.equal(short.directory,selected);
+ assert.equal(short.estimatedLongestPathLength,197);assert.equal(short.safetyMargin,32);
+ assert.equal(short.status,'within_budget');
+ selected='C:\\'+'a'.repeat(short.recommendedMaxRootLength);
+ assert.equal(scope.agentsDirectoryPathBudget('C:\\workspace').status,'low_margin');
+ selected='C:\\'+'a'.repeat(120);
+ assert.equal(scope.agentsDirectoryPathBudget('C:\\workspace').status,'too_long');
+});
+
+test('changing the agents symbol invalidates the long-path diagnostic cache',()=>{
+ const {scope}=runtimeSearch();let selected='C:\\one',probes=0;
+ const cache=new Map();
+ scope.agentsDirectory=()=>new scope.File(selected);
+ scope.hashShort=s=>s;scope.now=()=>100;
+ scope.getRuntimeUpdateCache=()=>({get:k=>cache.get(k),put:(k,v)=>cache.set(k,v)});
+ scope.runCommand=()=>({ok:true,stdout:'LongPathsEnabled REG_DWORD 0x0'});
+ scope.probeWindowsLongPaths=()=>{probes++;return {status:'failed',testedLength:280};};
+ scope.windowsRuntimeDiagnostics({},'C:\\workspace');
+ selected='C:\\two';scope.windowsRuntimeDiagnostics({},'C:\\workspace');
+ assert.equal(probes,2);
+});
+
+test('an explicit or restored long conversation home is included in the estimate',()=>{
+ const {scope}=runtimeSearch();scope.agentsDirectory=()=>new scope.File('C:\\Tigo');
+ const budget=scope.agentsDirectoryPathBudget('C:\\workspace',{vibeHome:'C:\\'+'a'.repeat(160)});
+ assert.equal(budget.status,'too_long');assert.equal(budget.estimateScope,'explicit-vibe-home-journal');
+ assert.ok(budget.estimatedLongestPathLength>259);
+ const tight=scope.agentsDirectoryPathBudget('C:\\workspace',{vibeHome:'C:\\'+'a'.repeat(70)});
+ assert.equal(tight.status,'low_margin');
+});
+
+test('a runtime directory override cannot hide an overlong journal behind a short agents root',()=>{
+ const {scope}=runtimeSearch();scope.agentsDirectory=()=>new scope.File('C:\\Tigo');
+ const budget=scope.agentsDirectoryPathBudget('C:\\workspace',{installDir:'C:\\'+'a'.repeat(100)});
+ assert.equal(budget.status,'too_long');assert.equal(budget.estimateScope,'explicit-vibe-install-journal');
+});
