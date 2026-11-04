@@ -103,10 +103,10 @@ same context.
   `Bearer ${CONVERTIGO_MCP_TOKEN}` and passed with `--strict-mcp-config`; the
   token only exists in the process environment.
 - Skills are delegated to `lib_ConvertigoMCP._setupClaude` with
-  `configureMcp=false`; the bridge adds the legacy-only `convertigo-studio`
-  router. A Studio (generalist) Claude home never receives the Flow pack or
-  `convertigo-nocode`; a conversation of the `flow` profile gets the Flow pack
-  only (see "Flow capability pack for Claude").
+  `configureMcp=false`; the bridge adds the `convertigo-studio` router.
+  A Studio (generalist) Claude home holds both Legacy and Flow packs when Flow
+  is available, and never receives `convertigo-nocode`. An explicit `flow`
+  conversation gets the Flow pack only (see "Flow capability pack for Claude").
 - Authentication mirrors Codex: sync `.credentials.json` from `~/.claude` or the
   user-scoped home, or import it from the macOS keychain; verify with
   `claude auth status`. Never log or return token values.
