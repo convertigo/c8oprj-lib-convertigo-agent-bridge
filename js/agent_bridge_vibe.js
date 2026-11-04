@@ -864,7 +864,7 @@
       if (!owner.length || !root.length || !trim(path).length) {
         return false;
       }
-      var agents = String(new File(new File(root), "agents").getCanonicalPath()).replace(/\\/g, "/") + "/";
+      var agents = String(agentsDirectory(root).getCanonicalPath()).replace(/\\/g, "/") + "/";
       var file = String(new File(trim(path)).getCanonicalPath()).replace(/\\/g, "/");
       if (file.indexOf(agents) !== 0) {
         return false;

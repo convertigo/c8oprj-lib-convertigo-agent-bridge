@@ -1383,3 +1383,9 @@ awaiting review. Use the complete bundle from the Assistant's
 or explicitly choose its
 [preview manifest](https://github.com/convertigo/c8oprj-lib-convertigo-assistant/blob/master/stack-release-preview.json).
 Pushes/tags build and publish pre-releases; they never deploy a server.
+
+## Short agent storage paths
+
+Set the optional `assistant.agents.directory` global symbol to a dedicated,
+absolute directory when the default workspace path is too long. See
+[agent storage configuration and migration](docs/agents-directory.md).

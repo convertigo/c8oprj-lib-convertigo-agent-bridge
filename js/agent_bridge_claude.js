@@ -25,7 +25,7 @@
   ];
 
   function claudeInstallDir(options, workspaceRoot) {
-    return normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/claude"), workspaceRoot);
+    return normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(workspaceRoot)), "claude"), workspaceRoot);
   }
 
   function claudeNpmPrefix(installDir) {
@@ -815,7 +815,7 @@
   function claudeAuthProbeCacheFile(options) {
     try {
       var root = trim(resolveWorkspaceRoot(options || {}));
-      return root.length ? new File(childPath(root, "agents"), CLAUDE_AUTH_PROBE_CACHE_FILE) : null;
+      return root.length ? new File(filePath(agentsDirectory(root)), CLAUDE_AUTH_PROBE_CACHE_FILE) : null;
     } catch (_ignoreClaudeAuthProbeFile) {
       return null;
     }

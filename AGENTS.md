@@ -24,8 +24,9 @@ same context.
   has its own full-stack requirements.
 - Default Studio workspace root is usually
   `/Users/nicolas/dev/convertigo/runtime-ConvertigoStudioHotfix/.metadata/.plugins/com.twinsoft.convertigo.studio`.
-- Runtime agent files must live under `<workspaceRoot>/agents`, not under the
-  Eclipse metadata plugin directory guessed from the repository.
+- Runtime agent files use the global symbol `assistant.agents.directory` when set;
+  otherwise they live under `<workspaceRoot>/agents`. Do not infer the engine
+  workspace from the repository or relocate existing data automatically.
 - Do not commit generated runtime content from `<workspaceRoot>/agents`.
 - Agent settings expose each managed CLI's installed version. Checking the
   latest available version is opt-in through `checkUpdates` and cached to avoid
