@@ -1,5 +1,27 @@
+// Shared storage contract across Tigo projects. Resolved only on the engine.
+if (typeof C8O === "undefined") { var C8O = {}; }
+if (typeof C8O.tigoAgentsDirectory !== "function") {
+  C8O.tigoAgentsDirectory = function (workspaceRoot, FileClass) {
+    var F = FileClass || Packages.java.io.File;
+    var configured = "";
+    try {
+      var value = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue("assistant.agents.directory");
+      configured = value == null ? "" : String(value).replace(/^\s+|\s+$/g, "");
+    } catch (_noAgentsDirectorySymbol) {}
+    if (!configured.length) { return new F(workspaceRoot, "agents"); }
+    if (configured.indexOf("\u0000") !== -1) { throw new Error("Invalid assistant.agents.directory"); }
+    var directory = new F(configured);
+    if (!directory.isAbsolute()) { throw new Error("assistant.agents.directory must be an absolute path"); }
+    if (directory.getParentFile() === null) { throw new Error("assistant.agents.directory must be a dedicated directory, not a filesystem root"); }
+    return directory;
+  };
+}
+// End shared storage contract.
+
 // Common runtime, process registry, event buffer and shared helpers.
 // Loaded by vibe_agent_bridge.js inside one Rhino scope.
+  function agentsDirectory(workspaceRoot) { return C8O.tigoAgentsDirectory(workspaceRoot, File); }
+
   var REGISTRY_KEY = "lib_ConvertigoAgentBridge.agentProcessRegistry.v1";
   var SESSION_HANDLE_ATTR = "lib_ConvertigoAgentBridge.currentHandle";
   var SESSION_CONVERSATION_ATTR = "lib_ConvertigoAgentBridge.currentConversationId";
@@ -1038,7 +1060,7 @@
     // onboarding, or by hand meanwhile). The first line is the key.
     try {
       var workspaceRoot = resolveWorkspaceRoot(options || {});
-      return new File(childPath(childPath(workspaceRoot, "agents"), "convertigo"), "llm-api-key");
+      return new File(childPath(filePath(agentsDirectory(workspaceRoot)), "convertigo"), "llm-api-key");
     } catch (_ignoreGatewayKeyFile) {
       return null;
     }
@@ -2060,7 +2082,7 @@
       if (!root.length) {
         return;
       }
-      var dir = new File(new File(root, "agents"), "vibe");
+      var dir = new File(agentsDirectory(root), "vibe");
       ensureDirectory(dir);
       var file = new File(dir, STARTUP_TIMINGS_FILE);
       if (file.isFile() && file.length() > STARTUP_TIMINGS_MAX_BYTES) {
@@ -2624,7 +2646,7 @@
       return "source_missing";
     }
     var workspaceRoot = resolveWorkspaceRoot(options);
-    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
+    var installDir = normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(workspaceRoot)), "vibe"), workspaceRoot);
     // The venv path itself, not its canonical form: bin/python is a symlink to the managed CPython.
     var python = new File(venvBinPath(childPath(installDir, ".venv"), "python"));
     if (!python.isFile()) {
@@ -3319,7 +3341,7 @@
       return "";
     }
     try {
-      var tokenFile = new File(new File(new File(new File(resolveWorkspaceRoot(options), "agents"), "nocode"), "users"), userPathSlug(userId));
+      var tokenFile = new File(new File(new File(agentsDirectory(resolveWorkspaceRoot(options)), "nocode"), "users"), userPathSlug(userId));
       tokenFile = new File(tokenFile, "mcp-token.json");
       if (!tokenFile.isFile()) {
         return "";
@@ -3410,7 +3432,7 @@
     if (!conversationId.length) {
       return null;
     }
-    var root = new File(new File(new File(resolveWorkspaceRoot(options), "agents"), "codex"), "viewer-debug-ports");
+    var root = new File(new File(agentsDirectory(resolveWorkspaceRoot(options)), "codex"), "viewer-debug-ports");
     return new File(root, safePathPart(conversationId) + ".json");
   }
 
@@ -3889,7 +3911,7 @@
         lines.push(bearerLine);
       }
       status = text.length ? "updated" : "created";
-      var withCreatedPlaywright = patchCodexPlaywrightMcpConfigText(lines.join("\n").replace(/\n+$/, "\n"), options, normalizeDirectory(options.installDir, childPath(resolveWorkspaceRoot(options), "agents/codex"), resolveWorkspaceRoot(options)));
+      var withCreatedPlaywright = patchCodexPlaywrightMcpConfigText(lines.join("\n").replace(/\n+$/, "\n"), options, normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(resolveWorkspaceRoot(options))), "codex"), resolveWorkspaceRoot(options)));
       if (withCreatedPlaywright.status !== "unchanged" && status !== "created") {
         status = "updated";
       }
@@ -3991,7 +4013,7 @@
     if (nextText === text.replace(/\n+$/, "\n")) {
       status = "unchanged";
     }
-    var withPlaywright = patchCodexPlaywrightMcpConfigText(nextText, options, normalizeDirectory(options.installDir, childPath(resolveWorkspaceRoot(options), "agents/codex"), resolveWorkspaceRoot(options)));
+    var withPlaywright = patchCodexPlaywrightMcpConfigText(nextText, options, normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(resolveWorkspaceRoot(options))), "codex"), resolveWorkspaceRoot(options)));
     if (withPlaywright.status !== "unchanged" && status === "unchanged") {
       status = "updated";
     }
@@ -4740,7 +4762,7 @@
     options = options || {};
     var sources = [];
     var workspaceRoot = resolveWorkspaceRoot(options);
-    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/codex"), workspaceRoot);
+    var installDir = normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(workspaceRoot)), "codex"), workspaceRoot);
     var userHome = resolveCodexHome({
       workspaceRoot: workspaceRoot,
       installDir: installDir,
@@ -4821,7 +4843,7 @@
     var gateway = isConvertigoGatewayProfile(options);
     try {
       var workspaceRoot = resolveWorkspaceRoot(options);
-      var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
+      var installDir = normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(workspaceRoot)), "vibe"), workspaceRoot);
       var userHome = resolveVibeHome({
         vibeHomeScope: "user",
         vibeProfile: resolveVibeProfile(options),
@@ -5758,7 +5780,7 @@
 
   function runtimeUpdateCacheFile(workspaceRoot) {
     var root = trim(workspaceRoot);
-    return root.length ? new File(childPath(root, "agents"), RUNTIME_UPDATE_CACHE_FILE) : null;
+    return root.length ? new File(filePath(agentsDirectory(root)), RUNTIME_UPDATE_CACHE_FILE) : null;
   }
 
   function readPersistentRuntimeUpdateCache(workspaceRoot) {
@@ -6641,7 +6663,7 @@
     var platform = trim(options.pythonPlatform) || pythonPlatformTag();
     var flavor = trim(options.pythonArchiveFlavor) || DEFAULT_PYTHON_ARCHIVE_FLAVOR;
     var runtimeId = "cpython-" + version + "-" + buildTag + "-" + platform;
-    var installDir = normalizeDirectory(options.pythonInstallDir, childPath(childPath(childPath(workspaceRoot, "agents"), "runtimes/python"), runtimeId), workspaceRoot);
+    var installDir = normalizeDirectory(options.pythonInstallDir, childPath(childPath(filePath(agentsDirectory(workspaceRoot)), "runtimes/python"), runtimeId), workspaceRoot);
     var asset = "cpython-" + version + "+" + buildTag + "-" + platform + "-" + flavor + ".tar.gz";
     var archiveUrl = trim(options.pythonArchiveUrl);
     if (!archiveUrl.length) {
@@ -6664,7 +6686,7 @@
       installDir: installDir,
       archiveUrl: archiveUrl,
       archiveName: asset,
-      lockFile: childPath(childPath(workspaceRoot, "agents/runtimes/python"), runtimeId + ".lock")
+      lockFile: childPath(childPath(filePath(agentsDirectory(workspaceRoot)), "runtimes/python"), runtimeId + ".lock")
     };
   }
 
@@ -7348,7 +7370,7 @@
   function probeWindowsLongPaths(workspaceRoot) {
     var cleanup = [], shortReady = false, testedLength = 0;
     try {
-      var root = new File(workspaceRoot, "agents").toPath();
+      var root = agentsDirectory(workspaceRoot).toPath();
       Files.createDirectories(root);
       var scratch = Files.createTempDirectory(root, "windows-path-check-");
       cleanup.push(scratch);
@@ -8126,7 +8148,7 @@
       return null;
     }
     var workspaceRoot = resolveWorkspaceRoot(options);
-    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
+    var installDir = normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(workspaceRoot)), "vibe"), workspaceRoot);
     if (!new File(childPath(childPath(codexNodeModulesPath(installDir), "@playwright/mcp"), "package.json")).isFile()) {
       return null;
     }
@@ -8159,7 +8181,7 @@
 
   function detectRuntime(options) {
     var workspaceRoot = resolveWorkspaceRoot(options);
-    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
+    var installDir = normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(workspaceRoot)), "vibe"), workspaceRoot);
     var venvDir = childPath(installDir, ".venv");
     var localPython = venvBinPath(venvDir, "python");
     var localVibe = venvBinPath(venvDir, "vibe");
@@ -8222,7 +8244,7 @@
     options = options || {};
     var capabilityProfile = agentCapabilityProfile(options);
     var workspaceRoot = resolveWorkspaceRoot(options);
-    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/codex"), workspaceRoot);
+    var installDir = normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(workspaceRoot)), "codex"), workspaceRoot);
     var codexHome = resolveCodexHome(options, installDir);
     var userHome = String(System.getProperty("user.home"));
     var command = firstWorkingCommand([
@@ -8321,7 +8343,7 @@
   function detectCodexRuntimePresence(options) {
     options = options || {};
     var workspaceRoot = resolveWorkspaceRoot(options);
-    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/codex"), workspaceRoot);
+    var installDir = normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(workspaceRoot)), "codex"), workspaceRoot);
     var codexHome = resolveCodexHome(options, installDir);
     var userHome = String(System.getProperty("user.home"));
     var command = firstExistingCommand([
@@ -8354,7 +8376,7 @@
   function detectRuntimePresence(options) {
     options = options || {};
     var workspaceRoot = resolveWorkspaceRoot(options);
-    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/vibe"), workspaceRoot);
+    var installDir = normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(workspaceRoot)), "vibe"), workspaceRoot);
     var venvDir = childPath(installDir, ".venv");
     var vibeHomeInfo = resolveVibeHome(options, installDir);
     var vibeHome = vibeHomeInfo.path;
@@ -8417,7 +8439,7 @@
     var env = {};
     options = options || {};
     var workspaceRoot = resolveWorkspaceRoot(options);
-    var installDir = normalizeDirectory(options.installDir, childPath(workspaceRoot, "agents/codex"), workspaceRoot);
+    var installDir = normalizeDirectory(options.installDir, childPath(filePath(agentsDirectory(workspaceRoot)), "codex"), workspaceRoot);
     var path = nodeRuntimeSearchPath(options);
     if (path.length) {
       env.PATH = path + String(File.pathSeparator) + String(System.getenv("PATH") || "");
@@ -9431,7 +9453,7 @@
     var providers = ["codex", "vibe", "claude"];
     for (var providerIndex = 0; providerIndex < providers.length; providerIndex++) {
       var provider = providers[providerIndex];
-      var usersRoot = new File(new File(new File(workspaceRoot, "agents"), provider), "users");
+      var usersRoot = new File(new File(agentsDirectory(workspaceRoot), provider), "users");
       if (!usersRoot.isDirectory()) {
         continue;
       }
@@ -9475,7 +9497,7 @@
               new File(
                 new File(
                   new File(
-                    new File(workspaceRoot, "agents/" + provider),
+                    new File(agentsDirectory(workspaceRoot), provider),
                     "homes/users"
                   ),
                   userDir.getName()
@@ -9587,7 +9609,7 @@
       var conversationsRoot = new File(
         new File(
           new File(
-            new File(workspaceRoot, "agents/codex"),
+            new File(agentsDirectory(workspaceRoot), "codex"),
             "homes/users"
           ),
           userSlug
@@ -9627,7 +9649,7 @@
     var homesUsersRoot = new File(
       new File(
         new File(
-          new File(workspaceRoot, "agents"),
+          agentsDirectory(workspaceRoot),
           "codex"
         ),
         "homes"
@@ -9674,7 +9696,7 @@
       }
     }
 
-    var leasesDir = new File(new File(new File(workspaceRoot, "agents"), "codex"), "viewer-debug-ports");
+    var leasesDir = new File(new File(agentsDirectory(workspaceRoot), "codex"), "viewer-debug-ports");
     if (leasesDir.isDirectory()) {
       var leases = leasesDir.listFiles();
       if (leases !== null) {
@@ -9720,7 +9742,7 @@
       300,
       2592000
     ) * 1000;
-    var marker = new File(new File(new File(workspaceRoot, "agents"), "codex"), STORAGE_CLEANUP_FILE);
+    var marker = new File(new File(agentsDirectory(workspaceRoot), "codex"), STORAGE_CLEANUP_FILE);
     if (!exactConversation && !force) {
       var markerState = readJsonFile(marker);
       var nextCleanupAt = markerState === null ? 0 : Number(markerState.nextCleanupAt || 0);
@@ -10998,7 +11020,7 @@
       return null;
     }
     var providerDir = normalizeProvider(provider || "codex");
-    return new File(new File(new File(root, "agents"), providerDir), "app-server-pids");
+    return new File(new File(agentsDirectory(root), providerDir), "app-server-pids");
   }
 
   function codexPidFile(workspaceRoot, handle) {
@@ -11301,7 +11323,7 @@
     }
     try {
       var root = trim(entry.workspaceRoot) || engineWorkspaceRoot();
-      var script = new File(new File(new File(root, "agents"), "guard"), "agent-guard-v" + AGENT_GUARD_VERSION + ".cjs");
+      var script = new File(new File(agentsDirectory(root), "guard"), "agent-guard-v" + AGENT_GUARD_VERSION + ".cjs");
       if (!script.isFile() || String(readTextFile(script)) !== AGENT_GUARD_SOURCE) {
         ensureDirectory(script.getParentFile());
         writeTextFile(script, AGENT_GUARD_SOURCE);
@@ -11336,7 +11358,7 @@
     var result = { stopped: [], kept: [] };
     try {
       var root = trim(workspaceRoot) || engineWorkspaceRoot();
-      var agents = new File(root, "agents");
+      var agents = agentsDirectory(root);
       var providers = agents.isDirectory() ? agents.listFiles() : null;
       for (var i = 0; providers !== null && i < providers.length; i++) {
         if (!providers[i].isDirectory() || !new File(providers[i], "app-server-pids").isDirectory()) {
@@ -12491,7 +12513,7 @@
   // Session measures of a Vibe conversation, for reports: usage totals, session measures and per-turn detail, read
   // from its journal. The conversation is the Assistant thread id (agent-…) or the Vibe session id.
   function findVibeSessionDir(workspaceRoot, sessionId) {
-    var vibeRoot = new File(new File(workspaceRoot, "agents"), "vibe");
+    var vibeRoot = new File(agentsDirectory(workspaceRoot), "vibe");
     var homes = vibeRoot.listFiles();
     for (var h = 0; homes !== null && h < homes.length; h++) {
       if (!homes[h].isDirectory() || !/^homes-/.test(String(homes[h].getName()))) {
@@ -12525,7 +12547,7 @@
       if (!/^agent-[A-Za-z0-9-]{1,80}$/.test(threadid)) {
         return { ok: false, error: "invalid_threadid" };
       }
-      var providers = new File(workspaceRoot, "agents").listFiles();
+      var providers = agentsDirectory(workspaceRoot).listFiles();
       for (var i = 0; providers !== null && i < providers.length && !sessionId.length; i++) {
         var users = new File(providers[i], "users").listFiles();
         for (var j = 0; users !== null && j < users.length && !sessionId.length; j++) {

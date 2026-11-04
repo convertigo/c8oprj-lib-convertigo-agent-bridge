@@ -17,6 +17,7 @@ const stopped = [];
 const swept = [];
 const sandbox = {
   C8O: { agentBridge: {} },
+  agentsDirectory: (root) => ({ path: root + '/agents' }),
   File: function File(parent, child) { this.path = String(parent && parent.path || parent) + '/' + child; },
   DEFAULT_STORAGE_CLEANUP_INTERVAL_MS: 3600000,
   STORAGE_CLEANUP_FILE: 'storage-cleanup.json',

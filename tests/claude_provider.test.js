@@ -465,7 +465,7 @@ console.log("Vibe image attachment contract OK");
   assert.match(commonSource, /providers\.push\(vibeSettings\(withVibeProfile\(options, "convertigo"\)\)\);\s*\}\s*if \(!provider\.length \|\| provider === "codex"\)/);
   assert.match(commonSource, /harness: "vibe",/);
   assert.match(commonSource, /function readConvertigoGatewayKeyFile/);
-  assert.match(commonSource, /"agents"\), "convertigo"\), "llm-api-key"\)/);
+  assert.match(commonSource, /agentsDirectory\(workspaceRoot\).*"convertigo"\), "llm-api-key"\)/);
 }
 
 // ACP model discovery must not rename the Convertigo mode back to "vibe".
