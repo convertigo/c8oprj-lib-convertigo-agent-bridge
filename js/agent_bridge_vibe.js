@@ -97,6 +97,7 @@
           playwrightCommand: expectedPlaywrightCommand,
           playwrightEndpoint: expectedPlaywrightEndpoint,
           providerNames: expectedProviderNames,
+          systemTrustStore: true,
           revealMode: expectedRevealMode,
           viewerDebugPort: expectedBearerEnv.length ? expectedViewerDebugPort : 0,
           conversationId: expectedBearerEnv.length && expectedViewerDebugPort >= 1024 ? mcpConversationId(options) : ""
@@ -196,7 +197,7 @@
         }
         var venvPython = venvBinPath(setup.venvDir, "python");
         runInstallStep([venvPython, "-m", "pip", "install", "--upgrade", "pip"], 180000, "Vibe pip bootstrap", "https://pypi.org");
-        runInstallStep([venvPython, "-m", "pip", "install", "--upgrade", "mistral-vibe"], 600000, "Vibe runtime installation", "https://pypi.org");
+        runInstallStep([venvPython, "-m", "pip", "install", "--upgrade", "mistral-vibe==3.0.4"], 600000, "Vibe runtime installation", "https://pypi.org");
 
         setup = detectRuntime(options);
         var managedVibeReady = commandPathStartsWith(setup.vibe, setup.venvDir) && commandPathStartsWith(setup.vibeAcp, setup.venvDir);

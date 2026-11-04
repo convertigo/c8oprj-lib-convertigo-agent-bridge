@@ -45,14 +45,34 @@ assert.equal(providerLabel("claude"), "Claude");
 assert.equal(agentProxyTargetUrl("claude", {}), "https://api.anthropic.com");
 assert.ok(AGENT_CAPABILITY_PROFILES.generalist.supportedProviders.indexOf("claude") >= 0);
 assert.ok(AGENT_CAPABILITY_PROFILES.nocode.supportedProviders.indexOf("claude") >= 0);
-assert.ok(AGENT_CAPABILITY_PROFILES.flow.supportedProviders.indexOf("claude") < 0, "Flow stays Codex-only");
+assert.ok(AGENT_CAPABILITY_PROFILES.flow.supportedProviders.indexOf("claude") >= 0, "Flow is available to Claude");
 
-// Managed skill bundle never expects Flow skills for Claude, even when Flow is available.
+// When Flow is available, Claude receives the Flow skills and the Legacy/Flow router like Codex.
 flowCapabilityAvailability = () => ({ available: true });
-assert.deepEqual(managedSkillBundleSlugs({}, "claude"), ["convertigo-studio", "convertigo-generalist"]);
+assert.deepEqual(managedSkillBundleSlugs({}, "claude"), ["convertigo-studio", "convertigo-generalist",
+  "convertigo-flow-mcp", "convertigo-flow-backend", "convertigo-flow-frontend-svelte"]);
 assert.ok(managedSkillBundleSlugs({}, "codex").indexOf("convertigo-flow-mcp") >= 0);
+assert.match(buildConvertigoStudioRouterSkill(false), /convertigo-flow/);
+assert.match(buildConvertigoStudioRouterSkill(false), /same agent home/);
 assert.doesNotMatch(buildConvertigoStudioRouterSkill(true), /convertigo-flow/);
 assert.match(buildConvertigoStudioRouterSkill(true), /agent home/);
+const flowConfig = buildClaudeMcpConfig("http://localhost:18080/convertigo/api/mcp", { userId: "studio" }, "").mcpServers;
+assert.ok(flowConfig.convertigo && flowConfig["convertigo-flow"], "a Studio Claude home reaches both MCP servers");
+assert.match(flowConfig["convertigo-flow"].url, /\/convertigo\/api\/flow-mcp(?:\?|$)/);
+assert.deepEqual(flowConfig["convertigo-flow"].headers, flowConfig.convertigo.headers);
+assert.equal(buildClaudeMcpConfig("http://localhost:18080/convertigo/api/mcp", { userId: "someone", skillProfile: "nocode" }, "").mcpServers["convertigo-flow"], undefined);
+const routedInstructions = claudeInstructions({ userId: "studio" }, "generalist");
+assert.match(routedInstructions, /routed per task by the `convertigo-studio` skill/);
+assert.match(routedInstructions, /Do not read the skills of the other pack/);
+assert.doesNotMatch(routedInstructions, /legacy-only/);
+assert.match(buildConvertigoStudioRouterSkill(false), /Flow work never needs `convertigo-generalist`/);
+// Without Flow, the Claude bundle stays standard Convertigo.
+flowCapabilityAvailability = () => ({ available: false });
+assert.deepEqual(managedSkillBundleSlugs({}, "claude"), ["convertigo-studio", "convertigo-generalist"]);
+assert.doesNotMatch(buildConvertigoStudioRouterSkill(false), /convertigo-flow/);
+assert.equal(buildClaudeMcpConfig("http://localhost:18080/convertigo/api/mcp", { userId: "studio" }, "").mcpServers["convertigo-flow"], undefined);
+assert.match(claudeInstructions({ userId: "studio" }, "generalist"), /then the `convertigo-generalist` skill/);
+flowCapabilityAvailability = () => ({ available: true });
 
 // Effort and command line.
 assert.equal(normalizeClaudeEffort("very-high"), "xhigh");
@@ -532,7 +552,7 @@ console.log("Vibe image attachment contract OK");
     assert.equal(result.model, "glm-5-2");
     writeLocalVibeConfig("/managed/vibe-home", "http://localhost:18080/convertigo/api/mcp", "glm-5-3",
       { vibeProfile: "convertigo", gatewayModelIds: ["mistral/zai-glm-5-2", "mistral/zai-glm-5-3"] });
-    assert.match(written, /^active_model = "glm-5-3"\napi_timeout = 720\.0\nauto_compact_threshold = 950000$/m, "GLM 5.3 active: global threshold 950k");
+    assert.match(written, /^active_model = "glm-5-3"\napi_timeout = 720\.0\nenable_system_trust_store = true\nauto_compact_threshold = 950000$/m, "GLM 5.3 active: global threshold 950k with system trust");
     assert.match(written, /alias = "glm-5-3"[\s\S]*?auto_compact_threshold = 950000/);
   } finally {
     writeTextFile = originalWrite;

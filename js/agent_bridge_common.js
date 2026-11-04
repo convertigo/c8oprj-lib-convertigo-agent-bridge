@@ -222,21 +222,24 @@
   var convertigoGatewayKeyRejected = false;
 
   function fetchConvertigoGatewayModelIds(options, apiKey) {
-    var connection = null, stream = null;
+    var response = null, stream = null;
     try {
-      connection = new URL(convertigoGatewayUrl(options) + "/models").openConnection();
-      connection.setConnectTimeout(4000);
-      connection.setReadTimeout(6000);
-      connection.setRequestMethod("GET");
-      connection.setRequestProperty("Accept", "application/json");
-      connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-      var gatewayStatus = connection.getResponseCode();
+      var url = convertigoGatewayUrl(options) + "/models";
+      var get = new Packages.org.apache.http.client.methods.HttpGet(url);
+      get.setHeader("Accept", "application/json");
+      get.setHeader("Authorization", "Bearer " + apiKey);
+      var requestConfig = Packages.org.apache.http.client.config.RequestConfig.custom()
+        .setConnectTimeout(4000).setSocketTimeout(6000).setConnectionRequestTimeout(4000).setRedirectsEnabled(false);
+      configureHttpRequestProxy(get, requestConfig, url);
+      get.setConfig(requestConfig.build());
+      response = Engine.theApp.httpClient4.execute(get);
+      var gatewayStatus = response.getStatusLine().getStatusCode();
       convertigoGatewayKeyRejected = gatewayStatus === 401 || gatewayStatus === 403;
       if (convertigoGatewayKeyRejected) {
         try { log.warn("The Convertigo gateway rejected the agent key (HTTP " + gatewayStatus + "). Check " + filePath(convertigoGatewayKeyFile(options))); } catch (_ignoreRejectedKeyLog) {}
       }
       if (gatewayStatus !== 200) { return []; }
-      stream = connection.getInputStream();
+      stream = response.getEntity().getContent();
       var body = String(new java.lang.String(stream.readAllBytes(), "UTF-8"));
       var data = JSON.parse(body).data || [];
       var ids = [];
@@ -247,7 +250,7 @@
       return [];
     } finally {
       try { if (stream !== null) stream.close(); } catch (_ignoreGatewayStreamClose) {}
-      try { if (connection !== null) connection.disconnect(); } catch (_ignoreGatewayDisconnect) {}
+      try { if (response !== null) response.close(); } catch (_ignoreGatewayResponseClose) {}
     }
   }
 
@@ -1226,7 +1229,7 @@
       authoringPolicy: "flow-only",
       aliases: ["flow", "flowscript", "flow-svelte", "frontbuilder-svelte"],
       capabilityIds: ["convertigo-flow", "flow-backend", "flow-frontend-svelte"],
-      supportedProviders: ["codex"],
+      supportedProviders: ["codex", "claude"],
       mcpPath: FALLBACK_FLOW_MCP_PATH,
       mcpServerName: "convertigo-flow",
       setupProject: "lib_flow_mcp",
@@ -1666,8 +1669,14 @@
 
   function proxyEnvironmentFromSettings(settings) {
     settings = settings || {};
+    var bypass = trim(settings.noProxy).split(",").map(function (domain) { return trim(domain); });
+    var required = ["localhost", "127.0.0.1", "::1"];
+    for (var i = 0; i < required.length; i++) {
+      if (bypass.indexOf(required[i]) < 0) { bypass.push(required[i]); }
+    }
+    var noProxy = bypass.filter(function (domain) { return trim(domain).length > 0; }).join(",");
     if (settings.enabled !== true || settings.direct === true || !trim(settings.host).length || Number(settings.port || 0) <= 0) {
-      return {};
+      return { NO_PROXY: noProxy, no_proxy: noProxy };
     }
     var method = trim(settings.method).toLowerCase();
     var proxyUrl = trim(settings.localProxyUrl);
@@ -1678,7 +1687,6 @@
       }
       proxyUrl = "http://" + credentials + trim(settings.host) + ":" + Number(settings.port);
     }
-    var noProxy = trim(settings.noProxy);
     return {
       HTTP_PROXY: proxyUrl,
       HTTPS_PROXY: proxyUrl,
@@ -1744,7 +1752,9 @@
       if (settings.enabled && settings.method === "ntlm" && settings.mode === "manual") {
         settings.localProxyUrl = String(Packages.com.twinsoft.convertigo.engine.proxy.ntlm.NtlmConnectProxyBridge.getLocalProxyUrl());
       }
-    } catch (_ignoreEngineProxySettings) {}
+    } catch (_engineProxySettingsError) {
+      throw new Error("Unable to resolve the Convertigo engine proxy settings (" + settings.mode + "). Check the proxy configuration and PAC script before starting the agent.");
+    }
     return settings;
   }
 
@@ -2098,7 +2108,7 @@
       STUDIO_ROUTER_SKILL_SLUG,
       "convertigo-generalist"
     ];
-    if (normalizeProvider(provider || (options && options.provider)) !== "claude" && flowCapabilityAvailable()) {
+    if (flowCapabilityAvailable()) {
       slugs.push("convertigo-flow-mcp");
       slugs.push("convertigo-flow-backend");
       slugs.push("convertigo-flow-frontend-svelte");
@@ -2932,13 +2942,17 @@
         candidates.push(new File(explicitFile, "SKILL.md"));
       }
       candidates.push(new File(new File(explicitFile, skillSlug), "SKILL.md"));
+      candidates.push(new File(explicitFile, "_flow/resources/skills/" + skillSlug + "/SKILL.md"));
       candidates.push(new File(new File(new File(new File(explicitFile, "libs"), "flow"), "resources"), "skills/" + skillSlug + "/SKILL.md"));
     }
+    // lib_flow_mcp serves its skills from _flow/resources/skills; libs/flow/resources/skills is the former layout
     var projectDir = projectDirectoryByName("lib_flow_mcp");
     if (projectDir !== null) {
+      candidates.push(new File(projectDir, "_flow/resources/skills/" + skillSlug + "/SKILL.md"));
       candidates.push(new File(projectDir, "libs/flow/resources/skills/" + skillSlug + "/SKILL.md"));
     }
     var home = String(System.getProperty("user.home"));
+    candidates.push(new File(home, "git/lib_flow_mcp/_flow/resources/skills/" + skillSlug + "/SKILL.md"));
     candidates.push(new File(home, "git/lib_flow_mcp/libs/flow/resources/skills/" + skillSlug + "/SKILL.md"));
     for (var i = 0; i < candidates.length; i++) {
       if (candidates[i] !== null && candidates[i].isFile()) {
@@ -3162,7 +3176,7 @@
       isFlow ? "- Import generated or supplied images with `frontend-svelte-asset-import`, use its returned `resources/...` URL unchanged, and never copy assets with shell commands or into generated static folders." : "",
       isFlow ? "" : "- If `mobile-builder-open(stateOnly=true)` returns `status:\"stopped\"`, immediately call it once with `stateOnly=false, wait=false`; do not spend a timeout polling an inactive builder.",
       "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
-      "- Playwright MCP files live in `.playwright-mcp/` under your working directory: screenshots go there, and a file the viewer downloads (an export) is saved without any dialog in `.playwright-mcp/downloads/`, where you can read it. Playwright MCP only reads files inside your working directory: write `browser_run_code_unsafe` scripts in `.playwright-mcp/scripts/` and pass that relative path.",
+      "- Playwright MCP files live in `.playwright-mcp/` under your working directory: pass `filename:\".playwright-mcp/<name>.png\"` to `browser_take_screenshot` (a bare file name lands in the working directory itself); to reload the viewer, call `browser_navigate` with its URL, never `location.reload()` inside `browser_evaluate` (the navigation destroys the evaluation context); and a file the viewer downloads (an export) is saved without any dialog in `.playwright-mcp/downloads/`, where you can read it. Playwright MCP only reads files inside your working directory: write `browser_run_code_unsafe` scripts in `.playwright-mcp/scripts/` and pass that relative path.",
       "- For viewer automation, use the Playwright MCP tools exposed by the managed Codex configuration. Do not run ad hoc shell scripts with `require('playwright')`, and do not launch a separate browser unless explicitly needed.",
       isFlow ? "- Use Playwright only after the capability pack reports that the dev viewer is ready and the managed browser target shows that viewer." : "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`.",
       "- Known-good fast check: `playwright.browser_tabs({action:\"list\"})`, then `playwright.browser_find({text:\"<visible text>\"})`; use `playwright.browser_evaluate({function:\"...\"})` only for DOM state or timing. Do not probe unsupported browser features first.",
@@ -4200,12 +4214,12 @@
       "",
       "# Convertigo Studio router",
       "",
-      "This is a Low Code Studio session. Both the `convertigo` and `convertigo-flow` MCP servers are installed in the same Codex home.",
+      "This is a Low Code Studio session. Both the `convertigo` and `convertigo-flow` MCP servers are installed in the same agent home.",
       "The No Code capability is unavailable to the Studio user and must never be used from this session.",
       "",
       "## Route once before authoring",
       "",
-      "1. An explicit user request for Flow, FlowScript, or Flow Svelte wins: read `skills/convertigo-flow-mcp/SKILL.md`, then the backend or frontend specialist skill needed by the task, and use `convertigo-flow`.",
+      "1. An explicit user request for Flow, FlowScript, or Flow Svelte wins: read `skills/convertigo-flow-mcp/SKILL.md`, then only the specialist skill the task needs (frontend for pages and UI, backend for Flows and data, both only for a full-stack task), and use `convertigo-flow`.",
       "2. An explicit user request for legacy Convertigo or NGX wins: read `skills/convertigo-generalist/SKILL.md` and use `convertigo`.",
       "3. For an existing project, a FlowEngine or Flow frontend selects Flow; legacy Sequences, Connectors, Application, or NGX objects select Legacy for the corresponding work.",
       "4. A mixed project may require both routes, but each mutation must use the MCP that owns the target model. Never edit Convertigo YAML or generated files to cross the boundary.",
@@ -4213,6 +4227,7 @@
       "",
       "## Working rules",
       "",
+      "- Read only the skills of the route you chose: Flow work never needs `convertigo-generalist`, Legacy work never needs the Flow skills.",
       "- Treat the conversation profile as a routing hint, not as a tool-access boundary.",
       "- Keep one conversation and one history when switching between Legacy and Flow.",
       "- Do not fall back from one MCP to the other after a tool error. Fix the owning capability or report the configuration defect.",
@@ -8015,6 +8030,7 @@
       '# Generated by lib_ConvertigoAgentBridge (Convertigo gateway profile).',
       'active_model = "' + tomlString(spec.activeModel) + '"',
       'api_timeout = 720.0',
+      'enable_system_trust_store = true',
       'auto_compact_threshold = ' + (spec.compactThreshold || vibeCompactThresholdFor(spec.name)),
       'compaction_prompt_id = "' + VIBE_COMPACTION_PROMPT_ID + '"',
       '',
@@ -8032,6 +8048,7 @@
       '# Generated by lib_ConvertigoAgentBridge.',
       'active_model = "' + tomlString(spec.activeModel) + '"',
       'api_timeout = 720.0',
+      'enable_system_trust_store = true',
       'auto_compact_threshold = ' + (spec.compactThreshold || vibeCompactThresholdFor(spec.name)),
       'compaction_prompt_id = "' + VIBE_COMPACTION_PROMPT_ID + '"',
       '',

@@ -159,6 +159,15 @@
       url: managedMcpTransportEndpoint(mcpEndpoint),
       headers: headers
     };
+    // A Studio home with Flow available also reaches the Flow MCP (same token and headers), as Codex does.
+    var flowServerName = AGENT_CAPABILITY_PROFILES.flow.mcpServerName;
+    if (serverName !== flowServerName && normalizeSkillProfile(options) !== "nocode" && flowCapabilityAvailable()) {
+      servers[flowServerName] = {
+        type: "http",
+        url: managedMcpTransportEndpoint(mcpEndpointForProfile({ mcpEndpoint: mcpEndpoint }, "flow")),
+        headers: JSON.parse(JSON.stringify(headers))
+      };
+    }
     var playwright = claudePlaywrightServer(options);
     if (playwright !== null) {
       servers.playwright = playwright;
@@ -1296,23 +1305,31 @@
   function claudeInstructions(options, profile) {
     var capabilityProfile = agentCapabilityProfile({ agentProfile: profile });
     var isNoCode = capabilityProfile.id === "nocode";
+    // A Studio home with Flow available holds both packs: the router picks one per task.
+    var routed = !isNoCode && flowCapabilityAvailable();
     return [
       "# Convertigo Agent Instructions",
       "",
       "You are Claude Code running inside a Convertigo-integrated local agent session (Tigo).",
       "",
-      "- Active authoring policy: `" + capabilityProfile.authoringPolicy + "` (" + capabilityProfile.label + ").",
+      routed
+        ? "- Active authoring policy: Legacy or Flow, routed per task by the `convertigo-studio` skill."
+        : "- Active authoring policy: `" + capabilityProfile.authoringPolicy + "` (" + capabilityProfile.label + ").",
       isNoCode
         ? "- Automatically follow the Convertigo NoCode workflow for C8Oforms / No-Code Studio work: invoke the `convertigo-nocode` skill before the first no-code operation."
-        : "- Invoke the `convertigo-studio` skill first, then the `convertigo-generalist` skill, before the first Convertigo authoring operation of a conversation.",
-      "- Use the `" + capabilityProfile.mcpServerName + "` MCP server (tools named `mcp__" + capabilityProfile.mcpServerName + "__*`) whenever you need to inspect, modify, save, reload, or validate Convertigo projects.",
+        : routed
+          ? "- Invoke the `convertigo-studio` skill first, before the first Convertigo authoring operation of a conversation. It names the one capability pack to read: `convertigo-generalist` for Legacy or NGX work, or `convertigo-flow-mcp` plus only the specialist skill the task needs for Flow work. Do not read the skills of the other pack."
+          : "- Invoke the `convertigo-studio` skill first, then the `convertigo-generalist` skill, before the first Convertigo authoring operation of a conversation.",
+      routed
+        ? "- Use the `convertigo` MCP server (tools named `mcp__convertigo__*`) for Legacy work and the `convertigo-flow` MCP server (tools named `mcp__convertigo-flow__*`) for Flow work, to inspect, modify, save, reload, or validate Convertigo projects."
+        : "- Use the `" + capabilityProfile.mcpServerName + "` MCP server (tools named `mcp__" + capabilityProfile.mcpServerName + "__*`) whenever you need to inspect, modify, save, reload, or validate Convertigo projects.",
       "- The Convertigo MCP server is the only source of truth for Convertigo projects. If it is unavailable, returns an authorization error (HTTP 401/403), or its tools are missing, stop immediately and report the configuration defect to the user. Never browse the workspace filesystem, project folders, or descriptors as a substitute for MCP.",
       "- When `mobile-builder-open` returns `browserDebugUrl`, `browserDevToolsJsonUrl`, or `browserDevToolsWebSocketUrl`, treat it as the visible Studio mobile viewer and prefer inspecting or driving that viewer over opening a separate browser.",
       "- For viewer automation, use the managed `playwright` MCP server tools (`mcp__playwright__browser_tabs`, `mcp__playwright__browser_snapshot`, `mcp__playwright__browser_click`, `mcp__playwright__browser_evaluate`, ...). They are attached to the Studio JxBrowser viewer over CDP. Do not run ad hoc scripts with `require('playwright')`, raw CDP, or a separate browser.",
       "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`. If the browser target is `about:blank` while builder status is `building`, poll `mobile-builder-open(stateOnly=true, wait=true)` first.",
       "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
       // The absolute path: "under your working directory" was read as the Studio workspace, where the screenshot was not (run 10).
-      "- Playwright MCP files live in `" + claudePlaywrightOutputDir(options) + "`: screenshots go there (read them at that path), and a file the viewer downloads (an export) is saved without any dialog in `" + claudePlaywrightOutputDir(options) + "/downloads/`. Playwright MCP only reads files inside `" + claudeWorkingDir(options) + "`: write `browser_run_code_unsafe` scripts in `" + claudePlaywrightOutputDir(options) + "/scripts/` and pass that path.",
+      "- Playwright MCP files live in `" + claudePlaywrightOutputDir(options) + "`: pass `filename:\"" + claudePlaywrightOutputDir(options) + "/<name>.png\"` to `browser_take_screenshot` (a bare file name lands in the working directory itself) and read it at that path; to reload the viewer, call `browser_navigate` with its URL, never `location.reload()` inside `browser_evaluate`; and a file the viewer downloads (an export) is saved without any dialog in `" + claudePlaywrightOutputDir(options) + "/downloads/`. Playwright MCP only reads files inside `" + claudeWorkingDir(options) + "`: write `browser_run_code_unsafe` scripts in `" + claudePlaywrightOutputDir(options) + "/scripts/` and pass that path.",
       "- If the `playwright` MCP server is unavailable, disabled, still on `about:blank`, or attached to another endpoint after readiness, report the host configuration problem to the user instead of bypassing it; if no viewer automation is configured at all, report the result as implemented but functionally unvalidated.",
       "- If `mobile-builder-open(stateOnly=true)` returns `status:\"stopped\"`, immediately call it once with `stateOnly=false, wait=false`; do not spend a timeout polling an inactive builder.",
       "- If a prompt says Convertigo runtime reveal mode is enabled, pass `reveal:true` only on supported Convertigo mutation/viewer tools; do not add it to read-only calls.",
@@ -1551,7 +1568,22 @@
           report.message = "Convertigo Generalist skill configured";
         }
         (report.skillStatus === "unchanged" ? report.reused : report.generated).push("skills/convertigo-generalist/SKILL.md");
-        var router = installStudioRouterSkill(homePath, dryRun, true);
+        // Flow (alpha, Convertigo 8.5.0 with lib_flow_engine and lib_flow_mcp loaded): its MCP server comes with
+        // lib_ConvertigoMCP._setupClaude, its orchestrator and specialist skills from lib_flow_mcp.
+        var flowAvailable = flowCapabilityAvailable();
+        if (flowAvailable) {
+          var flowSlugs = [AGENT_CAPABILITY_PROFILES.flow.skillSlug].concat(AGENT_CAPABILITY_PROFILES.flow.specialistSkillSlugs);
+          for (var flowIndex = 0; flowIndex < flowSlugs.length; flowIndex++) {
+            var flowSource = flowSkillSourceFile(options, flowSlugs[flowIndex]);
+            if (flowSource === null) {
+              throw new Error("Missing managed Flow skill: " + flowSlugs[flowIndex]);
+            }
+            var flowSkillFile = new File(new File(new File(homeDir, "skills"), flowSlugs[flowIndex]), "SKILL.md");
+            var flowWrite = writeManagedTextFile(flowSkillFile, readTextFile(flowSource), dryRun);
+            (flowWrite.status === "unchanged" ? report.reused : report.copied).push("skills/" + flowSlugs[flowIndex] + "/SKILL.md");
+          }
+        }
+        var router = installStudioRouterSkill(homePath, dryRun, !flowAvailable);
         report.routerSkillStatus = router.status;
         report.routerSkillPath = router.path;
         (router.status === "unchanged" ? report.reused : report.generated).push("skills/" + STUDIO_ROUTER_SKILL_SLUG + "/SKILL.md");

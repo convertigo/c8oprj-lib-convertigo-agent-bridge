@@ -71,6 +71,12 @@ same context.
   Codex, and Vibe, must receive proxy variables derived from the engine
   `ProxyManager`, including bypass domains and the local NTLM bridge when
   applicable. Never log proxy URLs containing credentials.
+- Always retain loopback hosts in child `NO_PROXY`, even with the engine proxy
+  disabled. Failed PAC resolution must stop before spawning a network process.
+  Gateway model discovery uses the engine HTTP client and the same proxy helper.
+- The managed Vibe runtime is pinned to `mistral-vibe==3.0.4`; generated configs
+  enable the system trust store. Cover proxy changes with
+  `node --test tests/proxy_transport.test.js` and preserve cached model fallback.
 - Refresh model capabilities from the installed CLI after setup. A runtime
   update affects new agent processes/conversations; an already running process
   may keep its previous model catalog until it is restarted.
