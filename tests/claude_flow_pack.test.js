@@ -1,7 +1,7 @@
 // Flow capability pack of a Claude conversation of the `flow` profile: its convertigo-mcp.json declares the
 // `convertigo-flow` server (same auth and headers as the Legacy `convertigo` server, guidance version included) and
 // Playwright only, its home has the three Flow skills only, and its CLAUDE.md the Flow routing and the rules to reload
-// after a compaction. A Studio (generalist) Claude conversation keeps the Legacy server and skills; Codex and Vibe keep
+// after a compaction. A Studio (generalist) Claude conversation keeps both available capability packs; Codex and Vibe keep
 // their homes.
 // node --test tests/claude_flow_pack.test.js
 const { test } = require("node:test");
@@ -174,7 +174,7 @@ test("a Claude conversation of the flow profile declares convertigo-flow and Pla
   });
 });
 
-test("a Claude Flow home has the three Flow skills only; a Studio home gets its skills back without them", () => {
+test("a Claude Flow home has the three Flow skills only; a Studio home restores both available capability packs", () => {
   withHome(({ home }) => {
     for (const slug of STUDIO_SKILLS) {
       writeTextFile(new FakeFile(home, "skills/" + slug + "/SKILL.md"), "---\nname: " + slug + "\n---\n");
@@ -193,9 +193,10 @@ test("a Claude Flow home has the three Flow skills only; a Studio home gets its 
     assert.equal(installAgentSkills(options, "claude", home).copied.length, 0, "a current home is left alone");
 
     const studio = prepareHome(home, conversation());
-    assert.deepEqual(studio.skillDirs, ["convertigo-generalist", "convertigo-studio"]);
-    assert.deepEqual(studio.skills.removed, FLOW_SKILLS.map((slug) => "skills/" + slug));
-    assert.deepEqual(Object.keys(studio.config.mcpServers), ["convertigo", "playwright"]);
+    assert.deepEqual(studio.skillDirs, ["convertigo-generalist", "convertigo-studio"].concat(FLOW_SKILLS).sort());
+    assert.equal(studio.skills.bundle.ready, true, "the routed Studio bundle must retain every installed skill");
+    assert.equal(studio.skills.removed, undefined, "switching to Studio must retain the available Flow pack");
+    assert.deepEqual(Object.keys(studio.config.mcpServers), ["convertigo", "convertigo-flow", "playwright"]);
     assert.equal(studio.config.mcpServers.convertigo.url, LEGACY + "?jsonOnly=true");
 
     flowSkillSourceFile = () => null;
@@ -234,17 +235,18 @@ test("the CLAUDE.md of a Flow conversation routes to the Flow skills and keeps t
 
     const studio = prepareHome(home, conversation({ cwd: "/ws" })).instructions;
     assert.equal(studio, claudeInstructions(conversation({ cwd: "/ws" }), "generalist"));
-    assert.match(studio, /Invoke the `convertigo-studio` skill first, then the `convertigo-generalist` skill/);
-    assert.doesNotMatch(studio, /convertigo-flow/);
+    assert.match(studio, /routed per task by the `convertigo-studio` skill/);
+    assert.match(studio, /Do not read the skills of the other pack/);
+    assert.match(studio, /convertigo-flow/);
   });
 });
 
-test("only the flow profile gets the pack: Studio and No Code Claude conversations, and engines without Flow, keep theirs", () => {
+test("explicit Flow gets its facade, routed Studio keeps both packs, and No Code stays isolated", () => {
   withFlow(true);
   assert.equal(claudeFlowFacade(conversation()), false);
   assert.equal(claudeFlowFacade({ agentProfile: "flow", userId: "alice@example.test" }), false, "a No Code identity never gets Flow");
   assert.deepEqual(managedSkillBundleSlugs(conversation({ agentProfile: "flow" }), "claude"), FLOW_SKILLS);
-  assert.deepEqual(managedSkillBundleSlugs(conversation(), "claude"), ["convertigo-studio", "convertigo-generalist"]);
+  assert.deepEqual(managedSkillBundleSlugs(conversation(), "claude"), ["convertigo-studio", "convertigo-generalist"].concat(FLOW_SKILLS));
   assert.deepEqual(managedSkillBundleSlugs({ agentProfile: "nocode", userId: "alice@example.test" }, "claude"), ["convertigo-nocode"]);
   assert.deepEqual(agentCapabilityProfile({ agentProfile: "flow", userId: "studio" }).supportedProviders, ["codex", "vibe", "claude"]);
   assert.match(claudeSource, /var profileSupported = capabilityProfile\.supportedProviders\.indexOf\("claude"\) >= 0;/);

@@ -238,3 +238,25 @@ test('the remembered tool titles stay bounded', () => {
   assert.equal(entry.toolCallTitles['effect-0'], undefined);
   assert.equal(entry.toolCallTitles['effect-249'], 'mcp_Convertigo.tool_249');
 });
+
+
+test('Flow and legacy Studio profiles retain native tools even on a restricted engine', () => {
+  const previous = flowCapabilityAvailability;
+  flowCapabilityAvailability = () => ({ available: true });
+  try {
+    for (const agentProfile of ['generalist', 'flow']) {
+      const options = { userId: 'studio', agentProfile };
+      for (const policy of ['mcp-only', 'files', 'sandboxed-shell']) {
+        assert.equal(withEngine(policy, () => noCodeToolPolicyName(options)), '', agentProfile);
+        assert.equal(withEngine(policy, () => vibeToolPolicy(options)), '', agentProfile);
+        for (const provider of ['vibe', 'codex', 'claude']) {
+          const sandbox = withEngine(policy, () => agentSessionSandbox(options, provider, null));
+          assert.equal(sandbox.scope, 'studio', provider);
+          assert.equal(sandbox.policy, 'full', agentProfile + ':' + provider);
+        }
+      }
+    }
+  } finally {
+    flowCapabilityAvailability = previous;
+  }
+});
