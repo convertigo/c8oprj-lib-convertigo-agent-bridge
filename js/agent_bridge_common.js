@@ -277,8 +277,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   }
 
   // Accepted reasoning_effort values differ per model (GLM 5.2 takes medium, GLM 5.3 does not)
-  // and the gateway does not publish them, so each new model is probed once with one-token
-  // requests. The answer is cached with the offer.
+  // and the gateway does not publish them, so new models are probed with one-token requests.
+  // Empty results are retried after cache expiry; an explicit refresh rechecks every model.
   var GATEWAY_REASONING_EFFORTS = ["low", "medium", "high", "max"];
 
   function probeGatewayModelEffort(options, apiKey, name, effort) {
@@ -299,7 +299,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       stream = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
       var text = stream === null ? "" : String(new java.lang.String(stream.readAllBytes(), "UTF-8"));
       if (code === 200) { return "yes"; }
-      if ((code === 400 || code === 422) && /reasoning_effort|not supported|UnsupportedParams/i.test(text)) { return "no"; }
+      if ((code === 400 || code === 422) && /reasoning_effort|thinking_level/i.test(text)) { return "no"; }
       return "unknown";
     } catch (_ignoreEffortProbe) {
       return "unknown";
@@ -934,7 +934,11 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
           for (var effortIndex = 0; effortIndex < fetched.length; effortIndex++) {
             var modelName = fetched[effortIndex];
             var levels = Object.prototype.hasOwnProperty.call(knownEfforts, modelName) ? normalizeGatewayEfforts(knownEfforts[modelName]) : null;
-            if (levels === null) { levels = probeGatewayModelEfforts(options, apiKey, modelName); }
+            if (levels === null || !levels.length || gatewayModelCatalogRefreshRequested(options)) {
+              var probedLevels = probeGatewayModelEfforts(options, apiKey, modelName);
+              // A timeout, quota or access error is not evidence that reasoning is unsupported.
+              if (probedLevels !== null) { levels = probedLevels; }
+            }
             if (levels !== null) { efforts[modelName] = levels; }
           }
           var cacheFile = convertigoGatewayModelsCacheFile(options);
@@ -6594,6 +6598,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     provider.models = models;
     provider.supports = provider.supports || {};
     provider.supports.images = models.some(function (model) { return model.supportsImages === true; });
+    provider.supports.reasoning = models.some(function (model) { return model.reasoningLevels.length > 0; });
+    provider.reasoningMode = provider.supports.reasoning ? "runtime_selectable" : "model_bound";
     if (aliases.indexOf(trim(provider.defaultModel)) < 0) { provider.defaultModel = models[0].id; }
     return provider;
   }
@@ -6617,11 +6623,11 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   function hydrateProviderSettingsFromCache(workspaceRoot, provider, preferCached) {
     provider = provider || {};
     if (!preferCached && provider.models && provider.models.length) {
-      return provider;
+      return enforceThinkingReasoningLevels(applyGatewayOfferToProvider(provider));
     }
     var cached = readPersistentProviderSettingsCache(workspaceRoot, provider.id, providerCacheKey(provider));
     if (cached === null) {
-      return provider;
+      return enforceThinkingReasoningLevels(applyGatewayOfferToProvider(provider));
     }
     provider.models = cached.models || [];
     provider.defaultModel = trim(cached.defaults && cached.defaults.model);
@@ -12425,7 +12431,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     "grep", "web_fetch", "web_search", "task", "todo", "skill", "search_tool_functions", "process"];
   var VIBE_MCP_TOOL_NAME = /^(?:mcp_)?(?:Convertigo|playwright)[._][A-Za-z0-9_\-]+/i;
   var VIBE_ASKS_USER = /\b(?:confirme[zr]?|confirm|valide[zr]?|dites-moi|dis-moi|voulez-vous|veux-tu|souhaitez-vous|pr\u00e9f\u00e9rez-vous|shall i|should i|do you want|would you like|let me know|tell me)\b/i;
-  var VIBE_ANNOUNCES = /\b(?:je vais|je m'appr\u00eate \u00e0|maintenant,? je|ensuite,? je|i will|i'll|i am going to|i'm going to|let me|next,? i|now i)\b/i;
+  var VIBE_ANNOUNCES = /\b(?:je vais|je v\u00e9rifie|je m'appr\u00eate \u00e0|maintenant,? je|ensuite,? je|i will|i'll|i am going to|i'm going to|let me|next,? i|now i)\b/i;
   // A closing that hands over to the user ("je vais maintenant vous laisser tester") announces nothing to do.
   var VIBE_HANDS_OVER = /\b(?:vous laisser|te laisser|laisse(?:r|z)? (?:la main|tester)|let you|leave (?:it|this|the rest) to you|hand (?:it|this) (?:back|over)|m'arr\u00eater|i'll stop|stop here)\b/i;
   // A call that only reads (a tree, a list, a file, a guide, the lint) is not the agent acting on the project: a turn
@@ -12479,7 +12485,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     }
     // A todo call is a short name too, but a complete JSON argument object makes it a printed plan update.
     // Keep the existing bounded nudge: never execute text as a tool call or expand the turn's permissions.
-    var todo = /^todo\s*(?:\u2026|\.\.\.)?\s*(?:(\{[\s\S]*\})|\(\s*(\{[\s\S]*\})\s*\))$/i.exec(body);
+    var todo = /^todo\s*(?:\u2026|\.\.\.|:)?\s*(?:(\{[\s\S]*\})|\(\s*(\{[\s\S]*\})\s*\))$/i.exec(body);
     if (todo) {
       try { JSON.parse(todo[1] || todo[2]); return { reason: "printed_call", tool: "todo" }; }
       catch (_invalidTodoJson) { return null; }

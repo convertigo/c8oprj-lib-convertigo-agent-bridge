@@ -75,7 +75,7 @@ same context.
 - Always retain loopback hosts in child `NO_PROXY`, even with the engine proxy
   disabled. Failed PAC resolution must stop before spawning a network process.
   Gateway model discovery uses the engine HTTP client and the same proxy helper.
-- The managed Vibe runtime is pinned to `mistral-vibe==3.0.4`; generated configs
+- The managed Vibe runtime is pinned to `mistral-vibe==3.1.0`; generated configs
   enable the system trust store. Cover proxy changes with
   `node --test tests/proxy_transport.test.js` and preserve cached model fallback.
 - Refresh model capabilities from the installed CLI after setup. A runtime
@@ -687,6 +687,12 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - `refreshModelCatalog` bypasses the five-minute gateway model cache and the
   provider metadata cache. Runtime presence checks stay offline, and a failed
   refresh retains the last known offer. Parse each flag before combining it.
+- Empty cached effort lists are retried at catalog expiry; explicit refresh
+  rechecks all efforts. An unrelated HTTP 400 is an unknown probe result, not
+  evidence that reasoning is unsupported. After applying a gateway offer,
+  recompute `supports.reasoning` and `reasoningMode` from the offered levels,
+  including when restoring an old provider cache. Cover this with
+  `node --test tests/gateway_effort_refresh.test.js`.
 - Mistral Large 4 (`mistral/mistral-large-4` and its ACP alias) accepts images.
   Declare `supports_images = true` in its managed config and transmit ACP image
   blocks; GLM remains text-only. Do not apply GLM capabilities to every model.
@@ -705,10 +711,17 @@ Prefer the owning Convertigo MCP tools for authoring, without disabling native t
 
 ## Printed Vibe todo calls
 
-`vibePrintedCallOf` recognizes a complete `todo {JSON}` or `todo … {JSON}` response and reuses the existing
+`vibePrintedCallOf` recognizes complete `todo {JSON}`, `todo … {JSON}`, `todo:{JSON}` and `todo({JSON})` responses and reuses the existing
 bounded turn nudge (two per turn, never after Stop/refusal/error). The Bridge asks for a real tool call;
 it never executes printed arguments. Keep ordinary answers, questions and malformed JSON outside this rule.
+The short announcement detector also recognizes present-tense verification after a write;
+read-only turns and requests for user input still finish normally.
 Run `node --test tests/vibe_turn_nudge.test.js` and the Bridge suite after changing it.
+Before changing the runtime pin, set `VIBE_TEST_PYTHONS` to a JSON array of the
+Python executables for the previous and new installed runtimes, then run that
+test. It validates the generated `mistral` and `convertigo` configurations and
+feeds their actual ACP serializers through the turn handler, entirely offline.
+The current matrix covers 3.0.4 and 3.1.0; it does not replace live model tests.
 
 ## Flow MCP failures and per-request journal measures
 

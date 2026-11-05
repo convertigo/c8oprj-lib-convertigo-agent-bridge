@@ -337,3 +337,94 @@ test("printed todo call syntax is nudged and an exhausted continuation is explic
  assert.equal(types(entry,'turn/end')[0].data.result.error.tool,'todo');
  assert.equal(prompts(entry).length,2);
 });
+
+test("a streamed todo call with a colon resumes within the same bounded turn", () => {
+  const entry = turn(7);
+  play(entry, [say('todo:'), say('{"action":"write","todos":['),
+    say('{"content":"Check the result","status":"in_progress"}]}'), answer(7)]);
+  assert.equal(types(entry, "turn/nudge").length, 1);
+  assert.equal(types(entry, "turn/nudge")[0].data.tool, "todo");
+  assert.equal(types(entry, "turn/end").length, 0);
+  const text = 'todo: {"action":"write","todos":[]}';
+  for (let i = 0; i < 2; i++) play(entry, [say(text), answer(types(entry, "turn/nudge")[i].data.requestId)]);
+  assert.equal(prompts(entry).length, 2);
+  assert.equal(types(entry, "turn/end")[0].data.result.incomplete, true);
+  for (const stop of ['cancelled', 'max_tokens', 'refusal']) {
+    const stopped = turn(9);
+    play(stopped, [say(text), answer(9, stop)]);
+    assert.equal(types(stopped, "turn/nudge").length, 0);
+    assert.equal(types(stopped, "turn/incomplete").length, 0);
+  }
+  for (const text of ['todo: {not json}', 'todo: {"todos":[]} Continue?',
+    'The todo: {"todos":[]} is an example.']) {
+    const ordinary = turn(10);
+    play(ordinary, [say(text), answer(10)]);
+    assert.equal(types(ordinary, "turn/nudge").length, 0, text);
+  }
+});
+
+test("a pending verification after a write resumes, while reads and questions still end", () => {
+  const text = "Je vérifie les cas d'erreur en HTTP.";
+  const entry = turn(7);
+  play(entry, [call('write', 'mcp_convertigo_flow.code_set'), say(text), answer(7)]);
+  assert.equal(types(entry, "turn/nudge").length, 1);
+  assert.equal(types(entry, "turn/nudge")[0].data.reason, "announcement");
+  for (const title of ['', 'mcp_convertigo_flow.code_get', 'bash: cat result.txt']) {
+    const read = turn(8);
+    play(read, [...(title ? [call('read', title)] : []), say(text), answer(8)]);
+    assert.equal(types(read, "turn/nudge").length, 0);
+  }
+  for (const closing of ["J'ai vérifié les cas d'erreur en HTTP.", text + ' Voulez-vous continuer ?']) {
+    const done = turn(9);
+    play(done, [call('write', 'mcp_convertigo_flow.code_set'), say(closing), answer(9)]);
+    assert.equal(types(done, "turn/nudge").length, 0);
+  }
+});
+
+const runtimePythons = JSON.parse(process.env.VIBE_TEST_PYTHONS || '[]');
+for (const python of runtimePythons) {
+  for (const profile of ['mistral', 'convertigo']) {
+    test(`installed runtime ${python}: generated ${profile} config and ACP turn contract`, () => {
+      const { spawnSync } = require('node:child_process');
+      const testRoot = path.join(root, '_private', 'runtime-contract');
+      fs.mkdirSync(testRoot, { recursive: true });
+      const home = fs.mkdtempSync(path.join(testRoot, 'home-'));
+      let config;
+      const previousWrite = sandbox.writeTextFile, previousEnsure = sandbox.ensureDirectory;
+      sandbox.writeTextFile = (_file, text) => { config = String(text); };
+      sandbox.ensureDirectory = () => {};
+      const model = profile === 'convertigo' ? 'mistral-large-4' : 'glm-5-3';
+      try {
+        sandbox.writeLocalVibeConfig(home, 'http://127.0.0.1:1/convertigo/api/mcp', model, {
+          vibeProfile: profile, model,
+          gatewayModelIds: ['mistral/mistral-large-4'],
+          gatewayModelEfforts: { 'mistral/mistral-large-4': ['low', 'high', 'max'] }
+        });
+      } finally {
+        sandbox.writeTextFile = previousWrite;
+        sandbox.ensureDirectory = previousEnsure;
+      }
+      const result = spawnSync(python, [path.join(__dirname, 'vibe_runtime_compat.py')], {
+        cwd: home, encoding: 'utf8', timeout: 30000,
+        env: { PATH: process.env.PATH, VIBE_HOME: home, VIBE_ENABLE_TELEMETRY: 'false', PYTHONDONTWRITEBYTECODE: '1' },
+        input: JSON.stringify({ config, model, profile })
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const actual = JSON.parse(result.stdout);
+      assert.ok(['3.0.4', '3.1.0'].includes(actual.version));
+      const response = id => JSON.stringify({ jsonrpc: '2.0', id, result: actual.response });
+      const entry = turn(7);
+      play(entry, [...actual.printed.map(JSON.stringify), response(7)]);
+      assert.equal(types(entry, 'turn/nudge').length, 1);
+      play(entry, [...actual.complete.map(JSON.stringify), response(types(entry, 'turn/nudge')[0].data.requestId)]);
+      assert.equal(types(entry, 'turn/end').length, 1);
+      assert.equal(types(entry, 'turn/end')[0].data.result.incomplete, undefined);
+      const announce = turn(8);
+      play(announce, [call('write', 'mcp_convertigo_flow.code_set'), ...actual.announcement.map(JSON.stringify), response(8)]);
+      assert.equal(types(announce, 'turn/nudge')[0].data.reason, 'announcement');
+      const cancelled = turn(9);
+      play(cancelled, [...actual.printed.map(JSON.stringify), JSON.stringify({ jsonrpc: '2.0', id: 9, result: actual.cancelled })]);
+      assert.equal(types(cancelled, 'turn/nudge').length, 0);
+    });
+  }
+}
