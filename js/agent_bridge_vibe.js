@@ -378,6 +378,10 @@
   }
 
   function vibeStartSteps(options) {
+    var noCodeRefusal = noCodeAgentRefusal(options);
+    if (noCodeRefusal !== null) {
+      return noCodeRefusal;
+    }
     options = optionsWithRequestFallbacks(options || {});
     var requestedModel = trim(options.model || options.agentModel);
     var handle = trim(options.handle) || makeHandle("vibe");
@@ -639,6 +643,7 @@
     entry.vibeProfile = resolveVibeProfile(options);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
     entry.mcpLeaseTokenId = managedMcpTokenId(options);
+    entry.noCodeAccess = noCodeAccessOptions(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
     entry.mcpCatalogKey = trim(options.mcpCatalogKey);
@@ -1023,6 +1028,11 @@
     }
     if (!processAlive(entry.process) || entry.status !== "running") {
       return { ok: false, status: "not_running", handle: handle, state: statusOf(entry), timestamp: now() };
+    }
+    var noCodeRefusal = noCodeAgentRefusal(entry.noCodeAccess);
+    if (noCodeRefusal !== null) {
+      noCodeRefusal.handle = handle;
+      return noCodeRefusal;
     }
     writeStartupTimings(startupTimer("prompt", { handle: handle }), entry.workspaceRoot, "received");
     entry.prewarm = false;

@@ -738,3 +738,14 @@ Run `node --test tests/vibe_mcp_metrics.test.js` and `tests/agent_quota.test.js`
 
 Printed `todo({...})` calls are recognized too. After bounded nudges fail, the turn ends with
 `incomplete:true` and `PRINTED_TOOL_CALL`, and emits a progress diagnostic; it never executes printed arguments.
+
+## Tigo right of the No Code Studio
+
+- A No Code session needs the Tigo right of its user (C8Oforms `tigo_rights`).
+  The Assistant checks it for the user of the session; the Bridge checks it
+  again on the agent's No Code MCP token (`noCodeAgentRefusal`): at
+  `vibeStart`/`codexStart`/`claudeStart` and at each prompt (a running entry
+  keeps `noCodeAccess`), C8Oforms `APIV2_McpTokenValidate` answers
+  `agent_not_allowed` once the right is withdrawn. Without a token, or without a
+  C8Oforms that knows the right (no `APIV2_AgentAccess`), the Bridge leaves it to
+  the Assistant and the MCP. Cover with `node --test tests/nocode_agent_access.test.js`.

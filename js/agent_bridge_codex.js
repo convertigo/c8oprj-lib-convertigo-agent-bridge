@@ -2035,6 +2035,10 @@
   C8O.agentBridge.codexStart = function (options) {
     var operationStartedAt = now();
     options = optionsWithRequestFallbacks(options || {});
+    var noCodeRefusal = noCodeAgentRefusal(options);
+    if (noCodeRefusal !== null) {
+      return noCodeRefusal;
+    }
     try {
       C8O.agentBridge.sweepExpired({});
     } catch (_ignoreStartSweep) {}
@@ -2337,6 +2341,11 @@
     var entry = getRegistry().get(handle);
     if (entry === null || typeof entry === "undefined") {
       return { ok: false, status: "not_found", handle: handle, error: "Unknown handle", timestamp: now() };
+    }
+    var noCodeRefusal = noCodeAgentRefusal({ skillProfile: entry.skillProfile, nocodeMcpTokenHandle: entry.nocodeMcpTokenHandle });
+    if (noCodeRefusal !== null) {
+      noCodeRefusal.handle = handle;
+      return noCodeRefusal;
     }
     if (entry.protocol === "codex-app-server") {
       if (!processAlive(entry.process)) {

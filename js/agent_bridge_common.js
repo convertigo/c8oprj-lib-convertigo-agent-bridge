@@ -3709,6 +3709,65 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return noCodeMcpBearerTokenFromFile(options);
   }
 
+  // Tigo in the No Code Studio is a right of each user (C8Oforms tigo_rights). The Assistant checks it for the user of
+  // the session before it starts, sets up or prompts an agent. The Bridge checks it again on the No Code MCP token of
+  // the agent: C8Oforms validates the token with the right of the user it was signed for (APIV2_McpTokenValidate
+  // answers agent_not_allowed). Without a token, or without a C8Oforms that knows the right, the Bridge leaves it to the
+  // Assistant and the MCP.
+  var NOCODE_AGENT_ACCESS_PROJECT = "C8Oforms";
+  var NOCODE_AGENT_ACCESS_SEQUENCE = "APIV2_AgentAccess";
+  var NOCODE_AGENT_TOKEN_SEQUENCE = "APIV2_McpTokenValidate";
+
+  // what a running No Code entry keeps to check the right again at each prompt
+  function noCodeAccessOptions(options) {
+    options = options || {};
+    return {
+      skillProfile: normalizeSkillProfile(options),
+      nocodeMcpTokenHandle: trim(options.nocodeMcpTokenHandle || options.noCodeMcpTokenHandle || options.mcpBearerTokenHandle)
+    };
+  }
+
+  function noCodeAgentAccessManaged() {
+    try {
+      var project = Engine.theApp.databaseObjectsManager.getOriginalProjectByName(NOCODE_AGENT_ACCESS_PROJECT);
+      return project != null && project.getSequenceByName(NOCODE_AGENT_ACCESS_SEQUENCE) != null;
+    } catch (_ignoreNoAccessSequence) {
+      return false;
+    }
+  }
+
+  function noCodeAgentRefusal(options) {
+    options = options || {};
+    if (normalizeSkillProfile(options) !== "nocode") {
+      return null;
+    }
+    var parts = trim(noCodeMcpBearerToken(options)).split(".");
+    if (parts.length !== 3 || !noCodeAgentAccessManaged()) {
+      return null;
+    }
+    var code = "";
+    try {
+      var response = callLocalSequence(NOCODE_AGENT_ACCESS_PROJECT, NOCODE_AGENT_TOKEN_SEQUENCE, {
+        signingInput: parts[0] + "." + parts[1],
+        signature: parts[2]
+      });
+      var result = response && response.document && response.document.result;
+      code = trim(result && result.error && result.error.code);
+    } catch (_ignoreTokenCheck) {
+      return null;
+    }
+    if (code !== "agent_not_allowed") {
+      return null;
+    }
+    return {
+      ok: false,
+      status: "failed",
+      code: "agent_not_allowed",
+      error: "agent_not_allowed: Tigo is not enabled for this account. An administrator of the No Code Studio can grant it.",
+      timestamp: now()
+    };
+  }
+
   function managedMcpBearerToken(options) {
     options = options || {};
     if (normalizeSkillProfile(options) === "nocode") {
