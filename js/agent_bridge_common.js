@@ -489,7 +489,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // files the Bridge also refuses any permission asked for another tool than a Convertigo MCP one. The Studio's own
   // session (user studio) is never limited. Bumped when a policy changes: No Code homes rewrite config.toml, resident
   // No Code sessions restart.
-  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v4";
+  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v5";
   var VIBE_NOCODE_POLICIES = ["mcp-only", "files", "sandboxed-shell", "full"];
   var VIBE_NOCODE_SHELL_TOOLS = ["bash*", "git_bash*", "powershell*"];
   var VIBE_NOCODE_FILE_TOOLS = ["read_file", "write_file", "edit"];
@@ -670,13 +670,18 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       var described = JSON.parse(String(agentSandbox().describe()));
       var policy = trim(described.effective);
       var configured = trim(described.policy);
+      var abi = Number(described.landlockAbi) > 0 ? Number(described.landlockAbi) : 0;
+      policy = VIBE_NOCODE_POLICIES.indexOf(policy) >= 0 ? policy : "files";
+      if (abi === 0 && (policy === "files" || policy === "sandboxed-shell")) {
+        policy = "mcp-only";
+      }
       return {
-        policy: VIBE_NOCODE_POLICIES.indexOf(policy) >= 0 ? policy : "files",
+        policy: policy,
         configured: VIBE_NOCODE_POLICIES.indexOf(configured) >= 0 ? configured : "",
         landlockAbi: Number(described.landlockAbi) > 0 ? Number(described.landlockAbi) : 0
       };
     } catch (_ignoreOlderEngine) {
-      return { policy: "files", configured: "", landlockAbi: 0 };
+      return { policy: "mcp-only", configured: "", landlockAbi: 0 };
     }
   }
 
@@ -733,6 +738,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       disabled = disabled.concat(VIBE_NOCODE_FILE_TOOLS);
     }
     return [
+      'default_agent = "accept-edits"',
+      "enable_auto_approve = false",
+      "bypass_tool_permissions = false",
+      'outside_workdir = "deny"',
       "disabled_tools = " + tomlArray(disabled),
       "enable_background_processes = false",
       "enable_subagents = false"
@@ -749,7 +758,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     }
     var tables = ["[tools.write_file]", 'permission = "always"', "", "[tools.edit]", 'permission = "always"', ""];
     if (trim(vibeHome).length) {
-      tables.push("[tools.read_file]", "allowlist = " + tomlArray([trim(vibeHome) + "/logs/session/unified/*/tool-results/*"]), "");
+      tables.push("[tools.read_file]", 'outside_workdir = "deny"', "allowlist = " + tomlArray([trim(vibeHome) + "/logs/session/unified/*/tool-results/*"]), "");
     }
     return tables;
   }
@@ -855,7 +864,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   }
 
   // The title Vibe gave the tool call a permission request names (its tool_call update comes first, with the same id).
-  // An id Vibe built from the tool name stands for it; an effect id never seen is not judged.
+  // An id Vibe built from the tool name stands for it; an unknown effect id stays unknown.
   function permissionToolTitle(entry, toolCall) {
     toolCall = toolCall || {};
     var id = trim(toolCall.toolCallId || toolCall.tool_call_id);
@@ -873,7 +882,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       return false;
     }
     var title = permissionToolTitle(entry, (params || {}).toolCall || (params || {}).tool_call);
-    return title.length > 0 && !isConvertigoMcpToolTitle(title);
+    // Requests outside the session folder and missing tool notifications stay refused.
+    return !isConvertigoMcpToolTitle(title);
   }
 
   function rememberToolCallTitle(entry, toolCallId, title) {
@@ -12334,7 +12344,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       if (noCodePermissionRefused(entry, params)) {
         var rejectId = chooseRejectOption(params.options || []);
         pushEvent(entry, "permission/refused", {
-          reason: "nocode_tool_policy",
+          reason: /^(Reading |Writing |Editing |read_file[: ]|write_file[: ]|edit[: ]|bash[: ]|file_system\.)/i.test(permissionToolTitle(entry, params.toolCall || params.tool_call)) ? "nocode_tool_policy" : "unknown_tool",
           title: permissionToolTitle(entry, params.toolCall || params.tool_call),
           toolCall: params.toolCall || params.tool_call || null
         });
