@@ -879,12 +879,17 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     if (policy !== "mcp-only" && policy !== "files") {
       return false;
     }
-    var title = permissionToolTitle(entry, (params || {}).toolCall || (params || {}).tool_call);
+    var call = (params || {}).toolCall || (params || {}).tool_call || {};
+    var id = trim(call.toolCallId || call.tool_call_id);
+    var nativeKind = trim(call.kind) || trim(entry && entry.toolCallKinds && entry.toolCallKinds[id]);
+    // A native operation's argument cannot become an MCP identity through its display title.
+    if (nativeKind.length && nativeKind !== "other") { return true; }
+    var title = permissionToolTitle(entry, call);
     // Requests outside the session folder and missing tool notifications stay refused.
     return !isConvertigoMcpToolTitle(title);
   }
 
-  function rememberToolCallTitle(entry, toolCallId, title) {
+  function rememberToolCallTitle(entry, toolCallId, title, kind) {
     var id = trim(toolCallId);
     if (!entry || !id.length || !trim(title).length) {
       return;
@@ -896,10 +901,16 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     if (!Object.prototype.hasOwnProperty.call(entry.toolCallTitles, id)) {
       entry.toolCallTitleOrder.push(id);
       if (entry.toolCallTitleOrder.length > 200) {
-        delete entry.toolCallTitles[entry.toolCallTitleOrder.shift()];
+        var expiredId = entry.toolCallTitleOrder.shift();
+        delete entry.toolCallTitles[expiredId];
+        if (entry.toolCallKinds) { delete entry.toolCallKinds[expiredId]; }
       }
     }
     entry.toolCallTitles[id] = trim(title);
+    if (trim(kind).length) {
+      entry.toolCallKinds = entry.toolCallKinds || {};
+      entry.toolCallKinds[id] = trim(kind);
+    }
   }
 
   function gatewayModelCatalogRefreshRequested(options) {
@@ -11744,7 +11755,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       eventData.toolCallId = update.toolCallId || update.tool_call_id || "";
       eventData.title = update.title || "";
       eventData.status = update.status || "";
-      rememberToolCallTitle(entry, eventData.toolCallId, eventData.title);
+      rememberToolCallTitle(entry, eventData.toolCallId, eventData.title, update.kind);
       rememberAcpToolStart(entry, eventData.toolCallId);
       pushEvent(entry, "tool/start", eventData);
       return;
@@ -11753,7 +11764,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       eventData.toolCallId = update.toolCallId || update.tool_call_id || "";
       eventData.title = update.title || "";
       eventData.status = update.status || "";
-      rememberToolCallTitle(entry, eventData.toolCallId, eventData.title);
+      rememberToolCallTitle(entry, eventData.toolCallId, eventData.title, update.kind);
       var failure = acpToolFailure(entry, update, eventData.toolCallId, eventData.status);
       if (failure !== null) {
         eventData.failure = failure;

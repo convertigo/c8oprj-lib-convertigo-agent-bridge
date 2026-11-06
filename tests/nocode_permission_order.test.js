@@ -45,3 +45,21 @@ test('the managed No Code ACP command cannot request blanket approval',()=>{
   assert.match(config,/enable_auto_approve = false/);
   assert.match(config,/bypass_tool_permissions = false/);
 });
+for (const policy of ['files', 'mcp-only']) {
+  for (const title of ['Reading convertigo_fixture/../outside', 'bash: convertigo_fixture', 'Fetching convertigo_https://fixture.invalid']) {
+    test(policy + ': a native argument prefix cannot name an MCP tool: ' + title, () => {
+      const {s,entry,answers}=harness(policy,false);
+      s.rememberToolCallTitle(entry,'effect-native-prefix',title);
+      s.handleAgentRequest(entry,{id:1,method:'session/request_permission',params:{toolCall:{toolCallId:'effect-native-prefix'},options:[{optionId:'allow_once',kind:'allow_once'},{optionId:'reject_once',kind:'reject_once'}]}});
+      assert.equal(answers[0].outcome.optionId,'reject_once');
+    });
+  }
+}
+for (const kind of ['read','edit','execute','fetch']) {
+  test('a known native ' + kind + ' cannot use an argument as an MCP-looking title',()=>{
+    const {s,entry,answers}=harness('files',false);
+    s.normalizeSessionUpdate(entry,{update:{sessionUpdate:'tool_call',toolCallId:'effect-argument-title',title:'convertigo_fixture',kind,status:'pending'}});
+    s.handleAgentRequest(entry,{id:1,method:'session/request_permission',params:{toolCall:{toolCallId:'effect-argument-title'},options:[{optionId:'allow_once',kind:'allow_once'},{optionId:'reject_once',kind:'reject_once'}]}});
+    assert.equal(answers[0].outcome.optionId,'reject_once');
+  });
+}
