@@ -1,5 +1,5 @@
 // A No Code session works through the Convertigo MCP, with what the engine's agents.tool_policy allows besides
-// (engine.util.AgentSandbox; files on an engine without it). On test-nocode a Mistral Large 4 agent ran `bash: jq ...`
+// (engine.util.AgentSandbox; mcp-only on an engine without it). On test-nocode a Mistral Large 4 agent ran `bash: jq ...`
 // in the engine container: Vibe offered its shell, file and web tools and the Bridge approved every permission.
 // mcp-only and files remove the shell, the session works in its own folder, and the Bridge refuses a permission for
 // a tool that is not a Convertigo MCP one; sandboxed-shell runs vibe-acp through the engine's Landlock helper.
@@ -62,12 +62,12 @@ function topLevel(text) {
   return lines.slice(0, lines.indexOf('[[providers]]'));
 }
 
-test('a No Code session takes the effective policy of its engine, files on an engine without it; a Studio session none', () => {
-  assert.equal(withEngine(undefined, () => noCodeToolPolicyName(noCode)), 'files');
+test('a No Code session takes the effective policy of its engine, mcp-only on an engine without it; a Studio session none', () => {
+  assert.equal(withEngine(undefined, () => noCodeToolPolicyName(noCode)), 'mcp-only');
   for (const policy of ['mcp-only', 'files', 'sandboxed-shell', 'full']) {
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(noCode)), policy);
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v3');
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + policy + '-v3', 'an engine that cannot confine');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v5');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + (['files', 'sandboxed-shell'].includes(policy) ? 'mcp-only' : policy) + '-v5', 'an engine that cannot confine');
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(studio)), '', 'the Studio session is never limited');
     assert.equal(withEngine(policy, () => vibeToolPolicy(studio)), '');
   }
@@ -86,7 +86,7 @@ test('each policy writes what its config.toml leaves out, before the first table
   // writes in the session's folder need no permission; outside it Vibe asks and the Bridge refuses
   assert.match(filesText, /\n\[tools\.write_file\]\npermission = "always"\n\n\[tools\.edit\]\npermission = "always"\n/);
   // a tool result Vibe saved to a file lies in VIBE_HOME, outside the session's folder: read_file reads it without asking
-  assert.match(filesText, /\n\[tools\.read_file\]\nallowlist = \["\/tmp\/vibe-home\/logs\/session\/unified\/\*\/tool-results\/\*"\]\n/);
+  assert.match(filesText, /\n\[tools\.read_file\]\noutside_workdir = "deny"\nallowlist = \["\/tmp\/vibe-home\/logs\/session\/unified\/\*\/tool-results\/\*"\]\n/);
 
   const shell = withEngine('sandboxed-shell', () => topLevel(writtenConfig(noCode)));
   assert.ok(shell.includes('disabled_tools = ["grep", "web_fetch", "web_search", "task"]'), shell.join('\n'));
@@ -132,10 +132,10 @@ test('the status of a session says what it may do: the policy its harness applie
   const vibe = (policy, extra) => withEngine(policy, () => agentSessionSandbox(noCode, 'vibe', noCodeSessionSandbox(noCode, {}, home)), extra);
   assert.deepEqual(vibe('files'), { scope: 'nocode', policy: 'files', source: 'engine', configured: '', confined: true, landlockAbi: 1 });
   assert.deepEqual(vibe('mcp-only', { abi: 6 }), { scope: 'nocode', policy: 'mcp-only', source: 'engine', configured: '', confined: true, landlockAbi: 6 });
-  assert.deepEqual(vibe('files', { abi: 0 }), { scope: 'nocode', policy: 'files', source: 'engine', configured: '', confined: false, landlockAbi: 0 }, 'an engine that cannot confine');
-  assert.deepEqual(vibe('files', { abi: 0, configured: 'sandboxed-shell' }), { scope: 'nocode', policy: 'files', source: 'engine', configured: 'sandboxed-shell', confined: false, landlockAbi: 0 }, 'the shell asked where the engine cannot confine it');
+  assert.deepEqual(vibe('files', { abi: 0 }), { scope: 'nocode', policy: 'mcp-only', source: 'engine', configured: 'files', confined: false, landlockAbi: 0 }, 'an engine that cannot confine');
+  assert.deepEqual(vibe('files', { abi: 0, configured: 'sandboxed-shell' }), { scope: 'nocode', policy: 'mcp-only', source: 'engine', configured: 'sandboxed-shell', confined: false, landlockAbi: 0 }, 'the shell asked where the engine cannot confine it');
   assert.deepEqual(vibe('full'), { scope: 'nocode', policy: 'full', source: 'engine', configured: '', confined: false, landlockAbi: 1 });
-  assert.deepEqual(withEngine(undefined, () => agentSessionSandbox(noCode, 'vibe', null)), { scope: 'nocode', policy: 'files', source: 'engine', configured: '', confined: false, landlockAbi: 0 }, 'an engine older than agents.tool_policy');
+  assert.deepEqual(withEngine(undefined, () => agentSessionSandbox(noCode, 'vibe', null)), { scope: 'nocode', policy: 'mcp-only', source: 'engine', configured: '', confined: false, landlockAbi: 0 }, 'an engine older than agents.tool_policy');
   for (const provider of ['codex', 'claude']) {
     assert.deepEqual(withEngine('mcp-only', () => agentSessionSandbox(noCode, provider, null)), { scope: 'nocode', policy: 'full', source: 'harness', configured: '', confined: false, landlockAbi: 1 }, provider + ' does not apply the policy');
   }
@@ -220,7 +220,7 @@ test('under mcp-only and files the session refuses a permission for a tool that 
     assert.deepEqual(permissionAnswers(entry, { toolCallId: 'effect-39886a25' }).outcome, allowed, policy);
     assert.deepEqual(permissionAnswers(entry, { toolCallId: 'Convertigo_nocode-form-get' }).outcome, allowed, policy + ': a direct MCP call');
     assert.deepEqual(permissionAnswers(entry, { toolCallId: 'file_system.bash' }).outcome, refused, policy + ': an id Vibe built from the tool name');
-    assert.deepEqual(permissionAnswers(entry, { toolCallId: 'effect-unknown' }).outcome, allowed, policy + ': a call never seen is left to the config');
+    assert.deepEqual(permissionAnswers(entry, { toolCallId: 'effect-unknown' }).outcome, refused, policy + ': a call never seen is refused');
   }
 });
 
@@ -236,4 +236,21 @@ test('the remembered tool titles stay bounded', () => {
   assert.equal(Object.keys(entry.toolCallTitles).length, 200);
   assert.equal(entry.toolCallTitles['effect-0'], undefined);
   assert.equal(entry.toolCallTitles['effect-249'], 'mcp_Convertigo.tool_249');
+});
+
+
+for (const policy of ['files', 'mcp-only']) {
+  for (const [name, toolCall] of Object.entries({empty: {}, unknown: {title: 'new_native_tool'}, thirdParty: {title: 'other_server.read'}, file: {title: 'Reading /outside/session/file'}})) {
+    test(policy + ' denies ' + name + ' permission requests', () => {
+      const result = permissionAnswers({noCodePolicy: policy}, toolCall);
+      assert.deepEqual(result.outcome, refused);
+      if (name === 'empty') assert.equal(result.events.find(e => e.type === 'permission/refused').data.reason, 'unknown_tool');
+    });
+  }
+}
+test('managed ACP commands never enable blanket approval and runtime version stays pinned', () => {
+  assert.doesNotMatch(vibeSource, /--auto-approve|--yolo/);
+  assert.match(vibeSource, /mistral-vibe==3\.0\.4/);
+  assert.match(withEngine('files', () => writtenConfig(noCode)), /default_agent = "accept-edits"/);
+  assert.match(withEngine('files', () => writtenConfig(noCode)), /enable_auto_approve = false\nbypass_tool_permissions = false/);
 });

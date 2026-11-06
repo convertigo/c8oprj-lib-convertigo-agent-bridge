@@ -573,3 +573,16 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   claiming the upstream model cannot see images.
 - `node tests/gateway_models.test.js` checks metadata refresh, offline startup,
   stale-catalog fallback and the outbound ACP image payload without inference.
+
+## Managed No Code permissions
+
+- Restricted ACP sessions deny missing or unrecognized tool permission titles.
+  Native file tools operate within the session folder; requests outside it are
+  refused. A missing title emits `permission/refused` with `unknown_tool`.
+- Without Landlock, `files` and `sandboxed-shell` resolve to `mcp-only`, including
+  engines that do not expose sandbox diagnostics. Studio sessions retain their
+  existing policy. The policy revision refreshes homes and restarts residents.
+- Restricted managed configurations select `accept-edits`, disable blanket
+  approval, and deny file access outside the working directory. These settings
+  supplement kernel confinement; they do not replace it.
+- Run `node --test tests/nocode_tool_policy.test.js` and the full test suite.
