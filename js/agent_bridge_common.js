@@ -89,6 +89,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   var RUNTIME_UPDATE_CACHE_KEY = "lib_ConvertigoAgentBridge.runtimeUpdateCache.v1";
   var RUNTIME_UPDATE_CACHE_FILE = "runtime-update-checks.json";
   var DEFAULT_RUNTIME_UPDATE_CACHE_MS = 21600000;
+  var MANAGED_VIBE_VERSION = "3.1.0";
   var STORAGE_CLEANUP_FILE = "storage-cleanup.json";
   var DEFAULT_STORAGE_CLEANUP_INTERVAL_MS = 21600000;
   var DEFAULT_STORAGE_ORPHAN_GRACE_MS = 86400000;
@@ -10098,11 +10099,18 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return 0;
   }
 
+  function managedVibePackageRequirement() {
+    return "mistral-vibe==" + MANAGED_VIBE_VERSION;
+  }
+
   function runtimeUpdateStatus(provider, command, latest, source) {
     command = command || {};
     latest = latest || {};
     var installedVersion = extractRuntimeVersion(command.version);
-    var latestVersion = extractRuntimeVersion(latest.latestVersion);
+    var availableVersion = extractRuntimeVersion(latest.latestVersion);
+    // The update action installs the qualified version, not necessarily the registry's newest package.
+    // Apply this when reading old cached checks too, without changing the registry cache itself.
+    var latestVersion = provider === "vibe" && availableVersion.length ? MANAGED_VIBE_VERSION : availableVersion;
     return {
       provider: provider,
       installed: command.found === true,
@@ -10110,6 +10118,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       path: String(command.path || ""),
       installedVersion: installedVersion,
       latestVersion: latestVersion,
+      availableVersion: availableVersion,
+      targetVersion: provider === "vibe" ? MANAGED_VIBE_VERSION : latestVersion,
       checked: latest.checked === true,
       cached: latest.cached === true,
       updateAvailable: installedVersion.length > 0 && latestVersion.length > 0 && compareRuntimeVersions(installedVersion, latestVersion) < 0,
