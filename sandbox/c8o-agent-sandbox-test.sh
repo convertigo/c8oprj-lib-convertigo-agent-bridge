@@ -62,6 +62,14 @@ check "does not read the environment of a process outside" fail $S -- cat /proc/
 check "does not read the command line of a process outside" fail $S -- cat /proc/$outside/cmdline
 check "does not list the processes" fail $S -- ls /proc
 kill $outside
+# Two confined agents (two users of a No Code server, each with its own Tigo key in its environment): neither reads the
+# other's environment, command line or threads (path rules, and Landlock refuses ptrace access across domains).
+env C8O_TEST_KEY=sk-sibling-key $S -- sleep 30 & sibling=$!
+sleep 1
+check "a confined agent does not read another confined agent's environment" fail $S -- cat /proc/$sibling/environ
+check "nor its command line" fail $S -- cat /proc/$sibling/cmdline
+check "nor the environment of its threads" fail $S -- sh -c "cat /proc/$sibling/task/$sibling/environ"
+kill $sibling
 check "no command" fail c8o-agent-sandbox --ro /etc --
 check "a relative path" fail c8o-agent-sandbox --ro etc -- true
 check "an unknown option" fail c8o-agent-sandbox --net -- true

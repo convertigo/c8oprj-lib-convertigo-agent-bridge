@@ -4,6 +4,7 @@ comment: Start a long-running vibe-acp process and create an ACP session.
     'include("js/vibe_agent_bridge.js");
     C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.vibeStart({
+      gatewayKeyHandle: typeof gatewayKeyHandle === "undefined" ? "" : gatewayKeyHandle,
       tigoResourcesHandle: typeof tigoResourcesHandle === "undefined" ? "" : tigoResourcesHandle,
       handle: typeof handle === "undefined" ? "" : handle,
       workspaceRoot: typeof workspaceRoot === "undefined" ? "" : workspaceRoot,
@@ -200,3 +201,10 @@ comment: Start a long-running vibe-acp process and create an ACP session.
   comment: Set true to start the process of a conversation before its first message (the Assistant, when the No Code panel opens). It stops after 3 min idle without a message, and a user keeps one prewarm. The first start or prompt of the conversation takes it.
   description: Set true to start the process of a conversation before its first message (the Assistant, when the No Code panel opens). It stops after 3 min idle without a message, and a user keeps one prewarm. The first start or prompt of the conversation takes it.
   schemaType: xsd:boolean
+↓gatewayKeyHandle [variables.RequestableVariable-1794320000101]: 
+  comment: Opaque server-only handle of the No Code user's Tigo gateway key (per-user keys); never contains the key.
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15

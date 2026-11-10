@@ -5,6 +5,7 @@ responseTimeout: 900
     'include("js/vibe_agent_bridge.js");
     C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.vibeSetup({
+      gatewayKeyHandle: typeof gatewayKeyHandle === "undefined" ? "" : gatewayKeyHandle,
       install: typeof install === "undefined" ? false : install,
       vibeProfile: typeof vibeProfile === "undefined" ? "" : vibeProfile,
       llmGatewayUrl: typeof llmGatewayUrl === "undefined" ? "" : llmGatewayUrl,
@@ -195,3 +196,10 @@ responseTimeout: 900
   comment: Set true to only check that Vibe is installed, without running it (ignored with install). The Assistant asks it before each message, agent_vibe_start checking it again. The full check runs vibe-acp --version twice, 7 to 10 s.
   description: Set true to only check that Vibe is installed, without running it (ignored with install). The Assistant asks it before each message, agent_vibe_start checking it again. The full check runs vibe-acp --version twice, 7 to 10 s.
   schemaType: xsd:boolean
+↓gatewayKeyHandle [variables.RequestableVariable-1794320000103]: 
+  comment: Opaque server-only handle of the No Code user's Tigo gateway key (per-user keys); never contains the key.
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15

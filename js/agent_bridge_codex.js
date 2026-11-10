@@ -1554,6 +1554,17 @@
       return;
     }
     if (method === "error") {
+      // An error Codex retries itself (a rate limit, an upstream 429: willRetry) does not end the turn: its retries keep
+      // their own handling, the turn ends with Codex's final answer or error.
+      if (params && params.willRetry === true) {
+        pushEvent(entry, "warning", {
+          phase: "codex/retry",
+          reason: "provider_retry",
+          message: "Codex retries the model request.",
+          provider: "codex"
+        });
+        return;
+      }
       entry.status = "error";
       entry.phase = "error";
       entry.lastError = JSON.stringify(params);
@@ -2038,6 +2049,11 @@
     var noCodeRefusal = noCodeAgentRefusal(options);
     if (noCodeRefusal !== null) {
       return noCodeRefusal;
+    }
+    // per-user keys: Codex runs unconfined, it would read the other agents' environment
+    var isolationRefusal = userGatewayKeyIsolationRefusal(options, "codex", null);
+    if (isolationRefusal !== null) {
+      return isolationRefusal;
     }
     try {
       C8O.agentBridge.sweepExpired({});
