@@ -36,6 +36,13 @@ Bridge
   co-host untrusted low-code projects there.
 - **Lifetime:** a key past its lifetime starts nothing. A running process goes on with the key it holds (the Bridge
   accepts it by fingerprint at a prompt, for image description and for the Claude Code probe).
+- **Expiry in LiteLLM (A1/A2):** a server key expires 120 min after its last get, and each get that finds less than
+  90 min left pushes it back (same key); after expiry, the next get gives generation + 1.
+  - The Assistant never keeps a key past its `expiresAt` minus 15 min.
+  - While a turn of its own session runs, the Assistant asks again for the key each time its 10 minutes in memory are
+    over (`keepUserGatewayKeyAlive`, on the panel's event reads). The same key then stays alive however long the turn.
+  - An expired or rejected key (HTTP 401, "Expired Key", Vibe's "Invalid API key") is never read as a budget. The turn
+    ends with "send your message again", and the next message gets a fresh key (a new one restarts the process).
 - **Never in an event:** an agent with a shell can print its own key. `pushEvent` replaces it with `sk-***` in every
   event (panel, conversation records, feedback, stderr).
 - **Never on disk:** the per-user branch of `bootstrapVibeHome` writes no `.env`. `scrubGatewayKeyFromEnvFile` removes the server key and its
