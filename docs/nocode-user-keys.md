@@ -20,7 +20,8 @@ Bridge
 ```
 
 - **When:** a No Code session (`normalizeSkillProfile` is `nocode`) on a server (not Studio mode) whose C8Oforms
-  has `APIV2_TigoUserKey` (`userGatewayKeysOn`). Once seen, the mode stays on until the engine restarts
+  has `APIV2_TigoUserKey` and that is registered with TigoAccess (global symbol `C8Oforms.tigo.server.id`, piece A3;
+  without it C8Oforms answers `not_configured`) (`userGatewayKeysOn`). Once seen, the mode stays on until the engine restarts
   (`lib_ConvertigoAgentBridge.userGatewayKeysSeen`), so a C8Oforms reloaded without the sequence brings back neither
   the server key nor unconfined agents. The Studio key-file path (TigoAccess, `agents/convertigo/llm-api-key`) is
   unchanged, and so is a No Code server whose C8Oforms never issued user keys.
@@ -133,8 +134,10 @@ The Studio and servers without per-user keys are unchanged.
 
 ## Waiting for
 
-- **A3** (C8Oforms): `APIV2_TigoUserKey` and `APIV2_TigoUserQuota` with the shapes above (proposed on #1).
-  Until they exist, everything here stays off on a server.
+- **A3** (C8Oforms): `APIV2_TigoUserKey` and `APIV2_TigoUserQuota`, on C8Oforms `design/tigo-server-keys`
+  with the shapes read here. Until a server has them and is registered, nothing changes on it.
+- The Studio's TigoAccess `getQuota` of a managed team's key also carries `contract`, the section 5 shape (A1/A2).
+  `effectiveTigoBalance` reads it first.
 - **A1/A2** (TigoAccess): the keys and quotas those sequences relay.
 - **securite-cve:** the validation above, before production.
 - **A5** (test-nocode): end-to-end with a test team, and removal of the shared key file.

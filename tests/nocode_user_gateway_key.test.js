@@ -32,7 +32,7 @@ const USER_KEY = "sk-user-" + "a".repeat(32);
 const SERVER_KEY = "sk-server-" + "b".repeat(32);
 const HANDLE = "lib_ConvertigoAssistant.gatewayKey.0123456789abcdef";
 
-function load({ studio = false, userKeySequence = true, store = {}, files = {} } = {}) {
+function load({ studio = false, userKeySequence = true, registered = true, store = {}, files = {} } = {}) {
   const map = new Map(Object.entries(store));
   const server = { get: (key) => (map.has(key) ? map.get(key) : null), set: (key, value) => map.set(key, value), remove: (key) => map.delete(key) };
   const sandbox = { Packages: javaProxy, context: { server }, request: javaProxy, log: javaProxy, C8O: { agentBridge: {} } };
@@ -41,8 +41,11 @@ function load({ studio = false, userKeySequence = true, store = {}, files = {} }
   vm.runInContext(fs.readFileSync(path.join(root, "js/agent_bridge_common.js"), "utf8"), sandbox, { filename: "agent_bridge_common.js" });
   sandbox.Engine = {
     isStudioMode: () => studio,
-    theApp: { databaseObjectsManager: { getOriginalProjectByName: (name) => (name === "C8Oforms"
-      ? { getSequenceByName: (sequence) => (sequence === "APIV2_TigoUserKey" && userKeySequence ? {} : null) } : null) } }
+    theApp: { databaseObjectsManager: {
+      getOriginalProjectByName: (name) => (name === "C8Oforms"
+        ? { getSequenceByName: (sequence) => (sequence === "APIV2_TigoUserKey" && userKeySequence ? {} : null) } : null),
+      symbolsGetValue: (name) => (name === "C8Oforms.tigo.server.id" && registered ? "server-test" : null)
+    } }
   };
   sandbox.now = () => Date.now();
   sandbox.gatewayKeyFingerprint = (key) => require("node:crypto").createHash("sha256").update(String(key)).digest("hex").slice(0, 16);
@@ -66,6 +69,8 @@ test("the per-user path is on for a No Code session on a server whose C8Oforms i
   assert.equal(load().sandbox.userGatewayKeysOn(NOCODE), true);
   assert.equal(load({ studio: true }).sandbox.userGatewayKeysOn(NOCODE), false, "the Studio keeps its key file");
   assert.equal(load({ userKeySequence: false }).sandbox.userGatewayKeysOn(NOCODE), false, "a C8Oforms without user keys keeps the server key");
+  assert.equal(load({ registered: false }).sandbox.userGatewayKeysOn(NOCODE), false,
+    "a server not registered with TigoAccess yet (not_configured) keeps its shared key");
   assert.equal(load().sandbox.userGatewayKeysOn({ userId: "studio", skillProfile: "generalist" }), false, "a Studio session");
 });
 
