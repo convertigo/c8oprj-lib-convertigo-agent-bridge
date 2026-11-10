@@ -258,7 +258,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       get.setConfig(requestConfig.build());
       response = Engine.theApp.httpClient4.execute(get);
       var gatewayStatus = response.getStatusLine().getStatusCode();
-      convertigoGatewayKeyRejected = gatewayStatus === 401 || gatewayStatus === 403;
+      // a per-user key that the gateway refuses is not the key file's fault: no file diagnostics then
+      convertigoGatewayKeyRejected = (gatewayStatus === 401 || gatewayStatus === 403) && !userGatewayKeysOn(options);
       if (convertigoGatewayKeyRejected) {
         try { log.warn("The Convertigo gateway rejected the agent key (HTTP " + gatewayStatus + "). Check " + filePath(convertigoGatewayKeyFile(options))); } catch (_ignoreRejectedKeyLog) {}
       }
@@ -1235,12 +1236,38 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     }
   }
 
+  // Once seen on this engine, the per-user path stays on until the engine restarts: a C8Oforms reloaded or redeployed
+  // without APIV2_TigoUserKey for a while must not put the server key back, nor let an unconfined agent start while
+  // other agents hold their users' keys.
+  var USER_GATEWAY_KEYS_SEEN = "lib_ConvertigoAgentBridge.userGatewayKeysSeen";
+
+  function userGatewayKeysSeen(mark) {
+    try {
+      var store = getServerStore();
+      if (store === null) {
+        return false;
+      }
+      if (mark === true) {
+        store.set(USER_GATEWAY_KEYS_SEEN, "true");
+        return true;
+      }
+      var value = store.get(USER_GATEWAY_KEYS_SEEN);
+      return value !== null && typeof value !== "undefined" && String(value) === "true";
+    } catch (_ignoreSeen) {
+      return false;
+    }
+  }
+
   // true where the per-user path is the only one: a No Code session, on a server, whose C8Oforms issues user keys
+  // (or did since the engine started)
   function userGatewayKeysOn(options) {
     if (normalizeSkillProfile(options || {}) !== "nocode" || engineIsStudio()) {
       return false;
     }
-    return userGatewayKeySequenceAvailable();
+    if (userGatewayKeySequenceAvailable()) {
+      return userGatewayKeysSeen(true);
+    }
+    return userGatewayKeysSeen(false);
   }
 
   function userGatewayKeyHandle(options) {
@@ -1268,19 +1295,85 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     if (!bundle || typeof bundle !== "object") {
       return none("invalid");
     }
-    if (!(Number(bundle.expiresAt) > now())) {
-      return none("expired");
-    }
     var owner = trim(bundle.owner);
     var user = trim(options.userId || options.ownerKey);
-    if (owner.length && user.length && owner !== user) {
+    if (!owner.length || !user.length || owner !== user) {
       return none("foreign");
     }
     var key = trim(bundle.key);
     if (!USER_GATEWAY_KEY_PATTERN.test(key)) {
       return none("invalid");
     }
-    return { key: key, fingerprint: gatewayKeyFingerprint(key), handle: handle, reason: "ok" };
+    var fingerprint = gatewayKeyFingerprint(key);
+    // expired for a new start; a running process may go on with the key it already holds (acceptFingerprint)
+    if (!(Number(bundle.expiresAt) > now()) && !(trim(options.acceptFingerprint).length && trim(options.acceptFingerprint) === fingerprint)) {
+      return none("expired");
+    }
+    return { key: key, fingerprint: fingerprint, handle: handle, reason: "ok" };
+  }
+
+  // The user's key a running entry holds, from its handle even past its lifetime, for redaction only; "" without one.
+  function entryGatewayKeyForRedaction(entry) {
+    if (!entry || entry.userGatewayKeys !== true || !trim(entry.gatewayKeyHandle).length) {
+      return "";
+    }
+    try {
+      var bundle = JSON.parse(serverSecretGet(entry.gatewayKeyHandle) || "null");
+      var key = bundle ? trim(bundle.key) : "";
+      return USER_GATEWAY_KEY_PATTERN.test(key) && gatewayKeyFingerprint(key) === trim(entry.gatewayKeyFingerprint) ? key : "";
+    } catch (_ignoreRedactionKey) {
+      return "";
+    }
+  }
+
+  function replaceInStrings(value, search, replacement, depth) {
+    if (depth > 12 || value === null || typeof value === "undefined") {
+      return value;
+    }
+    if (typeof value === "string") {
+      return value.indexOf(search) >= 0 ? value.split(search).join(replacement) : value;
+    }
+    if (Array.isArray(value)) {
+      return value.map(function (item) { return replaceInStrings(item, search, replacement, depth + 1); });
+    }
+    if (typeof value === "object") {
+      var copy = {};
+      for (var name in value) {
+        if (Object.prototype.hasOwnProperty.call(value, name)) {
+          copy[name] = replaceInStrings(value[name], search, replacement, depth + 1);
+        }
+      }
+      return copy;
+    }
+    return value;
+  }
+
+  function containsString(value, search, depth) {
+    if (depth > 12 || value === null || typeof value === "undefined") {
+      return false;
+    }
+    if (typeof value === "string") {
+      return value.indexOf(search) >= 0;
+    }
+    if (typeof value === "object") {
+      for (var name in value) {
+        if (Object.prototype.hasOwnProperty.call(value, name) && containsString(value[name], search, depth + 1)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // An agent allowed a shell can print its own key (env, /proc/self/environ): it never travels further in an event of
+  // the Bridge (the panel, the conversation record, the feedback). What the runtime itself writes (its journal) and
+  // what it sends its model stay outside the Bridge (docs/nocode-user-keys.md).
+  function redactUserGatewayKey(entry, data) {
+    var key = entryGatewayKeyForRedaction(entry);
+    if (!key.length || !containsString(data, key, 0)) {
+      return data;
+    }
+    return replaceInStrings(data, key, "sk-***", 0);
   }
 
   // What a running entry was started with, to check its user's key again at a prompt (the prompt's handle first).
@@ -1292,7 +1385,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       vibeProfile: entry.vibeProfile,
       model: entry.model,
       gatewayKeyHandle: trim(options.gatewayKeyHandle) || trim(entry.gatewayKeyHandle),
-      userId: trim(entry.ownerKey)
+      userId: trim(entry.ownerKey) || trim(entry.userId),
+      acceptFingerprint: trim(entry.gatewayKeyFingerprint)
     };
   }
 
@@ -1481,7 +1575,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
 
   function noteGatewayBudgetMarker(entry, line) {
     var text = trim(line);
-    if (text.indexOf(GATEWAY_BUDGET_MARKER) !== 0) {
+    if (text.indexOf(GATEWAY_BUDGET_MARKER) !== 0 || !entry || normalizeProvider(entry.provider) !== "vibe" || trim(entry.vibeProfile) !== "convertigo") {
       return false;
     }
     var scope = "unknown";
@@ -12115,7 +12209,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       index: entry.nextIndex++,
       at: now(),
       type: String(type),
-      data: normalizedBudgetEventData(String(type), withGatewayBudgetRefusal(entry, String(type), data || {}))
+      data: normalizedBudgetEventData(String(type), withGatewayBudgetRefusal(entry, String(type), redactUserGatewayKey(entry, data || {})))
     };
     // Every provider reports its turns with these three events: keep a common "turn running"
     // flag so interrupt() needs no provider-specific state. Only the end of the running turn's request ends it: a second

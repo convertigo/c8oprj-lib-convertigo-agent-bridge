@@ -210,3 +210,52 @@ test("the sequences that start, prompt, set up or read an agent take the handle 
     assert.match(yaml, /↓gatewayKeyHandle \[variables\.RequestableVariable-\d+\]: \n  comment: [^\n]+\n  value: \n    - ↑ciphered: true\n    - ↑traceable: false\n    - →→: xd8e180806a1c1d83a6255212121ab827\n  visibility: 15/, name);
   }
 });
+
+test("once seen, the per-user path stays on: a C8Oforms reloaded without the sequence never brings the server key back", () => {
+  let available = true;
+  const { sandbox } = load();
+  sandbox.Engine.theApp.databaseObjectsManager.getOriginalProjectByName = (name) => (name === "C8Oforms"
+    ? { getSequenceByName: (sequence) => (sequence === "APIV2_TigoUserKey" && available ? {} : null) } : null);
+  assert.equal(sandbox.userGatewayKeysOn(NOCODE), true);
+  available = false;
+  assert.equal(sandbox.userGatewayKeysOn(NOCODE), true, "until the engine restarts");
+  assert.equal(sandbox.convertigoGatewayApiKey(NOCODE, "/home"), "", "still no server key");
+  assert.equal(sandbox.userGatewayKeyIsolationRefusal(NOCODE, "claude", null).code, "agent_isolation_unavailable", "still no unconfined agent");
+  assert.equal(load({ userKeySequence: false }).sandbox.userGatewayKeysOn(NOCODE), false, "never seen: the server key as before");
+});
+
+test("the owner is required on both sides, and a key past its lifetime only serves the process that already holds it", () => {
+  const noOwner = load({ store: { [HANDLE]: bundle({ owner: "" }) } });
+  assert.equal(noOwner.sandbox.userGatewayCredential(Object.assign({ gatewayKeyHandle: HANDLE }, NOCODE)).reason, "foreign");
+  const noUser = load({ store: { [HANDLE]: bundle() } });
+  assert.equal(noUser.sandbox.userGatewayCredential({ gatewayKeyHandle: HANDLE, skillProfile: "nocode" }).reason, "foreign");
+  const stale = load({ store: { [HANDLE]: bundle({ expiresAt: Date.now() - 1000 }) } });
+  const held = stale.sandbox.gatewayKeyFingerprint(USER_KEY);
+  assert.equal(stale.sandbox.userGatewayCredential(Object.assign({ gatewayKeyHandle: HANDLE }, NOCODE)).reason, "expired", "no new start on it");
+  assert.equal(stale.sandbox.userGatewayCredential(Object.assign({ gatewayKeyHandle: HANDLE, acceptFingerprint: held }, NOCODE)).key, USER_KEY,
+    "the running process goes on with the key it holds");
+  assert.equal(stale.sandbox.userGatewayCredential(Object.assign({ gatewayKeyHandle: HANDLE, acceptFingerprint: "0000000000000000" }, NOCODE)).reason, "expired");
+  const entry = { provider: "vibe", vibeProfile: "convertigo", model: "glm-5-3", gatewayKeyHandle: HANDLE, ownerKey: "ann@example.com", gatewayKeyFingerprint: held };
+  assert.equal(stale.sandbox.userGatewayKeyRefusal(stale.sandbox.entryGatewayKeyOptions(entry, {}), "vibe"), null, "its prompt is not refused");
+});
+
+test("a key an agent printed never travels in an event of the Bridge", () => {
+  const { sandbox } = load({ store: { [HANDLE]: bundle() } });
+  const events = [];
+  const entry = { provider: "vibe", vibeProfile: "convertigo", userGatewayKeys: true, gatewayKeyHandle: HANDLE,
+    gatewayKeyFingerprint: sandbox.gatewayKeyFingerprint(USER_KEY), nextIndex: 0, firstIndex: 0,
+    events: { add(event) { events.push(event); }, size() { return events.length; }, remove() { events.shift(); } } };
+  sandbox.pushEvent(entry, "tool/update", { toolCallId: "t1", detail: "CONVERTIGO_LLM_API_KEY=" + USER_KEY + "\nHOME=/x", nested: [{ text: "key " + USER_KEY }] });
+  sandbox.pushEvent(entry, "stderr", { line: "debug " + USER_KEY });
+  sandbox.pushEvent(entry, "message/delta", { text: "nothing secret" });
+  assert.doesNotMatch(JSON.stringify(events), new RegExp(USER_KEY));
+  assert.equal(events[0].data.detail, "CONVERTIGO_LLM_API_KEY=sk-***\nHOME=/x");
+  assert.equal(events[0].data.nested[0].text, "key sk-***");
+  assert.equal(events[1].data.line, "debug sk-***");
+  assert.equal(events[2].data.text, "nothing secret");
+});
+
+test("the gateway's refusal of a user's key does not point at the server key file", () => {
+  const source = fs.readFileSync(path.join(root, "js/agent_bridge_common.js"), "utf8");
+  assert.match(source, /convertigoGatewayKeyRejected = \(gatewayStatus === 401 \|\| gatewayStatus === 403\) && !userGatewayKeysOn\(options\);/);
+});

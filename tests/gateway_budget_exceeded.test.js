@@ -281,3 +281,12 @@ test("the status of a process does not repeat a budget refusal its runtime wrote
     /lastError: gatewayBudgetError\(entry\.lastError\) !== null \? GATEWAY_BUDGET_MESSAGE : entry\.lastError,/);
   assert.equal(sandbox.gatewayBudgetError("API Error: 429 " + BUDGETS.member).scope, "member", "what Claude Code writes on stderr");
 });
+
+test("the budget marker counts for a Vibe on the gateway only", () => {
+  for (const fields of [{ provider: "claude" }, { provider: "vibe", vibeProfile: "mistral" }]) {
+    const entry = fakeEntry(fields);
+    sandbox.handleAcpLine(entry, "C8O_GATEWAY_BUDGET_EXCEEDED {\"scope\": \"team\"}", "stderr");
+    assert.equal(entry.gatewayBudgetRefusal, undefined, JSON.stringify(fields));
+    assert.equal(entry._events[0].type, "stderr");
+  }
+});

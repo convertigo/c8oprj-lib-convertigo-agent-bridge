@@ -784,7 +784,9 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
   the user's, from the masked `gatewayKeyHandle` (server memory, written by the Assistant). It goes into the process
   environment only, never into a home `.env` or the key file (`scrubGatewayKeyFromEnvFile` removes an old server key).
   Nothing falls back to the server key: a missing handle gives `gateway_credential_missing`. A new key restarts the
-  process. The Studio key file path is unchanged.
+  process. The mode stays on once seen, until the engine restarts. The bundle's owner must equal the call's user. A
+  running process keeps its key past its lifetime (by fingerprint). Events never carry the key (`redactUserGatewayKey`).
+  The Studio key file path is unchanged.
 - With per-user keys, only Vibe confined by Landlock or under `mcp-only` runs (`userGatewayKeyIsolationRefusal`).
   Claude Code, Codex and Vibe under `full` answer `agent_isolation_unavailable`.
 - `gatewayBudgetError` / `pushEvent`: a LiteLLM budget refusal (HTTP 429 `budget_exceeded`) is
