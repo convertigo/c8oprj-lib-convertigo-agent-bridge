@@ -1216,13 +1216,20 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // missing, expired or foreign handle refuses the call (gateway_credential_missing). The Studio keeps its key file.
   var USER_GATEWAY_KEY_PROJECT = "C8Oforms";
   var USER_GATEWAY_KEY_SEQUENCE = "APIV2_TigoUserKey";
+  // the server's registration with TigoAccess (piece A3): without it C8Oforms answers not_configured, the server is not
+  // in the per-user scheme yet and keeps its shared key; once registered, never again
+  var USER_GATEWAY_KEY_SERVER_SYMBOL = "C8Oforms.tigo.server.id";
   var USER_GATEWAY_KEY_HANDLE_PATTERN = /^lib_ConvertigoAssistant\.gatewayKey\.[A-Za-z0-9_-]{8,128}$/;
   var USER_GATEWAY_KEY_PATTERN = /^sk-[A-Za-z0-9_-]{16,256}$/;
 
   function userGatewayKeySequenceAvailable() {
     try {
       var project = Engine.theApp.databaseObjectsManager.getOriginalProjectByName(USER_GATEWAY_KEY_PROJECT);
-      return project != null && project.getSequenceByName(USER_GATEWAY_KEY_SEQUENCE) != null;
+      if (project == null || project.getSequenceByName(USER_GATEWAY_KEY_SEQUENCE) == null) {
+        return false;
+      }
+      var server = Engine.theApp.databaseObjectsManager.symbolsGetValue(USER_GATEWAY_KEY_SERVER_SYMBOL);
+      return server !== null && typeof server !== "undefined" && trim(String(server)).length > 0;
     } catch (_ignoreNoUserKeySequence) {
       return false;
     }

@@ -767,7 +767,8 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
 
 - Design, isolation analysis and the checks left to securite-cve: `docs/nocode-user-keys.md` (contract
   `tigo-nocode-contract.md` sections 6 and 8, convertigo/c8oprj-tigoaccess#5).
-- `userGatewayKeysOn`: a No Code session on a server whose C8Oforms has `APIV2_TigoUserKey`. There the gateway key is
+- `userGatewayKeysOn`: a No Code session on a server whose C8Oforms has `APIV2_TigoUserKey` and that is registered with
+  TigoAccess (`C8Oforms.tigo.server.id`). There the gateway key is
   the user's, from the masked `gatewayKeyHandle` (server memory, written by the Assistant). It goes into the process
   environment only, never into a home `.env` or the key file (`scrubGatewayKeyFromEnvFile` removes an old server key).
   Nothing falls back to the server key: a missing handle gives `gateway_credential_missing`. A new key restarts the
