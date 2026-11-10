@@ -175,8 +175,10 @@ test("settings and setup see the user's key as the authentication of the convert
 test("with per-user keys, an agent that could read another agent's environment does not run", () => {
   const { sandbox } = load();
   assert.equal(sandbox.userGatewayKeyIsolationRefusal(NOCODE, "vibe", { confined: true, policy: "files" }), null, "Landlock");
-  assert.equal(sandbox.userGatewayKeyIsolationRefusal(NOCODE, "vibe", { confined: false, policy: "mcp-only" }), null, "no native tool");
-  for (const [provider, sandboxInfo] of [["vibe", null], ["vibe", { confined: false, policy: "files" }], ["claude", null], ["codex", null]]) {
+  assert.equal(sandbox.userGatewayKeyIsolationRefusal(NOCODE, "vibe", { confined: true, policy: "mcp-only" }), null, "Landlock, MCP tools only");
+  // mcp-only without Landlock is not enough: run_typescript is not proven isolated (security review, point 2)
+  for (const [provider, sandboxInfo] of [["vibe", null], ["vibe", { confined: false, policy: "files" }], ["vibe", { confined: false, policy: "mcp-only" }],
+    ["claude", null], ["codex", null]]) {
     const refused = sandbox.userGatewayKeyIsolationRefusal(NOCODE, provider, sandboxInfo);
     assert.equal(refused && refused.code, "agent_isolation_unavailable", provider + " " + JSON.stringify(sandboxInfo));
   }

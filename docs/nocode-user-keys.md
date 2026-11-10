@@ -9,9 +9,10 @@ Branches `feat/nocode-user-keys` of both repositories.
 ```text
 Assistant (user's HTTP request, server side)
   C8Oforms.APIV2_TigoUserKey   (piece A3, under the log4j MDC nolog)
-    -> key kept in context.server: lib_ConvertigoAssistant.gatewayKey.<hash of the user>
+    -> key kept in context.server: lib_ConvertigoAssistant.gatewayKey.<random, one per key>
        {key, owner, generation, expiresAt}: 10 minutes for new starts, at least 5 left when a turn starts,
        forgotten 2 hours after its lifetime (index lib_ConvertigoAssistant.gatewayKey.index)
+       the HTTP session of its owner holds the handle (lib_ConvertigoAssistant.gatewayKeyHandle)
   -> gatewayKeyHandle on agent_*_setup/start/prompt and agent_settings (masked sequence variable)
 Bridge
   userGatewayCredential(handle): format, expiry, owner = userId, key format
@@ -25,8 +26,14 @@ Bridge
   (`lib_ConvertigoAgentBridge.userGatewayKeysSeen`), so a C8Oforms reloaded without the sequence brings back neither
   the server key nor unconfined agents. The Studio key-file path (TigoAccess, `agents/convertigo/llm-api-key`) is
   unchanged, and so is a No Code server whose C8Oforms never issued user keys.
-- **Who:** the Assistant keys the handle on the user of the session, and refuses a conversation of another account
-  (`conversation_not_owned`). The Bridge requires the bundle's owner to equal the call's user, both non-empty.
+- **Who:** the handle is random (it cannot be computed from a user id). The HTTP session that obtained the key holds
+  it, and a cached key is served only to that session while its user is the key's owner. A handle that comes with a
+  request is dropped. A conversation of another account is refused (`conversation_not_owned`). The Bridge requires
+  the bundle's owner to equal the call's user, both non-empty.
+- **`context.server` is engine-wide:** any Rhino code of the engine can read it, so a low-code project co-hosted on a
+  No Code server can read these keys (and the No Code MCP tokens). On such a server, no MCP bearer other than
+  WEB_ADMIN may run server code or do authoring: the No Code token has no execution right. Operators should not
+  co-host untrusted low-code projects there.
 - **Lifetime:** a key past its lifetime starts nothing. A running process goes on with the key it holds (the Bridge
   accepts it by fingerprint at a prompt, for image description and for the Claude Code probe).
 - **Never in an event:** an agent with a shell can print its own key. `pushEvent` replaces it with `sk-***` in every
@@ -81,43 +88,46 @@ key is.
 | One system user per agent | Needs a privileged helper (setuid or root) and per-user homes and permissions. The engine's container refuses its own `/proc`, and probably uid changes too. Most invasive. Not done. |
 | `/proc` denied under the Landlock helper | Already in place for confined No Code Vibe: `AGENT_SANDBOX_SYSTEM_READ_ONLY` gives `/proc/self`, `/proc/thread-self` and system-wide files only. Landlock also refuses ptrace across domains (since ABI 1), and reading `/proc/<pid>/environ` is a ptrace read access. **Chosen.** |
 
-**Implemented** (`userGatewayKeyIsolationRefusal`): with per-user keys on, a No Code agent runs only if it cannot read
-another agent's environment:
+**Implemented** (`userGatewayKeyIsolationRefusal`, after the security review of 10/11): on a server with per-user
+keys (registered, or seen since the engine started: `serverUsesUserGatewayKeys`), every agent of every profile and
+caller (a WEB_ADMIN low-code session too) runs only if it cannot read another agent's environment:
 
-- Vibe confined by Landlock: allowed.
-- Vibe under `mcp-only` (no native file or shell tool, Landlock missing): allowed.
-- Vibe under `full`: refused with `agent_isolation_unavailable`.
-- Claude Code and Codex in No Code (never confined): refused with `agent_isolation_unavailable`.
+- Vibe confined by Landlock under `files` or `mcp-only`: allowed.
+- `sandboxed-shell` is capped to `files` on such a server (`engineNoCodeToolInfo`; the panel shows the configured
+  policy). With a shell, the agent read its own key, which then reached the model and Vibe's own journal on disk.
+  The cap stays until Vibe keeps the key out of `os.environ` and sets `PR_SET_DUMPABLE=0`.
+- `mcp-only` without Landlock: refused, since `run_typescript` is not proven isolated.
+- Vibe under `full`, any agent of another profile, Claude Code and Codex (never confined): refused with
+  `agent_isolation_unavailable`. A process started unconfined before the server had per-user keys is stopped at its
+  next start.
 
-The Studio and servers without per-user keys are unchanged.
+The Studio and servers that never had per-user keys are unchanged.
 
 **What securite-cve must validate** (not validated yet):
 
-1. On the target kernel (test-nocode: Linux 5.15, Landlock ABI 1), two confined agents of two users cannot read each
-   other's `/proc/<pid>/environ`, `cmdline` or `mem`. Test both through the path rules and through ptrace: `cat`,
-   `python -c "open('/proc/PID/environ')"`, `process_vm_readv`.
-   `sandbox/c8o-agent-sandbox-test.sh` now checks two confined agents against each other (environment, command
-   line, threads) next to a confined one against an unconfined one. It passed locally under Docker Desktop
-   (linuxkit 7.0, arm64, Landlock ABI 8). There, a Python `open()` and a `ptrace(PTRACE_ATTACH)` from one confined
-   agent to the other were refused too, while an unconfined process of the same user read the key. That is why
-   unconfined agents are refused. ABI 1 is not checked.
-2. A confined agent cannot reach the engine's memory or environment, or another agent's: `/proc/<engine pid>/…`,
-   `/proc/<pid>/root`, `/proc/<pid>/fd`, `/proc/<pid>/task/*/environ`.
-3. `mcp-only` really leaves no native file or shell tool: `run_typescript`, background processes and subagents are
-   off. If any remains, `mcp-only` must not count as isolated.
+1. **T1** on the target kernel (test-nocode: Linux 5.15, Landlock ABI 1), during A5:
+   `sandbox/c8o-agent-isolation-test.sh HELPER [PYTHON] [ENGINE_PID]`, run in the pod as the engine's user.
+   It starts two confined agents (one under an unconfined parent, the guard's place). From the first one it checks
+   `environ`, `cmdline`, `mem`, `task/<pid>/environ`, `fd` and `root` of the other agent, of the guard and of the
+   engine, through `cat`, Python `open()`, `PTRACE_ATTACH` and `process_vm_readv`. Every check must be refused.
+   Two controls prove the setup: an agent reads its own `/proc/self`, and an unconfined process reads the marker.
+   It prints PASS/FAIL only, never what it read.
+   For test-nocode: the helper is `<project lib_ConvertigoAgentBridge>/sandbox/linux-amd64/c8o-agent-sandbox`, the
+   Python is the managed one (`<workspace>/agents/runtimes/python/.../bin/python3`), the engine pid is the JVM's.
+   It passes in the helper's CI (GitHub runners, amd64 and arm64, Landlock ABI 8) and under Docker Desktop
+   (linuxkit 7.0, ABI 8). ABI 1 is the A5 run.
+2. Confined agents and the engine: covered by T1.
+3. `mcp-only` is accepted only when confined (T3), so `run_typescript` needs no separate proof.
 4. The parent-death guard (`agentGuardedCommand`, an unconfined Node process outside the helper) has the same
    environment, key included. It runs only Bridge code: check that nothing an agent controls runs in it.
 5. Nothing else of the engine's user that is unconfined runs code an agent controls on that server (other tools, a
    shell for operators).
 6. Residual risks, to confirm or close:
-   - Under `sandboxed-shell`, the agent can read its own user's key: `echo $CONVERTIGO_LLM_API_KEY`, or
-     `/proc/<vibe-acp pid>/environ`, which its domain may read. It could leak the key if prompt-injected; the damage
-     is bounded by that user's own budget, and the key can be revoked.
-     The Bridge redacts the key in its events, but what Vibe writes itself (its session journal under `VIBE_HOME`,
-     on disk) and what goes to the model keep it. That goes against decision 7 ("never written to disk") in that
-     case.
-     **Decision needed:** cap per-user mode to `files` / `mcp-only`, or harden Vibe: `PR_SET_DUMPABLE=0`, plus the key
-     taken out of `os.environ` by the startup hook so that tools do not inherit it.
+   - `sandboxed-shell` is capped to `files` with per-user keys (above). Lifting the cap needs a hardened Vibe: the key
+     taken out of `os.environ` by the startup hook so that tools do not inherit it, and `PR_SET_DUMPABLE=0`. Before
+     Landlock ABI 6, a shell can also signal other agents.
+   - Under `files`, Vibe's own `read_file` stays in the session folder (`outside_workdir = "deny"`, and the Bridge
+     refuses the permission request otherwise: T2). The key never reaches the agent through a tool.
    - The key sits in the engine's memory (`context.server`): 10 minutes for new starts, then up to 2 hours for
      running processes before it is purged.
    - `/proc/self` is bound to the helper's pid (the agent's), so a child process does not see its own `/proc/self`
@@ -125,6 +135,16 @@ The Studio and servers without per-user keys are unchanged.
 
 ## Tests
 
+- `tests/nocode_user_key_security.test.js`: T1 to T8 of the security review.
+  - T1: the isolation script matches the Bridge's confinement, and the CI runs it.
+  - T2: `read_file("/proc/self/environ")` is refused under `files` and `mcp-only`.
+  - T3: `mcp-only` is accepted only when confined.
+  - T4: every unconfined agent of every profile is refused, a reused one too.
+  - T5: a dummy key reaches no log, event, status, refusal or written file.
+  - T6: another user's id or handle is refused.
+  - T7: `sandboxed-shell` is capped to `files`.
+  - T8: a key past its lifetime, then purged, fails closed.
+  - The Assistant's side of T5, T6 and T8 is in lib_ConvertigoAssistant `tests/tigo_budget_gate.test.cjs`.
 - `tests/nocode_user_gateway_key.test.js`: mode, handle resolution, no fallback, refusals, environment, `.env`
   scrub, isolation, masked sequence variables.
 - `tests/gateway_budget_exceeded.test.js`: classifier (every scope, RPM/TPM, upstream, runtime rate limits), event
