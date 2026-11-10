@@ -149,8 +149,23 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return copy;
   }
 
+  // The operator may point the agents at another gateway (staging, a test double): global symbol agentbridge.gateway.url,
+  // an https URL, or http on this machine only (loopback, Docker's host.docker.internal). Anything else is ignored.
+  var CONVERTIGO_LLM_GATEWAY_URL_SYMBOL = "agentbridge.gateway.url";
+
+  function configuredGatewayUrl() {
+    var value = "";
+    try { value = trim(Engine.theApp.databaseObjectsManager.symbolsGetValue(CONVERTIGO_LLM_GATEWAY_URL_SYMBOL)); } catch (_ignoreNoGatewaySymbol) {}
+    if (!value.length) {
+      return "";
+    }
+    var https = /^https:\/\/[^\s\/?#@]+(\/[^\s?#]*)?$/.test(value);
+    var localHttp = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]|host\.docker\.internal)(:\d{1,5})?(\/[^\s?#]*)?$/.test(value);
+    return https || localHttp ? value : "";
+  }
+
   function convertigoGatewayUrl(options) {
-    var url = trim(options && (options.llmGatewayUrl || options.gatewayUrl)) || CONVERTIGO_LLM_GATEWAY_URL;
+    var url = trim(options && (options.llmGatewayUrl || options.gatewayUrl)) || configuredGatewayUrl() || CONVERTIGO_LLM_GATEWAY_URL;
     return url.replace(/\/+$/, "");
   }
 

@@ -988,6 +988,11 @@
       encodeBase64: base.encodeBase64,
       now: base.now,
       post: function (url, apiKey, body, timeoutMs) {
+        // image-describe calls its own gateway constant: the configured gateway (agentbridge.gateway.url) wins
+        var gatewayUrl = convertigoGatewayUrl({});
+        if (api.GATEWAY_URL && String(url).indexOf(api.GATEWAY_URL) === 0 && gatewayUrl !== String(api.GATEWAY_URL).replace(/\/+$/, "")) {
+          url = gatewayUrl + String(url).substring(String(api.GATEWAY_URL).replace(/\/+$/, "").length);
+        }
         return base.post(url, apiKey, body, Math.max(1000, Math.min(Number(timeoutMs), deadline - now())));
       }
     };
