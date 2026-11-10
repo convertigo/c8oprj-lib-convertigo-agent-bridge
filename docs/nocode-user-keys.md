@@ -10,7 +10,8 @@ Branches `feat/nocode-user-keys` of both repositories.
 Assistant (user's HTTP request, server side)
   C8Oforms.APIV2_TigoUserKey   (piece A3, under the log4j MDC nolog)
     -> key kept in context.server: lib_ConvertigoAssistant.gatewayKey.<hash of the user>
-       {key, owner, generation, expiresAt}, 5 minutes
+       {key, owner, generation, expiresAt}: 10 minutes for new starts, at least 5 left when a turn starts,
+       forgotten 2 hours after its lifetime (index lib_ConvertigoAssistant.gatewayKey.index)
   -> gatewayKeyHandle on agent_*_setup/start/prompt and agent_settings (masked sequence variable)
 Bridge
   userGatewayCredential(handle): format, expiry, owner = userId, key format
@@ -19,8 +20,16 @@ Bridge
 ```
 
 - **When:** a No Code session (`normalizeSkillProfile` is `nocode`) on a server (not Studio mode) whose C8Oforms
-  has `APIV2_TigoUserKey` (`userGatewayKeysOn`). The Studio key-file path (TigoAccess, `agents/convertigo/llm-api-key`)
-  is unchanged, and so is a No Code server whose C8Oforms does not issue user keys yet.
+  has `APIV2_TigoUserKey` (`userGatewayKeysOn`). Once seen, the mode stays on until the engine restarts
+  (`lib_ConvertigoAgentBridge.userGatewayKeysSeen`), so a C8Oforms reloaded without the sequence brings back neither
+  the server key nor unconfined agents. The Studio key-file path (TigoAccess, `agents/convertigo/llm-api-key`) is
+  unchanged, and so is a No Code server whose C8Oforms never issued user keys.
+- **Who:** the Assistant keys the handle on the user of the session, and refuses a conversation of another account
+  (`conversation_not_owned`). The Bridge requires the bundle's owner to equal the call's user, both non-empty.
+- **Lifetime:** a key past its lifetime starts nothing. A running process goes on with the key it holds (the Bridge
+  accepts it by fingerprint at a prompt, for image description and for the Claude Code probe).
+- **Never in an event:** an agent with a shell can print its own key. `pushEvent` replaces it with `sk-***` in every
+  event (panel, conversation records, feedback, stderr).
 - **Never on disk:** the per-user branch of `bootstrapVibeHome` writes no `.env`. `scrubGatewayKeyFromEnvFile` removes the server key and its
   marker from a home written before. `vibeGatewayKeyStore` refuses (`user_keys_managed`). The process does not
   inherit `CONVERTIGO_LLM_API_KEY` from the engine (`entry.unsetEnv`, applied by `startProcess`). The entry keeps only
@@ -99,10 +108,17 @@ The Studio and servers without per-user keys are unchanged.
    environment, key included. It runs only Bridge code: check that nothing an agent controls runs in it.
 5. Nothing else of the engine's user that is unconfined runs code an agent controls on that server (other tools, a
    shell for operators).
-6. Accepted residual risks, to confirm:
-   - the agent can read its own user's key (`echo $CONVERTIGO_LLM_API_KEY` under `sandboxed-shell`) and could leak it
-     if prompt-injected; the damage is bounded by that user's own budget, and the key can be revoked;
-   - the key sits in the engine's memory (`context.server`) for 5 minutes;
+6. Residual risks, to confirm or close:
+   - Under `sandboxed-shell`, the agent can read its own user's key: `echo $CONVERTIGO_LLM_API_KEY`, or
+     `/proc/<vibe-acp pid>/environ`, which its domain may read. It could leak the key if prompt-injected; the damage
+     is bounded by that user's own budget, and the key can be revoked.
+     The Bridge redacts the key in its events, but what Vibe writes itself (its session journal under `VIBE_HOME`,
+     on disk) and what goes to the model keep it. That goes against decision 7 ("never written to disk") in that
+     case.
+     **Decision needed:** cap per-user mode to `files` / `mcp-only`, or harden Vibe: `PR_SET_DUMPABLE=0`, plus the key
+     taken out of `os.environ` by the startup hook so that tools do not inherit it.
+   - The key sits in the engine's memory (`context.server`): 10 minutes for new starts, then up to 2 hours for
+     running processes before it is purged.
    - `/proc/self` is bound to the helper's pid (the agent's), so a child process does not see its own `/proc/self`
      (existing behaviour).
 

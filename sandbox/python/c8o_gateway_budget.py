@@ -60,22 +60,25 @@ def patch(module):
     if not callable(original) or getattr(original, "_c8o_gateway_budget", False):
         return False
 
-    def _is_retryable(error, response):
-        if response is not None and getattr(response, "status", None) == 429:
-            text = ""
-            try:
-                text = (body_of(error) if callable(body_of) else None) or ""
-            except Exception:
+    # Any signature: Vibe reads (error, response) today; another version must keep working, never fail here.
+    def _is_retryable(*args, **kwargs):
+        try:
+            error = args[0] if args else kwargs.get("error")
+            response = args[1] if len(args) > 1 else kwargs.get("response")
+            if response is not None and getattr(response, "status", None) == 429:
                 text = ""
-            if not text:
                 try:
-                    text = str(error)
+                    text = (body_of(error) if callable(body_of) else None) or ""
                 except Exception:
                     text = ""
-            if budget_refusal(text):
-                _report(budget_scope(text))
-                return False
-        return original(error, response)
+                if not text:
+                    text = str(error)
+                if budget_refusal(text):
+                    _report(budget_scope(text))
+                    return False
+        except Exception:
+            pass
+        return original(*args, **kwargs)
 
     _is_retryable._c8o_gateway_budget = True
     _is_retryable.__wrapped__ = original
