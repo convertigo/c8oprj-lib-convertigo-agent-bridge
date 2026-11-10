@@ -788,13 +788,16 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
   process. The mode stays on once seen, until the engine restarts. The bundle's owner must equal the call's user. A
   running process keeps its key past its lifetime (by fingerprint). Events never carry the key (`redactUserGatewayKey`).
   The Studio key file path is unchanged.
-- With per-user keys, only Vibe confined by Landlock or under `mcp-only` runs (`userGatewayKeyIsolationRefusal`).
-  Claude Code, Codex and Vibe under `full` answer `agent_isolation_unavailable`.
+- On a server with per-user keys (`serverUsesUserGatewayKeys`: registered, or seen since the engine started), only a
+  Vibe confined by Landlock under `files` or `mcp-only` runs, whatever the profile or the caller
+  (`userGatewayKeyIsolationRefusal`, also checked when a process is reused). Every other agent answers
+  `agent_isolation_unavailable`. `sandboxed-shell` is capped to `files` there (`engineNoCodeToolInfo`).
+  `sandbox/c8o-agent-isolation-test.sh` (T1) checks the isolation on Linux, and the helper's CI runs it.
 - `gatewayBudgetError` / `pushEvent`: a LiteLLM budget refusal (HTTP 429 `budget_exceeded`) is
   `{code: "budget_exceeded", scope, retryable: false}` on every error event, without the gateway message or ids.
   RPM/TPM and upstream 429s keep their handling.
 - Vibe on the gateway loads `sandbox/python/c8o_gateway_budget.py` (`C8O_GATEWAY_BUDGET_HOOK=1`). A budget 429 is
   then not retried, and the hook prints `C8O_GATEWAY_BUDGET_EXCEEDED {"scope": …}` on stderr. Claude Code on a gateway
   model asks the gateway once at its first 429 retry. A Codex `error` with `willRetry` does not end the turn.
-- Run `node --test tests/nocode_user_gateway_key.test.js tests/gateway_budget_exceeded.test.js`. With
+- Run `node --test tests/nocode_user_gateway_key.test.js tests/nocode_user_key_security.test.js tests/gateway_budget_exceeded.test.js`. With
   `VIBE_TEST_PYTHON=<managed venv python>`, the hook also runs against Vibe's real retry loop.

@@ -527,6 +527,13 @@
       }
     }
     if (existing !== null && typeof existing !== "undefined" && processAlive(existing.process)) {
+      // a process started unconfined before this server had per-user keys does not go on beside them
+      var reuseRefusal = userGatewayKeyIsolationRefusal(options, "vibe",
+        { confined: !!(existing.sandbox && existing.sandbox.confined === true), policy: trim(existing.noCodePolicy) });
+      if (reuseRefusal !== null) {
+        stopEntry(existing, true);
+        return reuseRefusal;
+      }
       if (existing.prewarm === true && !boolValue(options.prewarm, false)) {
         // the conversation's first message takes its prewarmed process: the conversation's TTL applies from now on
         existing.prewarm = false;

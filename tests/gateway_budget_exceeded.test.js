@@ -278,7 +278,7 @@ test("Vibe's own retry loop gives up at once on a budget refusal and keeps retry
 
 test("the status of a process does not repeat a budget refusal its runtime wrote as its last error", () => {
   assert.match(fs.readFileSync(path.join(root, "js/agent_bridge_common.js"), "utf8"),
-    /lastError: gatewayBudgetError\(entry\.lastError\) !== null \? GATEWAY_BUDGET_MESSAGE : entry\.lastError,/);
+    /lastError: gatewayBudgetError\(entry\.lastError\) !== null \? GATEWAY_BUDGET_MESSAGE : redactUserGatewayKey\(entry, entry\.lastError\),/);
   assert.equal(sandbox.gatewayBudgetError("API Error: 429 " + BUDGETS.member).scope, "member", "what Claude Code writes on stderr");
 });
 

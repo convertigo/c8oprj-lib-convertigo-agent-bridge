@@ -712,6 +712,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       if (abi === 0 && (policy === "files" || policy === "sandboxed-shell")) {
         policy = "mcp-only";
       }
+      // per-user Tigo keys: no shell until Vibe keeps the key out of its tools' reach (docs/nocode-user-keys.md)
+      if (policy === "sandboxed-shell" && serverUsesUserGatewayKeys()) {
+        policy = "files";
+      }
       return {
         policy: policy,
         configured: VIBE_NOCODE_POLICIES.indexOf(configured) >= 0 ? configured : "",
@@ -1265,6 +1269,18 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     }
   }
 
+  // A server (not the Studio) whose C8Oforms issues user keys, or did since the engine started: whatever the profile of
+  // a call, its agents must not read the No Code agents' environment.
+  function serverUsesUserGatewayKeys() {
+    if (engineIsStudio()) {
+      return false;
+    }
+    if (userGatewayKeySequenceAvailable()) {
+      return userGatewayKeysSeen(true);
+    }
+    return userGatewayKeysSeen(false);
+  }
+
   // true where the per-user path is the only one: a No Code session, on a server, whose C8Oforms issues user keys
   // (or did since the engine started)
   function userGatewayKeysOn(options) {
@@ -1417,12 +1433,14 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // environment: with per-user keys on, a No Code agent runs confined, or without native tools (mcp-only).
   // noCodeSandbox: what noCodeSessionSandbox gave Vibe (null: none); Claude Code and Codex are not confined.
   function userGatewayKeyIsolationRefusal(options, provider, noCodeSandbox) {
-    if (!userGatewayKeysOn(options)) {
+    // every agent of such a server, whatever its profile or caller (a WEB_ADMIN low-code session too): Landlock does
+    // not hold an unconfined reader back
+    if (!serverUsesUserGatewayKeys()) {
       return null;
     }
     provider = normalizeProvider(provider);
-    if ((provider === "vibe" || provider === "convertigo") && noCodeSandbox
-        && (noCodeSandbox.confined === true || noCodeSandbox.policy === "mcp-only")) {
+    if ((provider === "vibe" || provider === "convertigo") && noCodeSandbox && noCodeSandbox.confined === true
+        && (noCodeSandbox.policy === "files" || noCodeSandbox.policy === "mcp-only")) {
       return null;
     }
     return {
@@ -1430,7 +1448,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       status: "failed",
       code: "agent_isolation_unavailable",
       error: "agent_isolation_unavailable: This agent cannot run isolated from the other users' agents on this server. "
-        + "With per-user Tigo keys, a No Code agent runs confined (Landlock) or with the Convertigo tools only.",
+        + "With per-user Tigo keys, only a No Code agent confined by Landlock (files or mcp-only) runs here.",
       timestamp: now()
     };
   }
@@ -13879,7 +13897,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       nextCursor: entry.nextIndex,
       pendingCount: entry.pending.size(),
       // a budget refusal the runtime wrote there is told by its code, never by the gateway's message
-      lastError: gatewayBudgetError(entry.lastError) !== null ? GATEWAY_BUDGET_MESSAGE : entry.lastError,
+      lastError: gatewayBudgetError(entry.lastError) !== null ? GATEWAY_BUDGET_MESSAGE : redactUserGatewayKey(entry, entry.lastError),
       closedAt: entry.closedAt
     };
   }

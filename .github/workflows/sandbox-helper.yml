@@ -13,6 +13,7 @@ on:
     paths:
       - 'sandbox/c8o-agent-sandbox.c'
       - 'sandbox/c8o-agent-sandbox-test.sh'
+      - 'sandbox/c8o-agent-isolation-test.sh'
       - 'sandbox/linux-*/c8o-agent-sandbox'
       - '.github/workflows/sandbox-helper.yml'
   workflow_dispatch:
@@ -47,6 +48,17 @@ jobs:
 
       - name: Check the confinement
         run: sh sandbox/c8o-agent-sandbox-test.sh build/linux-${{ matrix.arch }}/c8o-agent-sandbox
+
+      # T1 of the A4 security review: a confined agent reads nothing of another agent, of its guard or of the engine
+      - name: Check the isolation of the agents
+        run: |
+          docker run --rm -v "$PWD/build/linux-${{ matrix.arch }}/c8o-agent-sandbox:/usr/local/bin/c8o-agent-sandbox:ro" \
+            -v "$PWD/sandbox:/test:ro" ubuntu:noble sh -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends python3 procps >/dev/null
+              useradd -m agent
+              env ENGINE_SECRET=engine sleep 300 & engine=$!
+              su agent -s /bin/sh -c "sh /test/c8o-agent-isolation-test.sh /usr/local/bin/c8o-agent-sandbox /usr/bin/python3 $engine"'
 
       - name: Compare with the committed binary
         run: |
