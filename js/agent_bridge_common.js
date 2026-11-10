@@ -14093,16 +14093,33 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     if (typeof adapter !== "function") {
       return { ok: false, status: "unsupported", handle: handle, protocol: String(entry.protocol), timestamp: now() };
     }
-    try {
-      if (adapter(entry) !== true) {
-        return { ok: false, status: "not_interruptible", handle: handle, timestamp: now() };
+    // A full stdin pipe can block writeJson itself. The wait budget must include delivery,
+    // otherwise a long tool call can prevent both the interrupt and its close fallback.
+    var delivery = new Packages.java.util.concurrent.atomic.AtomicReference();
+    var interruptedProcess = entry.process;
+    var interruptedRequest = trim(entry.turnRequestId);
+    var signal = new Thread(new Runnable({
+      run: function () {
+        try {
+          if (entry.process !== interruptedProcess || entry.turnActive !== true || trim(entry.turnRequestId) !== interruptedRequest) {
+            delivery.set("obsolete");
+          } else {
+            delivery.set(adapter(entry) === true ? "sent" : "unsupported");
+          }
+        } catch (interruptError) {
+          delivery.set("error: " + String(interruptError));
+        }
       }
-    } catch (interruptError) {
-      return { ok: false, status: "error", handle: handle, error: String(interruptError), timestamp: now() };
-    }
-    pushEvent(entry, "turn/interrupt_requested", { protocol: String(entry.protocol) });
+    }), "lib_ConvertigoAgentBridge-interrupt-" + handle);
+    signal.setDaemon(true);
     var deadline = now() + intValue(options.waitMs, 8000, 0, 30000);
+    pushEvent(entry, "turn/interrupt_requested", { protocol: String(entry.protocol) });
+    signal.start();
     while (entry.turnActive === true && processAlive(entry.process) && now() < deadline) {
+      var delivered = delivery.get();
+      if (delivered !== null && String(delivered) !== "sent") {
+        return { ok: false, status: String(delivered) === "unsupported" ? "not_interruptible" : "error", handle: handle, timestamp: now() };
+      }
       try { Thread.sleep(100); } catch (_ignoreInterruptSleep) {}
     }
     var stopped = entry.turnActive !== true && processAlive(entry.process);
@@ -14222,11 +14239,6 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   };
 
   function stopEntry(entry, removeFromRegistry) {
-    try {
-      if (entry.writer !== null) {
-        entry.writer.close();
-      }
-    } catch (_ignoreWriterClose) {}
     var stoppedTree = false;
     if (entryUsesPidTree(entry) && Number(entry.pid || 0) > 0) {
       try {
@@ -14245,6 +14257,15 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
           }
         }
       } catch (_ignoreDestroy) {}
+    }
+    // BufferedWriter.close shares its lock with write/flush. Kill the process first
+    // so a blocked pipe is released; never wait on its writer while it is still alive.
+    if (!processAlive(entry.process)) {
+      try {
+        if (entry.writer !== null) {
+          entry.writer.close();
+        }
+      } catch (_ignoreWriterClose) {}
     }
     deleteEntryPidFile(entry);
     entry.status = entry.status === "error" ? "error" : "closed";

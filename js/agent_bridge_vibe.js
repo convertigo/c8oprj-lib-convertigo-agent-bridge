@@ -1228,13 +1228,8 @@
       forgetSessionHandle(handle);
       return { ok: true, status: "not_found", handle: handle, timestamp: now() };
     }
-    try {
-      if (processAlive(entry.process) && entry.sessionId) {
-        acpRequest(entry, "session/close", { sessionId: entry.sessionId }, 3000);
-      }
-    } catch (e) {
-      pushEvent(entry, "warning", { message: String(e), phase: "session/close" });
-    }
+    // An explicit close is the fallback when session/cancel did not finish the turn.
+    // Do not wait on another protocol write (session/close) to the same blocked pipe.
     var stateBeforeRemove = statusOf(entry);
     stopEntry(entry, true);
     return {
