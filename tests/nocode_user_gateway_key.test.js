@@ -266,3 +266,25 @@ test("the gateway's refusal of a user's key does not point at the server key fil
   const source = fs.readFileSync(path.join(root, "js/agent_bridge_common.js"), "utf8");
   assert.match(source, /convertigoGatewayKeyRejected = \(gatewayStatus === 401 \|\| gatewayStatus === 403\) && !userGatewayKeysOn\(options\);/);
 });
+
+test("the operator may point the agents at another gateway: https, or http on this machine only", () => {
+  const { sandbox } = load();
+  const urls = {};
+  sandbox.Engine.theApp.databaseObjectsManager.symbolsGetValue = (name) => urls[name] || null;
+  assert.equal(sandbox.convertigoGatewayUrl({}), "https://llm.convertigo.com/v1", "the default");
+  for (const [value, expected] of [
+    ["https://llm-staging.example.com/v1/", "https://llm-staging.example.com/v1"],
+    ["http://127.0.0.1:4917/v1", "http://127.0.0.1:4917/v1"],
+    ["http://host.docker.internal:4917/v1", "http://host.docker.internal:4917/v1"],
+    ["http://llm.example.com/v1", "https://llm.convertigo.com/v1"],
+    ["https://user:pass@llm.example.com/v1", "https://llm.convertigo.com/v1"],
+    ["javascript:alert(1)", "https://llm.convertigo.com/v1"]
+  ]) {
+    urls["agentbridge.gateway.url"] = value;
+    assert.equal(sandbox.convertigoGatewayUrl({}), expected, value);
+  }
+  urls["agentbridge.gateway.url"] = "http://127.0.0.1:4917/v1";
+  assert.equal(sandbox.convertigoGatewayUrl({ llmGatewayUrl: "https://other.example.com/v1" }), "https://other.example.com/v1", "an explicit option first");
+  assert.match(fs.readFileSync(path.join(root, "js/agent_bridge_vibe.js"), "utf8"),
+    /var gatewayUrl = convertigoGatewayUrl\(\{\}\);[\s\S]{0,220}url = gatewayUrl \+ String\(url\)\.substring/, "image description follows it");
+});

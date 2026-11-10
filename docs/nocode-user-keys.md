@@ -60,6 +60,10 @@ Bridge
 - **Restart on a new key:** `vibeStart` and `claudeStart` compare the key fingerprint with the running entry's and
   restart the process (Vibe resumes its session), as for a new MCP token.
 - **Codex** has no gateway path.
+- **Gateway URL:** `https://llm.convertigo.com/v1`, unless the operator sets the global symbol `agentbridge.gateway.url`.
+  It must be an https URL, or http on this machine (loopback, `host.docker.internal`); a staging gateway or the
+  end-to-end test double uses it. Vibe's config, Claude Code's base URL, the catalogue and effort probes, and image
+  description all follow it. The `baseUrl` that TigoAccess gives with a key is not used.
 
 ## Budget exhaustion
 
