@@ -214,6 +214,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   }
 
   function convertigoGatewayApiKey(options, vibeHome) {
+    // per-user keys: the user's key from its handle, else none (never the key file, a home .env or a raw option)
+    if (userGatewayKeysOn(options)) { return userGatewayCredential(options).key; }
     var explicit = trim(options && (options.gatewayApiKey || options.llmGatewayApiKey));
     if (explicit.length) { return explicit; }
     return resolveConvertigoGatewayKey(options, vibeHome).key;
@@ -300,6 +302,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       var text = stream === null ? "" : String(new java.lang.String(stream.readAllBytes(), "UTF-8"));
       if (code === 200) { return "yes"; }
       if ((code === 400 || code === 422) && /reasoning_effort|thinking_level/i.test(text)) { return "no"; }
+      // a used-up budget refuses every probe the same way: no further one (convertigoGatewayModelNames)
+      if (code === 429 && gatewayBudgetError(text) !== null) { return "budget"; }
       return "unknown";
     } catch (_ignoreEffortProbe) {
       return "unknown";
@@ -309,11 +313,43 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     }
   }
 
+  // A request the gateway refuses before any model call when a budget is used up (else one output token): the budget
+  // error, or null. For a runtime that retries every 429 without reading its body (Claude Code's api_retry).
+  function probeGatewayBudget(options, apiKey, model) {
+    var connection = null, stream = null;
+    try {
+      connection = new URL(convertigoGatewayUrl(options) + "/chat/completions").openConnection();
+      connection.setConnectTimeout(4000);
+      connection.setReadTimeout(8000);
+      connection.setRequestMethod("POST");
+      connection.setDoOutput(true);
+      connection.setRequestProperty("Content-Type", "application/json");
+      connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+      var body = JSON.stringify({ model: model, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false });
+      var out = connection.getOutputStream();
+      out.write(new java.lang.String(body).getBytes("UTF-8"));
+      out.close();
+      var code = connection.getResponseCode();
+      if (code !== 429) {
+        return null;
+      }
+      stream = connection.getErrorStream();
+      var text = stream === null ? "" : String(new java.lang.String(stream.readAllBytes(), "UTF-8"));
+      return gatewayBudgetError(text);
+    } catch (_ignoreBudgetProbe) {
+      return null;
+    } finally {
+      try { if (stream !== null) stream.close(); } catch (_ignoreBudgetProbeStreamClose) {}
+      try { if (connection !== null) connection.disconnect(); } catch (_ignoreBudgetProbeDisconnect) {}
+    }
+  }
+
   function probeGatewayModelEfforts(options, apiKey, name) {
     var supported = [];
     for (var i = 0; i < GATEWAY_REASONING_EFFORTS.length; i++) {
       var answer = probeGatewayModelEffort(options, apiKey, name, GATEWAY_REASONING_EFFORTS[i]);
-      if (answer === "unknown") { return null; }
+      if (answer === "budget" && options) { options.gatewayBudgetRefused = true; }
+      if (answer === "unknown" || answer === "budget") { return null; }
       if (answer === "yes") { supported.push(GATEWAY_REASONING_EFFORTS[i]); }
     }
     return supported;
@@ -955,7 +991,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
           for (var effortIndex = 0; effortIndex < fetched.length; effortIndex++) {
             var modelName = fetched[effortIndex];
             var levels = Object.prototype.hasOwnProperty.call(knownEfforts, modelName) ? normalizeGatewayEfforts(knownEfforts[modelName]) : null;
-            if (levels === null || !levels.length || gatewayModelCatalogRefreshRequested(options)) {
+            if (options.gatewayBudgetRefused !== true && (levels === null || !levels.length || gatewayModelCatalogRefreshRequested(options))) {
               var probedLevels = probeGatewayModelEfforts(options, apiKey, modelName);
               // A timeout, quota or access error is not evidence that reasoning is unsupported.
               if (probedLevels !== null) { levels = probedLevels; }
@@ -1169,6 +1205,376 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       }
     }
     return decision;
+  }
+
+  // ---- No Code per-user gateway key (tigo-nocode-contract.md section 8) ----
+  // On a server whose C8Oforms issues one gateway key per user (APIV2_TigoUserKey), a No Code agent on the Convertigo
+  // gateway runs on its user's key only. The Assistant gets that key server side, keeps it in server memory behind an
+  // opaque handle (gatewayKeyHandle) and passes the handle; the Bridge puts the key in the agent's environment at launch.
+  // It is never written to the workspace key file, a home .env or a log, and nothing falls back to the server key: a
+  // missing, expired or foreign handle refuses the call (gateway_credential_missing). The Studio keeps its key file.
+  var USER_GATEWAY_KEY_PROJECT = "C8Oforms";
+  var USER_GATEWAY_KEY_SEQUENCE = "APIV2_TigoUserKey";
+  var USER_GATEWAY_KEY_HANDLE_PATTERN = /^lib_ConvertigoAssistant\.gatewayKey\.[A-Za-z0-9_-]{8,128}$/;
+  var USER_GATEWAY_KEY_PATTERN = /^sk-[A-Za-z0-9_-]{16,256}$/;
+
+  function userGatewayKeySequenceAvailable() {
+    try {
+      var project = Engine.theApp.databaseObjectsManager.getOriginalProjectByName(USER_GATEWAY_KEY_PROJECT);
+      return project != null && project.getSequenceByName(USER_GATEWAY_KEY_SEQUENCE) != null;
+    } catch (_ignoreNoUserKeySequence) {
+      return false;
+    }
+  }
+
+  function engineIsStudio() {
+    try {
+      return Engine.isStudioMode() == true;
+    } catch (_ignoreNoStudioMode) {
+      return false;
+    }
+  }
+
+  // true where the per-user path is the only one: a No Code session, on a server, whose C8Oforms issues user keys
+  function userGatewayKeysOn(options) {
+    if (normalizeSkillProfile(options || {}) !== "nocode" || engineIsStudio()) {
+      return false;
+    }
+    return userGatewayKeySequenceAvailable();
+  }
+
+  function userGatewayKeyHandle(options) {
+    options = options || {};
+    return trim(options.gatewayKeyHandle || optionOrRequest(options, "gatewayKeyHandle"));
+  }
+
+  // {key, fingerprint, handle, reason}: reason "ok", or why there is no key (missing, invalid, expired, foreign)
+  function userGatewayCredential(options) {
+    options = options || {};
+    var handle = userGatewayKeyHandle(options);
+    var none = function (reason) { return { key: "", fingerprint: "", handle: handle, reason: reason }; };
+    if (!handle.length) {
+      return none("missing");
+    }
+    if (!USER_GATEWAY_KEY_HANDLE_PATTERN.test(handle)) {
+      return none("invalid");
+    }
+    var raw = serverSecretGet(handle);
+    if (!raw.length) {
+      return none("expired");
+    }
+    var bundle = null;
+    try { bundle = JSON.parse(raw); } catch (_ignoreBadBundle) {}
+    if (!bundle || typeof bundle !== "object") {
+      return none("invalid");
+    }
+    if (!(Number(bundle.expiresAt) > now())) {
+      return none("expired");
+    }
+    var owner = trim(bundle.owner);
+    var user = trim(options.userId || options.ownerKey);
+    if (owner.length && user.length && owner !== user) {
+      return none("foreign");
+    }
+    var key = trim(bundle.key);
+    if (!USER_GATEWAY_KEY_PATTERN.test(key)) {
+      return none("invalid");
+    }
+    return { key: key, fingerprint: gatewayKeyFingerprint(key), handle: handle, reason: "ok" };
+  }
+
+  // What a running entry was started with, to check its user's key again at a prompt (the prompt's handle first).
+  function entryGatewayKeyOptions(entry, options) {
+    options = options || {};
+    return {
+      skillProfile: "nocode",
+      provider: entry.provider,
+      vibeProfile: entry.vibeProfile,
+      model: entry.model,
+      gatewayKeyHandle: trim(options.gatewayKeyHandle) || trim(entry.gatewayKeyHandle),
+      userId: trim(entry.ownerKey)
+    };
+  }
+
+  // Does this runtime call the gateway? Vibe on the convertigo profile, Claude Code on a gateway model (provider/model).
+  function runtimeUsesGateway(provider, options) {
+    provider = normalizeProvider(provider);
+    if (provider === "vibe" || provider === "convertigo") {
+      return provider === "convertigo" || resolveVibeProfile(options || {}) === "convertigo";
+    }
+    if (provider === "claude") {
+      // claudeGatewayModel (agent_bridge_claude.js)
+      var model = trim((options || {}).model || (options || {}).agentModel);
+      return model.indexOf("/") > 0 && !/^claude-/.test(model);
+    }
+    return false;
+  }
+
+  // On a multi-user server an agent must not read another agent's /proc/<pid>/environ, where the per-user key is. The
+  // Landlock helper gives a confined process /proc/self and the system-wide files only, and Landlock refuses ptrace
+  // (hence /proc/<pid>/environ) across domains. An unconfined process of the engine's user reads every agent's
+  // environment: with per-user keys on, a No Code agent runs confined, or without native tools (mcp-only).
+  // noCodeSandbox: what noCodeSessionSandbox gave Vibe (null: none); Claude Code and Codex are not confined.
+  function userGatewayKeyIsolationRefusal(options, provider, noCodeSandbox) {
+    if (!userGatewayKeysOn(options)) {
+      return null;
+    }
+    provider = normalizeProvider(provider);
+    if ((provider === "vibe" || provider === "convertigo") && noCodeSandbox
+        && (noCodeSandbox.confined === true || noCodeSandbox.policy === "mcp-only")) {
+      return null;
+    }
+    return {
+      ok: false,
+      status: "failed",
+      code: "agent_isolation_unavailable",
+      error: "agent_isolation_unavailable: This agent cannot run isolated from the other users' agents on this server. "
+        + "With per-user Tigo keys, a No Code agent runs confined (Landlock) or with the Convertigo tools only.",
+      timestamp: now()
+    };
+  }
+
+  // null, or the refusal of a call that needs the user's key and has none. No fallback to the server key.
+  function userGatewayKeyRefusal(options, provider) {
+    if (!userGatewayKeysOn(options) || !runtimeUsesGateway(provider, options)) {
+      return null;
+    }
+    var credential = userGatewayCredential(options);
+    if (credential.reason === "ok") {
+      return null;
+    }
+    return {
+      ok: false,
+      status: "failed",
+      code: "gateway_credential_missing",
+      reason: credential.reason,
+      error: "gateway_credential_missing: The Tigo key of this account is not available. Try again in a moment.",
+      timestamp: now()
+    };
+  }
+
+  // The per-user key replaces whatever the engine's environment or a home .env held: a No Code process gets its user's
+  // key, or no gateway key at all. unset: the names the process must not inherit from the engine (startProcess).
+  function applyUserGatewayKey(env, options, provider) {
+    var applied = { on: false, fingerprint: "", handle: "", unset: [] };
+    if (!userGatewayKeysOn(options)) {
+      return applied;
+    }
+    applied.on = true;
+    delete env[CONVERTIGO_LLM_API_KEY_ENV];
+    delete env[CONVERTIGO_LLM_API_KEY_FILE_MARKER];
+    applied.unset = [CONVERTIGO_LLM_API_KEY_ENV, CONVERTIGO_LLM_API_KEY_FILE_MARKER];
+    if (runtimeUsesGateway(provider, options)) {
+      var credential = userGatewayCredential(options);
+      if (credential.reason === "ok") {
+        if (normalizeProvider(provider) !== "claude") {
+          env[CONVERTIGO_LLM_API_KEY_ENV] = credential.key;
+        }
+        applied.fingerprint = credential.fingerprint;
+        applied.handle = credential.handle;
+      }
+    }
+    return applied;
+  }
+
+  // ---- Gateway budget exhaustion (tigo-nocode-contract.md section 6) ----
+  // LiteLLM 1.99.1 refuses a request over a budget with HTTP 429, error type "budget_exceeded" (BudgetExceededError,
+  // turned into a ProxyException by auth_exception_handler.py). Its message names the level:
+  //   "Budget has been exceeded! Key=<descriptor> Current cost: X, Max budget: Y"            key
+  //   "ExceededBudget: Key over <duration> budget. Spend=..., Limit=..."                       key
+  //   "Budget has been exceeded! User=<id> in Team=<id> Current cost: X, Max budget: Y"      member
+  //   "Budget has been exceeded! Team=<id> Current cost: X, Max budget: Y"                     team
+  //   "ExceededBudget: Team=<id> over <duration> budget. ..."                                  team
+  //   "ExceededBudget: User=<id> over budget. Spend=X, Budget=Y"                               user
+  //   "ExceededBudget: End User=<id> over budget. ..."                                         user
+  //   "Budget has been exceeded! Current cost: X, Max budget: Y" (the member check of the key
+  //   authentication, an organisation, a project, a tag, the proxy itself)                    unknown
+  // An RPM/TPM limit ("Rate limit exceeded for ...") or an upstream 429 is not a budget: it keeps its retryable
+  // handling. The Bridge is the first trusted component that sees the runtime's failure: from here on the error is
+  // {code: "budget_exceeded", scope, retryable: false}, without the gateway message or any entity id.
+  var GATEWAY_BUDGET_SCOPES = ["member", "team", "key", "user", "unknown"];
+  var GATEWAY_BUDGET_MESSAGE = "budget_exceeded: The Tigo budget is used up.";
+  var GATEWAY_BUDGET_EVENT_TYPES = { "turn/error": true, "acp/response_error": true, "error": true, "stderr": true, "turn/failed": true };
+
+  function gatewayErrorTexts(value, depth, out) {
+    if (value === null || value === undefined || depth > 6 || out.length > 60) {
+      return out;
+    }
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      out.push(String(value));
+      return out;
+    }
+    if (typeof value === "object") {
+      for (var name in value) {
+        if (Object.prototype.hasOwnProperty.call(value, name)) {
+          if (name === "type" || name === "code" || name === "errorType") {
+            out.push(name + ":" + String(value[name]));
+          }
+          gatewayErrorTexts(value[name], depth + 1, out);
+        }
+      }
+      return out;
+    }
+    try { out.push(String(value)); } catch (_ignoreText) {}
+    return out;
+  }
+
+  function gatewayBudgetScope(text) {
+    if (/\bUser=\S+\s+in\s+Team=/.test(text)) { return "member"; }
+    if (/\bEnd User=/.test(text)) { return "user"; }
+    if (/\bKey=|\bKey over\b/.test(text)) { return "key"; }
+    if (/\bTeam=/.test(text)) { return "team"; }
+    if (/ExceededBudget:\s*User=/.test(text)) { return "user"; }
+    return "unknown";
+  }
+
+  // {code: "budget_exceeded", scope, retryable: false} for a LiteLLM budget refusal (an error object, its text, or an
+  // already normalized error), else null
+  function gatewayBudgetError(value) {
+    if (value && typeof value === "object" && value.code === "budget_exceeded" && GATEWAY_BUDGET_SCOPES.indexOf(value.scope) >= 0) {
+      return { code: "budget_exceeded", scope: value.scope, retryable: false };
+    }
+    if (value && typeof value === "object" && value.budget && typeof value.budget === "object") {
+      var announced = gatewayBudgetError(value.budget);
+      if (announced !== null) {
+        return announced;
+      }
+    }
+    var text = gatewayErrorTexts(value, 0, []).join("\n");
+    if (!text.length) {
+      return null;
+    }
+    var typed = /(^|[^A-Za-z0-9_])budget_exceeded([^A-Za-z0-9_]|$)/.test(text);
+    var worded = /Budget has been exceeded!|ExceededBudget:/.test(text);
+    if (!typed && !worded) {
+      return null;
+    }
+    return { code: "budget_exceeded", scope: gatewayBudgetScope(text), retryable: false };
+  }
+
+  // The data of an error event (or a stderr line) that carries a budget refusal: the normalized error, the turn's
+  // request id and provider, a neutral message; never the gateway message, a key descriptor or an entity id.
+  function normalizedBudgetEventData(type, data) {
+    if (GATEWAY_BUDGET_EVENT_TYPES[type] !== true || !data || typeof data !== "object" || data.budgetNormalized === true) {
+      return data;
+    }
+    var budget = gatewayBudgetError(data);
+    if (budget === null) {
+      return data;
+    }
+    if (type === "stderr") {
+      return { line: "[gateway] " + GATEWAY_BUDGET_MESSAGE, code: budget.code, scope: budget.scope, retryable: false, budgetNormalized: true };
+    }
+    var normalized = { code: budget.code, scope: budget.scope, retryable: false, budget: budget, message: GATEWAY_BUDGET_MESSAGE, budgetNormalized: true };
+    ["requestId", "method", "provider", "phase", "turnId", "threadId", "sessionId"].forEach(function (name) {
+      if (data[name] !== null && typeof data[name] !== "undefined") {
+        normalized[name] = data[name];
+      }
+    });
+    return normalized;
+  }
+
+  // Vibe 3.1 reports any 429 as "Rate limit exceeded" (ACP -31001), the gateway's body dropped: the runtime's budget
+  // hook (sandbox/python/c8o_gateway_budget.py) prints GATEWAY_BUDGET_MARKER {"scope": ...} on stderr when the 429 it
+  // reads is a budget refusal, and gives up instead of retrying. The Bridge keeps it for the error of the turn.
+  var GATEWAY_BUDGET_MARKER = "C8O_GATEWAY_BUDGET_EXCEEDED";
+
+  function noteGatewayBudgetMarker(entry, line) {
+    var text = trim(line);
+    if (text.indexOf(GATEWAY_BUDGET_MARKER) !== 0) {
+      return false;
+    }
+    var scope = "unknown";
+    try {
+      var parsed = JSON.parse(trim(text.substring(GATEWAY_BUDGET_MARKER.length)));
+      if (parsed && GATEWAY_BUDGET_SCOPES.indexOf(parsed.scope) >= 0) {
+        scope = parsed.scope;
+      }
+    } catch (_ignoreBadMarker) {}
+    var first = !entry.gatewayBudgetRefusal;
+    entry.gatewayBudgetRefusal = { code: "budget_exceeded", scope: scope, retryable: false, at: now() };
+    if (first) {
+      pushEvent(entry, "gateway/budget_exceeded", { code: "budget_exceeded", scope: scope, retryable: false });
+    }
+    return true;
+  }
+
+  // stdout and stderr have a reader thread each: the marker printed before Vibe's error can be read after it. A
+  // rate-limited prompt error of a Vibe on the gateway waits for it a little (the stdout reader, on this error only).
+  var GATEWAY_BUDGET_MARKER_WAIT_MS = 500;
+
+  function awaitGatewayBudgetMarker(entry, error) {
+    if (!entry || entry.gatewayBudgetRefusal || normalizeProvider(entry.provider) !== "vibe" || trim(entry.vibeProfile) !== "convertigo") {
+      return;
+    }
+    var code = error && typeof error === "object" ? Number(error.code) : 0;
+    if (code !== -31001 && !/rate limit|429/i.test(gatewayErrorTexts(error, 0, []).join(" "))) {
+      return;
+    }
+    var deadline = now() + GATEWAY_BUDGET_MARKER_WAIT_MS;
+    while (!entry.gatewayBudgetRefusal && now() < deadline) {
+      try { java.lang.Thread.sleep(25); } catch (_ignoreMarkerWait) { return; }
+    }
+  }
+
+  // The error events of a turn whose runtime announced a budget refusal carry it (the runtime's own error says less).
+  function withGatewayBudgetRefusal(entry, type, data) {
+    if (!entry || !entry.gatewayBudgetRefusal || GATEWAY_BUDGET_EVENT_TYPES[type] !== true || type === "stderr"
+        || !data || typeof data !== "object" || data.budgetNormalized === true) {
+      return data;
+    }
+    var copy = {};
+    for (var name in data) {
+      if (Object.prototype.hasOwnProperty.call(data, name)) {
+        copy[name] = data[name];
+      }
+    }
+    copy.budget = { code: "budget_exceeded", scope: entry.gatewayBudgetRefusal.scope, retryable: false };
+    return copy;
+  }
+
+  // The budget hook of a vibe-acp on the gateway: sandbox/python on PYTHONPATH (already there for a confined one) and
+  // the switch its sitecustomize.py reads; an unconfined one keeps Python's own moves (C8O_SANDBOX_MOVES=0).
+  function applyGatewayBudgetHook(env, noCodeSandbox) {
+    var folder = confinedPythonPath();
+    if (!folder.length) {
+      return false;
+    }
+    env.C8O_GATEWAY_BUDGET_HOOK = "1";
+    var confined = !!(noCodeSandbox && noCodeSandbox.confined === true && trim(noCodeSandbox.pythonPath).length);
+    if (!confined) {
+      env.C8O_SANDBOX_MOVES = "0";
+      env.PYTHONPATH = folder + (trim(env.PYTHONPATH).length ? String(File.pathSeparator) + env.PYTHONPATH : "");
+    }
+    return true;
+  }
+
+  // A home written before the per-user keys holds the server key (and its marker) in its .env: removed, so that nothing
+  // can fall back to it. Other lines (a MISTRAL_API_KEY of the vibe profile) stay.
+  function scrubGatewayKeyFromEnvFile(file) {
+    try {
+      if (file === null || !file.isFile()) {
+        return false;
+      }
+      var lines = readTextFile(file).split(/\r?\n/);
+      var kept = [];
+      var removed = false;
+      var names = [CONVERTIGO_LLM_API_KEY_ENV, CONVERTIGO_LLM_API_KEY_FILE_MARKER];
+      for (var i = 0; i < lines.length; i++) {
+        var match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(lines[i]);
+        if (match && names.indexOf(match[1]) >= 0) {
+          removed = true;
+        } else {
+          kept.push(lines[i]);
+        }
+      }
+      if (removed) {
+        writeTextFile(file, kept.join("\n"));
+      }
+      return removed;
+    } catch (_ignoreScrub) {
+      return false;
+    }
   }
 
   // The PSC of a desktop Studio (<workspace>/studio/psc.txt) carries the registered owner email. A Convertigo 8.5 engine
@@ -1431,7 +1837,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       "codexRuntimeMode", "codexProtocol",
       "agentRevealMode", "convertigoRevealMode", "uiRevealMode", "revealMode",
       "nocodeMcpToken", "noCodeMcpToken", "mcpBearerToken",
-      "nocodeMcpTokenHandle", "noCodeMcpTokenHandle", "mcpBearerTokenHandle",
+      "nocodeMcpTokenHandle", "noCodeMcpTokenHandle", "mcpBearerTokenHandle", "gatewayKeyHandle",
       "browserDebugUrl", "browserDevToolsJsonUrl", "browserDevToolsWebSocketUrl",
       "playwrightCdpEndpoint", "playwrightMcpEndpoint", "viewerCdpEndpoint", "viewerDebugPort"
     ].forEach(function (name) {
@@ -5564,7 +5970,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       var homeDir = new File(report.home);
       ensureDirectory(homeDir);
       syncNewestAgentUserFile(vibeCredentialSourceDirs(options, homeDir), homeDir, ".env", report);
-      if (isConvertigoGatewayProfile(options)) {
+      if (userGatewayKeysOn(options)) {
+        // the user's key reaches the process environment only (applyUserGatewayKey)
+        report.gatewayKey = scrubGatewayKeyFromEnvFile(new File(homeDir, ".env")) ? "user_key_scrubbed" : "user_key";
+      } else if (isConvertigoGatewayProfile(options)) {
         report.gatewayKey = syncConvertigoGatewayKey(options, homeDir, report).reason;
       }
       report.message = "Scoped VIBE_HOME credentials synchronized";
@@ -5946,7 +6355,16 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return info;
   }
 
-  function inspectVibeAuthentication(vibeHome, profile) {
+  function inspectVibeAuthentication(vibeHome, profile, options) {
+    if (profile === "convertigo" && options && userGatewayKeysOn(options)) {
+      // per-user keys: the Assistant brings the user's key at each start; a settings read without one is managed
+      if (!userGatewayKeyHandle(options).length) {
+        return authenticationInfo(true, "user_key", "", "managed");
+      }
+      return userGatewayCredential(options).reason === "ok"
+        ? authenticationInfo(true, "user_key", "")
+        : authenticationInfo(false, "", "tigo_user_key", "user_key_unavailable");
+    }
     if (profile === "convertigo") {
       if (environmentHasValue(CONVERTIGO_LLM_API_KEY_ENV)) {
         return authenticationInfo(true, "environment", "");
@@ -10077,7 +10495,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       runtime: runtime,
       authentication: gatewayProfile && convertigoGatewayKeyRejected
         ? rejectedGatewayKeyAuthentication(options)
-        : inspectVibeAuthentication(setup.vibeHome, resolveVibeProfile(options)),
+        : inspectVibeAuthentication(setup.vibeHome, resolveVibeProfile(options), options),
       setup: compactVibeSetup(setup),
       skills: skills,
       source: {
@@ -11697,7 +12115,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       index: entry.nextIndex++,
       at: now(),
       type: String(type),
-      data: data || {}
+      data: normalizedBudgetEventData(String(type), withGatewayBudgetRefusal(entry, String(type), data || {}))
     };
     // Every provider reports its turns with these three events: keep a common "turn running"
     // flag so interrupt() needs no provider-specific state. Only the end of the running turn's request ends it: a second
@@ -11712,6 +12130,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         entry.turnWriteRefused = false;
         entry.turnInterrupted = false;
         entry.turnActed = false;
+        entry.gatewayBudgetRefusal = null;
+        entry.gatewayBudgetProbed = false;
       }
       entry.turnActive = true;
       keepManagedMcpLease(entry);
@@ -12984,6 +13404,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       return;
     }
     if (streamName !== "stdout" && streamName !== "codex-session") {
+      if (noteGatewayBudgetMarker(entry, text)) {
+        return;
+      }
       pushEvent(entry, streamName, { line: text });
       return;
     }
@@ -13010,6 +13433,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
             entry.restartDetail = turnRefusal;
           }
           if (message.error) {
+            awaitGatewayBudgetMarker(entry, message.error);
             pushEvent(entry, "turn/error", {
               requestId: message.id,
               method: pending.method,
@@ -13353,7 +13777,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       firstCursor: entry.firstIndex,
       nextCursor: entry.nextIndex,
       pendingCount: entry.pending.size(),
-      lastError: entry.lastError,
+      // a budget refusal the runtime wrote there is told by its code, never by the gateway's message
+      lastError: gatewayBudgetError(entry.lastError) !== null ? GATEWAY_BUDGET_MESSAGE : entry.lastError,
       closedAt: entry.closedAt
     };
   }
@@ -13368,6 +13793,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     var pb = new ProcessBuilder(toJavaList(guard.command));
     pb.directory(new File(entry.cwd));
     applyEngineProxyEnvironment(pb.environment(), agentProxyTargetUrl(entry.provider, env));
+    (entry.unsetEnv || []).forEach(function (name) { pb.environment().remove(String(name)); });
     envObjectToMap(pb.environment(), env);
     entry.process = pb.start();
     startupMark("process/spawn");

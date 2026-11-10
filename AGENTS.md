@@ -775,3 +775,23 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
   approval, and deny file access outside the working directory. These settings
   supplement kernel confinement; they do not replace it.
 - Run `node --test tests/nocode_tool_policy.test.js` and the full test suite.
+
+## No Code per-user gateway keys and the Tigo budget
+
+- Design, isolation analysis and the checks left to securite-cve: `docs/nocode-user-keys.md` (contract
+  `tigo-nocode-contract.md` sections 6 and 8, convertigo/c8oprj-tigoaccess#5).
+- `userGatewayKeysOn`: a No Code session on a server whose C8Oforms has `APIV2_TigoUserKey`. There the gateway key is
+  the user's, from the masked `gatewayKeyHandle` (server memory, written by the Assistant). It goes into the process
+  environment only, never into a home `.env` or the key file (`scrubGatewayKeyFromEnvFile` removes an old server key).
+  Nothing falls back to the server key: a missing handle gives `gateway_credential_missing`. A new key restarts the
+  process. The Studio key file path is unchanged.
+- With per-user keys, only Vibe confined by Landlock or under `mcp-only` runs (`userGatewayKeyIsolationRefusal`).
+  Claude Code, Codex and Vibe under `full` answer `agent_isolation_unavailable`.
+- `gatewayBudgetError` / `pushEvent`: a LiteLLM budget refusal (HTTP 429 `budget_exceeded`) is
+  `{code: "budget_exceeded", scope, retryable: false}` on every error event, without the gateway message or ids.
+  RPM/TPM and upstream 429s keep their handling.
+- Vibe on the gateway loads `sandbox/python/c8o_gateway_budget.py` (`C8O_GATEWAY_BUDGET_HOOK=1`). A budget 429 is
+  then not retried, and the hook prints `C8O_GATEWAY_BUDGET_EXCEEDED {"scope": …}` on stderr. Claude Code on a gateway
+  model asks the gateway once at its first 429 retry. A Codex `error` with `willRetry` does not end the turn.
+- Run `node --test tests/nocode_user_gateway_key.test.js tests/gateway_budget_exceeded.test.js`. With
+  `VIBE_TEST_PYTHON=<managed venv python>`, the hook also runs against Vibe's real retry loop.

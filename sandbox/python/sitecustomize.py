@@ -67,6 +67,22 @@ def _run_hidden_sitecustomize():
         spec.loader.exec_module(importlib.util.module_from_spec(spec))
 
 
-os.rename = _falling_back(_rename)
-os.replace = _falling_back(_replace)
+def _install_gateway_budget_hook():
+    # c8o_gateway_budget.py, beside this module: a vibe-acp on the Convertigo gateway gives up at once on a budget
+    # refusal (HTTP 429 budget_exceeded) and tells the Agent Bridge. Never a reason not to start.
+    if os.environ.get("C8O_GATEWAY_BUDGET_HOOK") != "1":
+        return
+    try:
+        import c8o_gateway_budget
+        c8o_gateway_budget.install()
+    except Exception:
+        pass
+
+
+# The Agent Bridge also puts this folder first on PYTHONPATH of an unconfined vibe-acp on the gateway, for the budget
+# hook only (C8O_SANDBOX_MOVES=0): the move fallback stays for the confined ones.
+if os.environ.get("C8O_SANDBOX_MOVES") != "0":
+    os.rename = _falling_back(_rename)
+    os.replace = _falling_back(_replace)
+_install_gateway_budget_hook()
 _run_hidden_sitecustomize()
