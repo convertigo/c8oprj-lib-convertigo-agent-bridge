@@ -773,8 +773,9 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
   environment only, never into a home `.env` or the key file (`scrubGatewayKeyFromEnvFile` removes an old server key).
   Nothing falls back to the server key: a missing handle gives `gateway_credential_missing`. A new key restarts the
   process. The mode stays on once seen, until the engine restarts. The bundle's owner must equal the call's user. A
-  running process keeps its key past its lifetime (by fingerprint). Events never carry the key (`redactUserGatewayKey`).
-  The Studio key file path is unchanged.
+  running process keeps its key past its lifetime (by fingerprint). Events never carry the key (`redactUserGatewayKey`):
+  each entry keeps the keys it was given in memory (`rememberEntryGatewayKey`, non-enumerable), so a renewed or purged
+  handle changes nothing, and any `sk-` key-shaped token is masked as a floor. The Studio key file path is unchanged.
 - On a server with per-user keys (`serverUsesUserGatewayKeys`: registered, or seen since the engine started), only a
   Vibe confined by Landlock under `files` or `mcp-only` runs, whatever the profile or the caller
   (`userGatewayKeyIsolationRefusal`, also checked when a process is reused). Every other agent answers
@@ -785,6 +786,7 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
   RPM/TPM and upstream 429s keep their handling.
 - Vibe on the gateway loads `sandbox/python/c8o_gateway_budget.py` (`C8O_GATEWAY_BUDGET_HOOK=1`). A budget 429 is
   then not retried, and the hook prints `C8O_GATEWAY_BUDGET_EXCEEDED {"scope": …}` on stderr. Claude Code on a gateway
-  model asks the gateway once at its first 429 retry. A Codex `error` with `willRetry` does not end the turn.
+  model asks the gateway once at its first 429 retry. A Codex `error` with `willRetry` does not end the turn. The
+  gateway probes (model list, efforts, budget) use the engine's HTTP client and proxy (`postGatewayChatCompletion`).
 - Run `node --test tests/nocode_user_gateway_key.test.js tests/nocode_user_key_security.test.js tests/gateway_budget_exceeded.test.js`. With
   `VIBE_TEST_PYTHON=<managed venv python>`, the hook also runs against Vibe's real retry loop.

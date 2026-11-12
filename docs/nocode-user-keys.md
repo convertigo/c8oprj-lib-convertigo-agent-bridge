@@ -43,8 +43,22 @@ Bridge
     over (`keepUserGatewayKeyAlive`, on the panel's event reads). The same key then stays alive however long the turn.
   - An expired or rejected key (HTTP 401, "Expired Key", Vibe's "Invalid API key") is never read as a budget. The turn
     ends with "send your message again", and the next message gets a fresh key (a new one restarts the process).
+  - **A leaked key keeps being extended while its user is active.** Every get of an active user pushes the same key's
+    expiry back, so a copy taken from a running agent stays valid as long as that user keeps working, and up to its
+    duration after the user stops. Only a change of right, an admin replacement or an idle period past `expiresAt`
+    (generation + 1) ends it. A suspected leak is answered by revoking the user's key in TigoAccess (or removing the
+    user's Tigo right), never by waiting for it to expire.
 - **Never in an event:** an agent with a shell can print its own key. `pushEvent` replaces it with `sk-***` in every
-  event (panel, conversation records, feedback, stderr).
+  event (panel, conversation records, feedback, stderr), and so does the status's `lastError`.
+  - The keys an entry was given stay with it, in memory only (`rememberEntryGatewayKey`, a non-enumerable property:
+    never serialized), at its start and at each prompt. Redaction therefore never depends on the handle still being in
+    the server store: a handle is purged 2 hours after its lifetime, a new generation comes under a new handle, and an
+    Assistant before this change gave a renewed key a new handle every 10 minutes (condition 8 of the security review,
+    T10). A newer handle of the same key also replaces the entry's own. The Assistant now keeps the handle of a renewed
+    key, so the server store holds one copy of it.
+  - Floor: for an entry with a per-user key, any key-shaped token (`sk-` and at least 16 of `[A-Za-z0-9_-]`, not
+    preceded by a letter or digit, so `desk-booking-...` stays) becomes `sk-***` in its events, stderr and status,
+    whichever key it is (another generation, another user's key read somewhere).
 - **Never on disk:** the per-user branch of `bootstrapVibeHome` writes no `.env`. `scrubGatewayKeyFromEnvFile` removes the server key and its
   marker from a home written before. `vibeGatewayKeyStore` refuses (`user_keys_managed`). The process does not
   inherit `CONVERTIGO_LLM_API_KEY` from the engine (`entry.unsetEnv`, applied by `startProcess`). The entry keeps only
@@ -54,9 +68,15 @@ Bridge
   `.env` and a raw `gatewayApiKey` option are all ignored. Missing, expired, malformed or foreign handle:
   `gateway_credential_missing`, at start (Vibe, Claude Code on a gateway model) and at each Vibe prompt.
 - **Auxiliary calls:** image description runs on the entry's handle (`describeImagesForBlindModel`). The catalogue
-  and effort probes get the user's key or none: without a key they keep the cached offer. Preview capture makes no
+  and effort probes get the user's key or none: without a key they keep the cached offer. The model list, the effort
+  probes and the budget probe go through the engine's HTTP client and its proxy settings (`configureHttpRequestProxy`,
+  `postGatewayChatCompletion`), never a direct URL connection. Preview capture makes no
   gateway call in the Bridge. The MCP tools that call the gateway (`image-describe`, `subagent-run`, `browser-verify`,
-  `project-lint`) read the workspace key file, and they refuse No Code bearers.
+  `project-lint`) read the workspace key file, and they refuse No Code bearers. On a server with per-user keys, the
+  two that start an agent outside the Bridge (`subagent-run`, `browser-verify`) are refused whatever the bearer,
+  WEB_ADMIN included: lib_ConvertigoMCP `js/user_key_server_policy.js` (T4b), same detection and sticky flag as
+  `serverUsesUserGatewayKeys`. They leave the tool list, a call answers `agent_isolation_unavailable`, and the
+  sub-agent runner refuses to start whoever calls it.
 - **Restart on a new key:** `vibeStart` and `claudeStart` compare the key fingerprint with the running entry's and
   restart the process (Vibe resumes its session), as for a new MCP token.
 - **Codex** has no gateway path.
@@ -140,13 +160,15 @@ The Studio and servers that never had per-user keys are unchanged.
    - Under `files`, Vibe's own `read_file` stays in the session folder (`outside_workdir = "deny"`, and the Bridge
      refuses the permission request otherwise: T2). The key never reaches the agent through a tool.
    - The key sits in the engine's memory (`context.server`): 10 minutes for new starts, then up to 2 hours for
-     running processes before it is purged.
+     running processes before it is purged. Each running entry also keeps the keys it was given, for redaction, as
+     long as it lives (never serialized, never sent).
+   - A leaked key keeps being extended while its user is active (above): revoke it, do not wait for it to expire.
    - `/proc/self` is bound to the helper's pid (the agent's), so a child process does not see its own `/proc/self`
      (existing behaviour).
 
 ## Tests
 
-- `tests/nocode_user_key_security.test.js`: T1 to T8 of the security review.
+- `tests/nocode_user_key_security.test.js`: T1 to T8 and T10 of the security review.
   - T1: the isolation script matches the Bridge's confinement, and the CI runs it.
   - T2: `read_file("/proc/self/environ")` is refused under `files` and `mcp-only`.
   - T3: `mcp-only` is accepted only when confined.
@@ -155,11 +177,15 @@ The Studio and servers that never had per-user keys are unchanged.
   - T6: another user's id or handle is refused.
   - T7: `sandboxed-shell` is capped to `files`.
   - T8: a key past its lifetime, then purged, fails closed.
+  - T10: an entry's key stays redacted after a new handle of the same key, a generation 2 and the purge of every
+    handle; the `sk-***` floor covers a key it never held; words like `desk-booking-...` stay.
+  - T4b is in lib_ConvertigoMCP `tests/scripts/validate_user_key_server_policy.cjs`.
   - The Assistant's side of T5, T6 and T8 is in lib_ConvertigoAssistant `tests/tigo_budget_gate.test.cjs`.
 - `tests/nocode_user_gateway_key.test.js`: mode, handle resolution, no fallback, refusals, environment, `.env`
   scrub, isolation, masked sequence variables.
 - `tests/gateway_budget_exceeded.test.js`: classifier (every scope, RPM/TPM, upstream, runtime rate limits), event
-  normalization, Vibe marker, Codex `willRetry`, Claude probe, effort probes, Python parity.
+  normalization, Vibe marker, Codex `willRetry`, Claude probe, effort probes, the probes' transport (engine HTTP
+  client and proxy), Python parity.
   `VIBE_TEST_PYTHON=<venv python>` also runs the hook in Vibe's real retry loop.
 - `tests/nocode_image_describe.test.js`: a used-up budget stops the descriptions and the prompt.
 
