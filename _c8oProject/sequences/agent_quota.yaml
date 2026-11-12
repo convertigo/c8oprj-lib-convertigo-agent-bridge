@@ -4,7 +4,7 @@ includeResponseElement: false
 responseTimeout: 120
 ↓Read [steps.SimpleStep-1791881328455]: 
   expression: |
-    var studio=com.twinsoft.convertigo.engine.Engine.isStudioMode();
+    var studio=com.twinsoft.convertigo.engine.Engine.isStudioMode();if(!studio){try{studio=com.twinsoft.convertigo.engine.Engine.isDesktopStudio()===true;}catch(noDesktopStudio){studio=false;}}
     var admin=com.twinsoft.convertigo.engine.Engine.authenticatedSessionManager.hasRole(context.httpSession,com.twinsoft.convertigo.engine.AuthenticatedSessionManager.Role.WEB_ADMIN);
     var authenticated=String(context.getAuthenticatedUser()||"").length>0;
     if(!(studio&&admin)&&!(!studio&&authenticated)){throw new com.twinsoft.convertigo.engine.EngineException("Authenticated quota caller required (Studio WEB_ADMIN)");}

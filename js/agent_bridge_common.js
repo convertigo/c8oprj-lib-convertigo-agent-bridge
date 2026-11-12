@@ -1171,12 +1171,28 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return decision;
   }
 
-  function studioOwnerEmail() {
-    // The Studio PSC carries the registered owner email; the class is only present in Studio.
+  // The PSC of a desktop Studio (<workspace>/studio/psc.txt) carries the registered owner email. A Convertigo 8.5 engine
+  // decodes it (engine.studio.StudioPsc, the Eclipse and the Electron Studio); an older one only in the Eclipse Studio.
+  function studioPscProperties() {
+    var StudioPsc = null;
     try {
-      var plugin = Packages.com.twinsoft.convertigo.eclipse.ConvertigoPlugin;
-      var properties = plugin.decodePsc();
-      var email = properties === null ? "" : trim(properties.getProperty("owner.email"));
+      StudioPsc = Packages.com.twinsoft.convertigo.engine.studio.StudioPsc;
+      if (typeof StudioPsc.decode !== "function") {
+        StudioPsc = null;
+      }
+    } catch (_ignoreEngineWithoutStudioPsc) {
+      StudioPsc = null;
+    }
+    if (StudioPsc !== null) {
+      return StudioPsc.decode();
+    }
+    return Packages.com.twinsoft.convertigo.eclipse.ConvertigoPlugin.decodePsc();
+  }
+
+  function studioOwnerEmail() {
+    try {
+      var properties = studioPscProperties();
+      var email = properties === null || typeof properties === "undefined" ? "" : trim(properties.getProperty("owner.email"));
       return email.length ? email : "";
     } catch (_ignoreStudioOwnerEmail) {
       return "";
