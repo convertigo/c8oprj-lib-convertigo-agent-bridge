@@ -548,6 +548,54 @@ withLoginCacheFixture((fixture) => {
 
 console.log("Claude Homebrew authentication cache and login invalidation OK");
 
+// A presence-only settings call (no CLI path) reads the files and the Keychain, which also hold the sign-in of the
+// user's own Claude Code: once the CLI answered for this home, that answer wins, so the presence read and the full
+// read agree instead of Ready then Needs setup.
+[false, true].forEach((javaStore) => withLoginCacheFixture((fixture) => {
+  const optimistic = { configured: true, status: "configured", method: "keychain", home: "" };
+  inspectClaudeAuthentication = () => ({ ...optimistic });
+  assert.equal(claudeDoctorAuthentication({}, fixture.home, "", false).configured, true, "no CLI answer yet: the file/Keychain verdict");
+  claudeAuthenticationProbe = () => ({ checked: true, conclusive: true, valid: false, unauthorized: true, loggedIn: false, authMethod: "none", reason: "logged_out" });
+  const full = claudeDoctorAuthentication({}, fixture.home, fixture.binary, false);
+  assert.equal(full.configured, false);
+  const presence = claudeDoctorAuthentication({}, fixture.home, "", false);
+  assert.equal(presence.configured, false, "the presence read agrees with the CLI");
+  assert.equal(presence.action, "claude_login");
+  assert.equal(presence.checkMethod, "auth-status-cached");
+  // a new execution, only the file left
+  for (const key of Object.keys(fixture.memory)) { delete fixture.memory[key]; }
+  assert.equal(claudeDoctorAuthentication({}, fixture.home, "", false).configured, false, "the persisted answer speaks for its home");
+  // another home: its own verdict
+  assert.equal(claudeDoctorAuthentication({}, fixture.home + "-other", "", false).configured, true);
+  // the answer speaks for its home one day, past the 5 minutes of the CLI cache
+  const later = now;
+  now = () => FIXED_NOW + 3600000;
+  assert.equal(claudeDoctorAuthentication({}, fixture.home, "", false).configured, false, "an hour later");
+  now = () => FIXED_NOW + 86400000 + 1;
+  assert.equal(claudeDoctorAuthentication({}, fixture.home, "", false).configured, true, "a day later: back to the file/Keychain verdict");
+  now = later;
+  // an API key in the environment wins
+  inspectClaudeAuthentication = () => ({ configured: true, status: "configured", method: "environment" });
+  assert.equal(claudeDoctorAuthentication({}, fixture.home, "", false).method, "environment");
+  // a sign-in clears the answer of this home
+  inspectClaudeAuthentication = () => ({ ...optimistic });
+  fixture.signIn();
+  claudeAuthenticationProbe = () => ({ checked: true, conclusive: true, valid: true, unauthorized: false, loggedIn: true, authMethod: "claude.ai", reason: "logged_in" });
+  assert.equal(publicClaudeLogin({ home: fixture.home, commandPath: fixture.binary }, {}).authenticated, true);
+  assert.equal(claudeDoctorAuthentication({}, fixture.home, "", false).configured, true, "after a sign-in the presence read follows");
+}));
+
+console.log("Claude presence read follows the CLI verdict of its home OK");
+
+// Every presence read goes through it: the settings of a presence call and the login status without a sign-in running.
+{
+  const source = fs.readFileSync("js/agent_bridge_claude.js", "utf8");
+  assert.match(source, /authentication: presenceOnly\n\s+\? claudeDoctorAuthentication\(options, setup\.claudeHome, "", false\)/);
+  assert.match(source, /var authentication = claudeDoctorAuthentication\(loginOptions, setup\.claudeHome, "", false\);/);
+  assert.match(source, /status\.authentication = claudeDoctorAuthentication\(loginOptions, setup\.claudeHome, "", false\);/);
+  assert.doesNotMatch(source, /authentication: presenceOnly\n\s+\? inspectClaudeAuthentication/);
+}
+
 // ---------------------------------------------------------------------------
 // 6. Turn-error mapping: the wordings a revoked session really produces.
 // ---------------------------------------------------------------------------

@@ -738,6 +738,8 @@
   var CLAUDE_AUTH_PROBE_CACHE_KEY = "lib_ConvertigoAgentBridge.claudeAuthProbeCache.v1";
   var CLAUDE_AUTH_PROBE_CACHE_FILE = "claude-auth-checks.json";
   var CLAUDE_AUTH_PROBE_CACHE_MS = 300000;
+  // How long a conclusive answer still speaks for its home in a presence-only settings call (no CLI run there).
+  var CLAUDE_AUTH_HOME_VERDICT_MS = 86400000;
 
   // Wordings the Claude CLI and the Anthropic API use when the stored OAuth session cannot
   // be used any more (revoked, refresh refused, signed out elsewhere).
@@ -861,7 +863,8 @@
       var currentTime = now();
       for (var existing in current.checks) {
         if (Object.prototype.hasOwnProperty.call(current.checks, existing) &&
-          Number(current.checks[existing] && current.checks[existing].nextCheckAt || 0) <= currentTime) {
+          Math.max(Number(current.checks[existing] && current.checks[existing].nextCheckAt || 0),
+            Number(current.checks[existing] && current.checks[existing].keepUntil || 0)) <= currentTime) {
           delete current.checks[existing];
         }
       }
@@ -948,6 +951,7 @@
     loaded.cached = false;
     // Only a conclusive answer is worth caching: a timeout or a missing CLI must be retried.
     if (loaded.conclusive === true && cacheMs > 0) {
+      loaded.keepUntil = currentTime + CLAUDE_AUTH_HOME_VERDICT_MS;
       claudeAuthProbeCacheWrite(cache, key, loaded);
       claudeAuthProbeFileWrite(options, key, loaded);
     }
@@ -1027,11 +1031,99 @@
     return result;
   }
 
+  function claudeAuthHomeKey(homePath) {
+    var home = new File(effectiveClaudeHomePath(homePath));
+    try {
+      return String(home.getCanonicalPath());
+    } catch (_ignoreCanonicalHome) {
+      return filePath(home);
+    }
+  }
+
+  // The last conclusive answer of the CLI for a Claude home, whatever the CLI path that gave it (a presence-only
+  // settings call knows no CLI path), while it still speaks for that home; null otherwise.
+  function claudeKnownHomeVerdict(options, homePath) {
+    var home = claudeAuthHomeKey(homePath);
+    var currentTime = now();
+    var best = null;
+    var consider = function (entry) {
+      if (entry && typeof entry === "object" && entry.conclusive === true && trim(entry.home) === home &&
+        Number(entry.keepUntil || 0) > currentTime && (best === null || Number(entry.checkedAt || 0) > Number(best.checkedAt || 0))) {
+        best = entry;
+      }
+    };
+    try {
+      var cache = claudeAuthProbeCacheMap();
+      if (typeof cache.keySet === "function") {
+        var keys = cache.keySet().toArray();
+        for (var i = 0; i < keys.length; i++) {
+          consider(claudeAuthProbeCacheRead(cache, String(keys[i])));
+        }
+      } else {
+        for (var key in cache) {
+          if (Object.prototype.hasOwnProperty.call(cache, key)) {
+            consider(claudeAuthProbeCacheRead(cache, key));
+          }
+        }
+      }
+    } catch (_ignoreKnownVerdictMemory) {}
+    try {
+      var file = claudeAuthProbeCacheFile(options);
+      var value = file !== null && fileHasContent(file) ? readJsonFile(file) : null;
+      var checks = value && value.checks && typeof value.checks === "object" ? value.checks : {};
+      for (var stored in checks) {
+        if (Object.prototype.hasOwnProperty.call(checks, stored)) {
+          consider(checks[stored]);
+        }
+      }
+    } catch (_ignoreKnownVerdictFile) {}
+    return best;
+  }
+
+  // A conclusive answer of the CLI applied to what the files and the Keychain say.
+  function claudeAuthenticationFromProbe(authentication, probe, checkMethod) {
+    authentication.check = probe;
+    authentication.checked = true;
+    authentication.checkMethod = checkMethod;
+    if (probe.unauthorized === true) {
+      var revoked = authenticationInfo(false, "", "claude_login", probe.reason === "revoked" ? "revoked" : "expired");
+      revoked.home = trim(authentication.home);
+      revoked.expiresAt = Number(authentication.expiresAt || 0);
+      revoked.updatedAt = Number(authentication.updatedAt || 0);
+      revoked.checked = true;
+      revoked.checkMethod = checkMethod;
+      revoked.check = probe;
+      revoked.verifiedByCli = true;
+      revoked.message = "The stored Claude session is no longer usable. Sign in again to Claude Code.";
+      return revoked;
+    }
+    if (authentication.configured !== true || trim(authentication.status) === "stale") {
+      var verified = authenticationInfo(true, "cli:" + (trim(probe.authMethod) || "unknown"), "");
+      verified.home = trim(authentication.home);
+      verified.expiresAt = Number(authentication.expiresAt || 0);
+      verified.updatedAt = Number(authentication.updatedAt || 0);
+      verified.checked = true;
+      verified.checkMethod = checkMethod;
+      verified.check = probe;
+      verified.verifiedByCli = true;
+      return verified;
+    }
+    authentication.verifiedByCli = true;
+    return authentication;
+  }
+
   function claudeDoctorAuthentication(options, homePath, commandPath, forceCheck) {
     var authentication = inspectClaudeAuthentication(homePath);
     var command = trim(commandPath);
     if (!command.length) {
-      // Presence-only settings call, or no CLI at all: keep the file/Keychain verdict.
+      // Presence-only settings call, or no CLI at all. The files and the Keychain also hold the sign-in of the user's
+      // own Claude Code (~/.claude, its Keychain entry), which the Claude home of this Studio may not have: the last
+      // answer of the CLI for this home wins, so that a presence read and a full read agree (Ready then Needs setup).
+      var known = authentication.configured === true && trim(authentication.method) === "environment" ? null : claudeKnownHomeVerdict(options, homePath);
+      if (known !== null) {
+        known.cached = true;
+        return claudeAuthenticationFromProbe(authentication, known, "auth-status-cached");
+      }
       authentication.check = { checked: false, reason: "cli_missing" };
       return authentication;
     }
@@ -1056,7 +1148,11 @@
     try {
       var cacheKey = claudeAuthProbeCacheKey(homePath, command);
       probe = claudeCachedAuthenticationProbe(cacheKey, probeOptions, function () {
-        return claudeAuthenticationProbe(probeOptions, homePath, command);
+        var answer = claudeAuthenticationProbe(probeOptions, homePath, command);
+        if (answer && typeof answer === "object") {
+          answer.home = claudeAuthHomeKey(homePath);
+        }
+        return answer;
       });
     } catch (_ignoreAuthProbe) {
       probe = null;
@@ -1065,40 +1161,16 @@
       authentication.check = { checked: false, reason: "probe_failed" };
       return authentication;
     }
-    authentication.check = probe;
-    authentication.checked = true;
-    authentication.checkMethod = "auth-status";
     if (probe.conclusive !== true) {
       // Missing CLI, timeout or unexpected output: never let the probe break the settings
       // call, fall back to what the credentials say and report why.
+      authentication.check = probe;
+      authentication.checked = true;
+      authentication.checkMethod = "auth-status";
       authentication.checkFallbackReason = trim(probe.reason) || "unknown";
       return authentication;
     }
-    if (probe.unauthorized === true) {
-      var revoked = authenticationInfo(false, "", "claude_login", probe.reason === "revoked" ? "revoked" : "expired");
-      revoked.home = trim(authentication.home);
-      revoked.expiresAt = Number(authentication.expiresAt || 0);
-      revoked.updatedAt = Number(authentication.updatedAt || 0);
-      revoked.checked = true;
-      revoked.checkMethod = "auth-status";
-      revoked.check = probe;
-      revoked.verifiedByCli = true;
-      revoked.message = "The stored Claude session is no longer usable. Sign in again to Claude Code.";
-      return revoked;
-    }
-    if (authentication.configured !== true || trim(authentication.status) === "stale") {
-      var verified = authenticationInfo(true, "cli:" + (trim(probe.authMethod) || "unknown"), "");
-      verified.home = trim(authentication.home);
-      verified.expiresAt = Number(authentication.expiresAt || 0);
-      verified.updatedAt = Number(authentication.updatedAt || 0);
-      verified.checked = true;
-      verified.checkMethod = "auth-status";
-      verified.check = probe;
-      verified.verifiedByCli = true;
-      return verified;
-    }
-    authentication.verifiedByCli = true;
-    return authentication;
+    return claudeAuthenticationFromProbe(authentication, probe, "auth-status");
   }
 
   // Browser login ----------------------------------------------------------
@@ -1227,7 +1299,8 @@
     var setup = runtime.setup;
     var entry = providerLoginRegistry().get(claudeLoginKey(setup.claudeHome));
     if (entry === null || typeof entry === "undefined") {
-      var authentication = inspectClaudeAuthentication(setup.claudeHome);
+      // As the settings read it: the last answer of the CLI for this home, else the files and the Keychain.
+      var authentication = claudeDoctorAuthentication(loginOptions, setup.claudeHome, "", false);
       return {
         ok: authentication.configured === true,
         status: authentication.configured === true ? "authenticated" : "login_required",
@@ -1240,7 +1313,7 @@
     var status = publicClaudeLogin(entry, loginOptions);
     if (status.authenticated === true) {
       bootstrapClaudeHome(loginOptions, setup.claudeHome, setup.mcpEndpoint);
-      status.authentication = inspectClaudeAuthentication(setup.claudeHome);
+      status.authentication = claudeDoctorAuthentication(loginOptions, setup.claudeHome, "", false);
     }
     return status;
   };
@@ -1946,8 +2019,9 @@
       status: profileSupported ? (setup.claude.found ? "ready" : "missing") : "unsupported_profile",
       ready: profileSupported && setup.claude.found === true,
       runtime: runtime,
+      // A presence read runs no CLI, but keeps the last answer of the CLI for this home (claudeDoctorAuthentication).
       authentication: presenceOnly
-        ? inspectClaudeAuthentication(setup.claudeHome)
+        ? claudeDoctorAuthentication(options, setup.claudeHome, "", false)
         : claudeDoctorAuthentication(options, setup.claudeHome, setup.claude.path, bootstrap && bootstrap.authenticationImported === true),
       setup: compactClaudeSetup(setup),
       bootstrap: bootstrap,
