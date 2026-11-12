@@ -2211,6 +2211,7 @@
         stopEntry(existing, true);
         existing = null;
       } else {
+        rememberEntryGatewayKey(existing, options);
         writeEntryPidFile(existing);
         rememberSessionHandle(handle);
         return {
@@ -2324,6 +2325,7 @@
     entry.gatewayKeyHandle = userGatewayKey.handle;
     entry.userGatewayKeys = userGatewayKey.on;
     entry.unsetEnv = userGatewayKey.unset;
+    rememberEntryGatewayKey(entry, options);
     entry.mcpEndpoint = resolveMcpEndpoint(options);
     entry.mcpConfigFile = setup.setup.mcp && setup.setup.mcp.path ? setup.setup.mcp.path : "";
     entry.viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
@@ -3650,8 +3652,9 @@
       return null;
     }
     entry.gatewayBudgetProbed = true;
+    // per-user keys: the key behind the entry's handle, else the one it holds in memory (its handle may be purged)
     var key = entry.userGatewayKeys === true
-      ? userGatewayCredential(entryGatewayKeyOptions(entry, {})).key
+      ? (userGatewayCredential(entryGatewayKeyOptions(entry, {})).key || entryHeldGatewayKey(entry))
       : convertigoGatewayApiKey({ workspaceRoot: entry.workspaceRoot }, "");
     if (!trim(key).length) {
       return null;
