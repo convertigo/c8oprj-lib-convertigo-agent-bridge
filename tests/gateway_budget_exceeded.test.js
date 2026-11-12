@@ -224,8 +224,59 @@ test("the effort probes stop at a used-up budget instead of asking again for eve
   } finally {
     sandbox.probeGatewayModelEffort = saved;
   }
-  assert.match(fs.readFileSync(path.join(root, "js/agent_bridge_common.js"), "utf8"),
-    /if \(code === 429 && gatewayBudgetError\(text\) !== null\) \{ return "budget"; \}/);
+  const post = sandbox.postGatewayChatCompletion;
+  sandbox.postGatewayChatCompletion = () => ({ status: 429, text: JSON.stringify({ error: { type: "budget_exceeded",
+    message: "Budget has been exceeded! User=u-1 in Team=t-1 Current cost: 2, Max budget: 1.5", code: "429" } }) });
+  try {
+    assert.equal(sandbox.probeGatewayModelEffort({}, "sk-x", "glm-5-3", "low"), "budget");
+  } finally {
+    sandbox.postGatewayChatCompletion = post;
+  }
+});
+
+test("the budget and effort probes go through the engine's HTTP client and its proxy, never a direct URL connection", () => {
+  const saved = { Packages: sandbox.Packages, Engine: sandbox.Engine, java: sandbox.java, URL: sandbox.URL,
+    configureHttpRequestProxy: sandbox.configureHttpRequestProxy, convertigoGatewayUrl: sandbox.convertigoGatewayUrl };
+  const sent = [], proxied = [];
+  let answer = { status: 429, body: JSON.stringify({ error: { type: "budget_exceeded", message: "Budget has been exceeded! Team=t-1 Current cost: 6, Max budget: 4.5" } }) };
+  const builder = { setConnectTimeout() { return builder; }, setSocketTimeout(ms) { builder.socket = ms; return builder; },
+    setConnectionRequestTimeout() { return builder; }, setRedirectsEnabled() { return builder; }, build() { return { socket: builder.socket }; } };
+  function HttpPost(url) { this.url = url; this.headers = {}; this.setHeader = (k, v) => { this.headers[k] = v; };
+    this.setEntity = (e) => { this.entity = e; }; this.setConfig = (c) => { this.config = c; }; }
+  sandbox.Packages = { org: { apache: { http: {
+    client: { methods: { HttpPost }, config: { RequestConfig: { custom: () => builder } } },
+    entity: { StringEntity: function (text) { this.text = text; }, ContentType: { APPLICATION_JSON: "application/json" } } } } } };
+  sandbox.Engine = { theApp: { httpClient4: { execute(request) {
+    sent.push(request);
+    return { getStatusLine: () => ({ getStatusCode: () => answer.status }),
+      getEntity: () => ({ getContent: () => ({ readAllBytes: () => answer.body, close() {} }) }), close() {} };
+  } } } };
+  sandbox.java = { lang: { String: function (bytes) { this.toString = () => String(bytes); } } };
+  sandbox.URL = function () { throw new Error("direct URL connection"); };
+  sandbox.configureHttpRequestProxy = (request, configBuilder, url) => { proxied.push(url); };
+  sandbox.convertigoGatewayUrl = () => "https://gateway.example/v1";
+  try {
+    const budget = sandbox.probeGatewayBudget({}, "sk-test-" + "c".repeat(24), "glm-5-3");
+    assert.equal(budget.code, "budget_exceeded");
+    assert.equal(budget.scope, "team");
+    assert.equal(sent[0].url, "https://gateway.example/v1/chat/completions");
+    assert.equal(sent[0].headers.Authorization, "Bearer sk-test-" + "c".repeat(24));
+    assert.equal(JSON.parse(sent[0].entity.text).max_tokens, 1);
+    assert.equal(sent[0].config.socket, 8000);
+    answer = { status: 200, body: "{}" };
+    assert.equal(sandbox.probeGatewayBudget({}, "sk-x", "glm-5-3"), null, "no refusal: no budget error");
+    assert.equal(sandbox.probeGatewayModelEffort({}, "sk-x", "glm-5-3", "high"), "yes");
+    assert.equal(JSON.parse(sent[2].entity.text).reasoning_effort, "high");
+    assert.deepEqual(proxied, ["https://gateway.example/v1/chat/completions", "https://gateway.example/v1/chat/completions",
+      "https://gateway.example/v1/chat/completions"], "the engine's proxy settings apply to every probe");
+    sandbox.Engine = { theApp: { httpClient4: { execute() { throw new Error("unreachable"); } } } };
+    assert.equal(sandbox.probeGatewayBudget({}, "sk-x", "glm-5-3"), null, "unreachable: no budget error");
+    assert.equal(sandbox.probeGatewayModelEffort({}, "sk-x", "glm-5-3", "high"), "unknown");
+  } finally {
+    Object.assign(sandbox, saved);
+  }
+  const source = fs.readFileSync(path.join(root, "js/agent_bridge_common.js"), "utf8");
+  assert.doesNotMatch(source, /new URL\(convertigoGatewayUrl/, "no gateway call through a direct URL connection");
 });
 
 // The Python side reads the same bodies the same way (sandbox/python/c8o_gateway_budget.py).

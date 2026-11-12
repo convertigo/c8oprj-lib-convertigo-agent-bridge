@@ -299,65 +299,52 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // Empty results are retried after cache expiry; an explicit refresh rechecks every model.
   var GATEWAY_REASONING_EFFORTS = ["low", "medium", "high", "max"];
 
-  function probeGatewayModelEffort(options, apiKey, name, effort) {
-    var connection = null, stream = null;
+  // One JSON POST to the gateway's chat completions through the engine's HTTP client and its proxy settings, as the
+  // model list (fetchConvertigoGatewayModelIds): {status, text}, or null when it could not be sent or read.
+  function postGatewayChatCompletion(options, apiKey, payload, readTimeoutMs) {
+    var response = null, stream = null;
     try {
-      connection = new URL(convertigoGatewayUrl(options) + "/chat/completions").openConnection();
-      connection.setConnectTimeout(4000);
-      connection.setReadTimeout(20000);
-      connection.setRequestMethod("POST");
-      connection.setDoOutput(true);
-      connection.setRequestProperty("Content-Type", "application/json");
-      connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-      var body = JSON.stringify({ model: name, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false, reasoning_effort: effort });
-      var out = connection.getOutputStream();
-      out.write(new java.lang.String(body).getBytes("UTF-8"));
-      out.close();
-      var code = connection.getResponseCode();
-      stream = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
+      var url = convertigoGatewayUrl(options) + "/chat/completions";
+      var post = new Packages.org.apache.http.client.methods.HttpPost(url);
+      post.setHeader("Accept", "application/json");
+      post.setHeader("Authorization", "Bearer " + apiKey);
+      post.setEntity(new Packages.org.apache.http.entity.StringEntity(JSON.stringify(payload),
+        Packages.org.apache.http.entity.ContentType.APPLICATION_JSON));
+      var requestConfig = Packages.org.apache.http.client.config.RequestConfig.custom()
+        .setConnectTimeout(4000).setSocketTimeout(readTimeoutMs).setConnectionRequestTimeout(4000).setRedirectsEnabled(false);
+      configureHttpRequestProxy(post, requestConfig, url);
+      post.setConfig(requestConfig.build());
+      response = Engine.theApp.httpClient4.execute(post);
+      var status = Number(response.getStatusLine().getStatusCode());
+      var entity = response.getEntity();
+      stream = entity === null ? null : entity.getContent();
       var text = stream === null ? "" : String(new java.lang.String(stream.readAllBytes(), "UTF-8"));
-      if (code === 200) { return "yes"; }
-      if ((code === 400 || code === 422) && /reasoning_effort|thinking_level/i.test(text)) { return "no"; }
-      // a used-up budget refuses every probe the same way: no further one (convertigoGatewayModelNames)
-      if (code === 429 && gatewayBudgetError(text) !== null) { return "budget"; }
-      return "unknown";
-    } catch (_ignoreEffortProbe) {
-      return "unknown";
+      return { status: status, text: text };
+    } catch (_ignoreGatewayPost) {
+      return null;
     } finally {
-      try { if (stream !== null) stream.close(); } catch (_ignoreProbeStreamClose) {}
-      try { if (connection !== null) connection.disconnect(); } catch (_ignoreProbeDisconnect) {}
+      try { if (stream !== null) stream.close(); } catch (_ignoreGatewayPostStreamClose) {}
+      try { if (response !== null) response.close(); } catch (_ignoreGatewayPostResponseClose) {}
     }
+  }
+
+  function probeGatewayModelEffort(options, apiKey, name, effort) {
+    var answer = postGatewayChatCompletion(options, apiKey,
+      { model: name, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false, reasoning_effort: effort }, 20000);
+    if (answer === null) { return "unknown"; }
+    if (answer.status === 200) { return "yes"; }
+    if ((answer.status === 400 || answer.status === 422) && /reasoning_effort|thinking_level/i.test(answer.text)) { return "no"; }
+    // a used-up budget refuses every probe the same way: no further one (convertigoGatewayModelNames)
+    if (answer.status === 429 && gatewayBudgetError(answer.text) !== null) { return "budget"; }
+    return "unknown";
   }
 
   // A request the gateway refuses before any model call when a budget is used up (else one output token): the budget
   // error, or null. For a runtime that retries every 429 without reading its body (Claude Code's api_retry).
   function probeGatewayBudget(options, apiKey, model) {
-    var connection = null, stream = null;
-    try {
-      connection = new URL(convertigoGatewayUrl(options) + "/chat/completions").openConnection();
-      connection.setConnectTimeout(4000);
-      connection.setReadTimeout(8000);
-      connection.setRequestMethod("POST");
-      connection.setDoOutput(true);
-      connection.setRequestProperty("Content-Type", "application/json");
-      connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-      var body = JSON.stringify({ model: model, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false });
-      var out = connection.getOutputStream();
-      out.write(new java.lang.String(body).getBytes("UTF-8"));
-      out.close();
-      var code = connection.getResponseCode();
-      if (code !== 429) {
-        return null;
-      }
-      stream = connection.getErrorStream();
-      var text = stream === null ? "" : String(new java.lang.String(stream.readAllBytes(), "UTF-8"));
-      return gatewayBudgetError(text);
-    } catch (_ignoreBudgetProbe) {
-      return null;
-    } finally {
-      try { if (stream !== null) stream.close(); } catch (_ignoreBudgetProbeStreamClose) {}
-      try { if (connection !== null) connection.disconnect(); } catch (_ignoreBudgetProbeDisconnect) {}
-    }
+    var answer = postGatewayChatCompletion(options, apiKey,
+      { model: model, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false }, 8000);
+    return answer !== null && answer.status === 429 ? gatewayBudgetError(answer.text) : null;
   }
 
   function probeGatewayModelEfforts(options, apiKey, name) {
