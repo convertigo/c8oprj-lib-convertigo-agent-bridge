@@ -1350,18 +1350,126 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return { key: key, fingerprint: fingerprint, handle: handle, reason: "ok" };
   }
 
-  // The user's key a running entry holds, from its handle even past its lifetime, for redaction only; "" without one.
-  function entryGatewayKeyForRedaction(entry) {
-    if (!entry || entry.userGatewayKeys !== true || !trim(entry.gatewayKeyHandle).length) {
-      return "";
+  // Condition 8 of the A4 security review: the keys an entry was given stay with it, in memory only, so that its events
+  // are redacted after the handle it started with is purged or replaced (the Assistant renews the same key under a new
+  // handle). A non-enumerable property: JSON.stringify, for...in and Object.keys never see it.
+  var ENTRY_GATEWAY_KEYS_PROPERTY = "__gatewayRedactionKeys";
+  var ENTRY_GATEWAY_KEYS_MAX = 8;
+
+  function entryRedactionKeys(entry) {
+    var keys = entry ? entry[ENTRY_GATEWAY_KEYS_PROPERTY] : null;
+    return Array.isArray(keys) ? keys : [];
+  }
+
+  function keepEntryRedactionKey(entry, key) {
+    if (!USER_GATEWAY_KEY_PATTERN.test(trim(key))) {
+      return;
     }
-    try {
-      var bundle = JSON.parse(serverSecretGet(entry.gatewayKeyHandle) || "null");
-      var key = bundle ? trim(bundle.key) : "";
-      return USER_GATEWAY_KEY_PATTERN.test(key) && gatewayKeyFingerprint(key) === trim(entry.gatewayKeyFingerprint) ? key : "";
-    } catch (_ignoreRedactionKey) {
-      return "";
+    var keys = entryRedactionKeys(entry);
+    if (keys.indexOf(String(key)) >= 0) {
+      return;
     }
+    // the first key is the one the process environment holds: it stays, the others make room
+    var kept = keys.length < ENTRY_GATEWAY_KEYS_MAX ? keys : [keys[0]].concat(keys.slice(keys.length - ENTRY_GATEWAY_KEYS_MAX + 2));
+    Object.defineProperty(entry, ENTRY_GATEWAY_KEYS_PROPERTY, {
+      value: kept.concat([String(key)]), enumerable: false, writable: true, configurable: true
+    });
+  }
+
+  // The key the process environment holds, from the entry's memory (by its fingerprint): "" without one.
+  function entryHeldGatewayKey(entry) {
+    var keys = entryRedactionKeys(entry);
+    for (var i = 0; i < keys.length; i++) {
+      if (gatewayKeyFingerprint(keys[i]) === trim(entry.gatewayKeyFingerprint)) {
+        return keys[i];
+      }
+    }
+    return "";
+  }
+
+  // At its start and at each prompt: the user's key behind the handle it was given joins the entry's redaction keys, and
+  // a newer handle of the same key replaces the one it started with. True when the handle holds a key of its user.
+  function rememberEntryGatewayKey(entry, options) {
+    if (!entry || entry.userGatewayKeys !== true) {
+      return false;
+    }
+    var credential = userGatewayCredential(options);
+    if (credential.reason !== "ok") {
+      return false;
+    }
+    keepEntryRedactionKey(entry, credential.key);
+    if (credential.fingerprint === trim(entry.gatewayKeyFingerprint) && credential.handle !== trim(entry.gatewayKeyHandle)) {
+      entry.gatewayKeyHandle = credential.handle;
+    }
+    return true;
+  }
+
+  // The user's keys a running entry holds, for redaction only: those it kept in memory, and the one behind its handle
+  // even past its lifetime.
+  function entryGatewayKeysForRedaction(entry) {
+    if (!entry || entry.userGatewayKeys !== true) {
+      return [];
+    }
+    if (trim(entry.gatewayKeyHandle).length) {
+      try {
+        var bundle = JSON.parse(serverSecretGet(entry.gatewayKeyHandle) || "null");
+        var key = bundle ? trim(bundle.key) : "";
+        if (USER_GATEWAY_KEY_PATTERN.test(key) && gatewayKeyFingerprint(key) === trim(entry.gatewayKeyFingerprint)) {
+          keepEntryRedactionKey(entry, key);
+        }
+      } catch (_ignoreRedactionKey) {}
+    }
+    return entryRedactionKeys(entry);
+  }
+
+  // The floor under the known keys, for an entry with a per-user key: any key-shaped token in its events and stderr.
+  // A letter or digit right before "sk-" is part of a word ("desk-booking-...", "risk-assessment-..."), not a key,
+  // except at the end of an ANSI color code ("\u001b[1m"), a percent-encoded byte ("%20", "%3D") or an escaped "\n".
+  // A new RegExp at each use: the stdout and stderr readers of an entry redact in two threads, and a shared /g
+  // expression keeps its lastIndex between them.
+  var USER_GATEWAY_KEY_FLOOR_SOURCE = "(^|[^A-Za-z0-9]|\\u001b\\[[0-9;]*m|%[0-9A-Fa-f]{2}|\\\\[nrt])sk-[A-Za-z0-9_-]{16,}";
+
+  function userGatewayKeyFloor(global) {
+    return new RegExp(USER_GATEWAY_KEY_FLOOR_SOURCE, global ? "g" : "");
+  }
+
+  function replacePatternInStrings(value, pattern, replacement, depth) {
+    if (depth > 12 || value === null || typeof value === "undefined") {
+      return value;
+    }
+    if (typeof value === "string") {
+      return value.replace(pattern, replacement);
+    }
+    if (Array.isArray(value)) {
+      return value.map(function (item) { return replacePatternInStrings(item, pattern, replacement, depth + 1); });
+    }
+    if (typeof value === "object") {
+      var copy = {};
+      for (var name in value) {
+        if (Object.prototype.hasOwnProperty.call(value, name)) {
+          copy[name] = replacePatternInStrings(value[name], pattern, replacement, depth + 1);
+        }
+      }
+      return copy;
+    }
+    return value;
+  }
+
+  function containsPattern(value, pattern, depth) {
+    if (depth > 12 || value === null || typeof value === "undefined") {
+      return false;
+    }
+    if (typeof value === "string") {
+      return pattern.test(value);
+    }
+    if (typeof value === "object") {
+      for (var name in value) {
+        if (Object.prototype.hasOwnProperty.call(value, name) && containsPattern(value[name], pattern, depth + 1)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   function replaceInStrings(value, search, replacement, depth) {
@@ -1407,11 +1515,16 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // the Bridge (the panel, the conversation record, the feedback). What the runtime itself writes (its journal) and
   // what it sends its model stay outside the Bridge (docs/nocode-user-keys.md).
   function redactUserGatewayKey(entry, data) {
-    var key = entryGatewayKeyForRedaction(entry);
-    if (!key.length || !containsString(data, key, 0)) {
+    if (!entry || entry.userGatewayKeys !== true) {
       return data;
     }
-    return replaceInStrings(data, key, "sk-***", 0);
+    var keys = entryGatewayKeysForRedaction(entry);
+    for (var i = 0; i < keys.length; i++) {
+      if (containsString(data, keys[i], 0)) {
+        data = replaceInStrings(data, keys[i], "sk-***", 0);
+      }
+    }
+    return containsPattern(data, userGatewayKeyFloor(false), 0) ? replacePatternInStrings(data, userGatewayKeyFloor(true), "$1sk-***", 0) : data;
   }
 
   // What a running entry was started with, to check its user's key again at a prompt (the prompt's handle first).

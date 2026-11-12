@@ -548,6 +548,7 @@
           message: String(configureExistingError)
         });
       }
+      rememberEntryGatewayKey(existing, options);
       rememberSessionHandle(handle);
       return {
         ok: true,
@@ -682,6 +683,7 @@
     entry.gatewayKeyHandle = userGatewayKey.handle;
     entry.userGatewayKeys = userGatewayKey.on;
     entry.unsetEnv = userGatewayKey.unset;
+    rememberEntryGatewayKey(entry, options);
     entry.noCodeAccess = noCodeAccessOptions(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
@@ -829,8 +831,8 @@
         ok: false,
         status: "error",
         phase: entry.phase,
-        error: String(e),
-        acpError: e.acpError || null,
+        error: redactUserGatewayKey(entry, String(e)),
+        acpError: redactUserGatewayKey(entry, e.acpError || null),
         handle: handle,
         state: statusOf(entry),
         timestamp: now()
@@ -1096,6 +1098,7 @@
         gatewayKeyRefusal.handle = handle;
         return gatewayKeyRefusal;
       }
+      rememberEntryGatewayKey(entry, entryGatewayKeyOptions(entry, options));
     }
     writeStartupTimings(startupTimer("prompt", { handle: handle }), entry.workspaceRoot, "received");
     entry.prewarm = false;
@@ -1179,7 +1182,7 @@
           status: "completed",
           handle: handle,
           requestId: pending.id,
-          response: response,
+          response: redactUserGatewayKey(entry, response),
           cursor: entry.nextIndex,
           state: statusOf(entry),
           timestamp: now()
@@ -1204,8 +1207,8 @@
         ok: false,
         status: "error",
         handle: handle,
-        error: String(e),
-        acpError: e.acpError || null,
+        error: redactUserGatewayKey(entry, String(e)),
+        acpError: redactUserGatewayKey(entry, e.acpError || null),
         state: statusOf(entry),
         timestamp: now()
       };
