@@ -380,6 +380,112 @@ test("a pending verification after a write resumes, while reads and questions st
   }
 });
 
+// PipelineCrm2 on the Electron Studio (13/11): mistral-large-4 ended its first turn, 8 minutes in and its plan at 3 of 7
+// steps, on a message that only repeated an earlier failure of its own run_typescript code (the model read `.result` of
+// a tool answer that has none). The Bridge nudges such a turn while the plan is unfinished; never a finished plan, a turn
+// without a tool call, or an answer that explains the error in sentences.
+const plan = (statuses) => update({ sessionUpdate: "plan", entries: statuses.map((status, i) => ({ content: "Step " + (i + 1), status, priority: "high" })) });
+const CRM2_PLAN = ["completed", "completed", "completed", "in_progress", "pending", "pending", "pending"];
+const CRM2_FINAL = 'run_typescript failed: {"name":"TypeError","message":"Cannot read properties of undefined (reading \'slice\')","stack":"TypeError: Cannot read properties of undefined (reading \'slice\') at main (eval at <anonymous>:18:55)"}';
+
+test("a turn that ends on only the error of a tool call, its plan unfinished, is nudged to fix the call and go on", () => {
+  const entry = turn(7);
+  play(entry, [plan(CRM2_PLAN), call("e1", "mcp_Convertigo.databaseobject_tree_get"), call("e2", "mcp_Convertigo.requestable_execute"),
+    say(CRM2_FINAL), answer(7)]);
+  assert.equal(types(entry, "turn/end").length, 0, "the turn goes on");
+  const nudge = types(entry, "turn/nudge")[0].data;
+  assert.deepEqual([nudge.reason, nudge.tool, nudge.count, nudge.max], ["tool_error", "run_typescript", 1, 2]);
+  assert.equal(nudge.error, "TypeError: Cannot read properties of undefined (reading 'slice')");
+  assert.deepEqual(JSON.parse(JSON.stringify(nudge.plan)), { done: 3, total: 7 });
+  const text = prompts(entry)[0].params.prompt[0].text;
+  assert.equal(text, "Note from the Agent Bridge: your last message was only the error of a call to the tool `run_typescript`, not an answer, " +
+    "so your turn ended with your plan unfinished (3 of 7 steps done; current step: Step 4). That tool call failed with this error: " +
+    "`TypeError: Cannot read properties of undefined (reading 'slice')`. Fix the call (for example a field your code read from a tool " +
+    "result that is not there) and continue the plan. If you cannot go on, give your final answer and say what blocks you.");
+  assert.match(types(entry, "progress/message")[0].data.text,
+    /^Agent Bridge: the agent ended its turn on the error of `run_typescript` with its plan at 3\/7; it was asked to fix the call and go on \(1\/2\)\.$/);
+  play(entry, [call("e3", "mcp_Convertigo.business_sequence_create"), plan(CRM2_PLAN.map(() => "completed")), say("The app is ready."), answer(nudge.requestId)]);
+  assert.equal(types(entry, "turn/end").length, 1);
+  assert.equal(entry.turnActive, false);
+});
+
+test("the error shapes of a tool call: JSON error object, exception with its stack, a one-line failure, in a code fence", () => {
+  const shapes = [
+    ['{"error":{"code":"-1","message":"There is no transaction named q_x in connector db."}}', "", "There is no transaction named q_x in connector db."],
+    ["TypeError: Cannot read properties of undefined (reading 'map')\n    at main (eval at <anonymous>:4:12)\n    at async eval (eval at <anonymous>:9:8)", "", "TypeError: Cannot read properties of undefined (reading 'map')"],
+    ["java.lang.IllegalStateException: connector is not started", "", "java.lang.IllegalStateException: connector is not started"],
+    ["mcp_Convertigo.ngx_page_create failed: invalid spec, nothing was created", "mcp_Convertigo.ngx_page_create", "invalid spec, nothing was created"],
+    ['```\nrun_typescript failed: {"name":"ReferenceError","message":"rows is not defined"}\n```', "run_typescript", "ReferenceError: rows is not defined"],
+    ["`run_typescript failed: SyntaxError: Unexpected token ')'`", "run_typescript", "SyntaxError: Unexpected token ')'"]
+  ];
+  let id = 60;
+  for (const [text, tool, error] of shapes) {
+    const entry = turn(++id);
+    play(entry, [plan(CRM2_PLAN), call("e1", "mcp_Convertigo.requestable_execute"), say(text), answer(id)]);
+    const nudge = types(entry, "turn/nudge")[0];
+    assert.ok(nudge, text);
+    assert.deepEqual([nudge.data.reason, nudge.data.tool, nudge.data.error], ["tool_error", tool, error], text);
+    if (!tool) {
+      assert.match(prompts(entry)[0].params.prompt[0].text, /^Note from the Agent Bridge: your last message was only the error of a tool call, not an answer/, text);
+    }
+  }
+});
+
+test("a finished plan, no plan, a turn without a tool call or an answer that explains the error ends the turn", () => {
+  const finished = turn(7);
+  play(finished, [plan(CRM2_PLAN.map(() => "completed")), call("e1"), say(CRM2_FINAL), answer(7)]);
+  assert.equal(types(finished, "turn/nudge").length, 0, "the plan is finished");
+  assert.equal(types(finished, "turn/end").length, 1);
+  const cancelled = turn(7);
+  play(cancelled, [plan(["completed", "cancelled"]), call("e1"), say(CRM2_FINAL), answer(7)]);
+  assert.equal(types(cancelled, "turn/nudge").length, 0, "a cancelled step is not left to do");
+  const noPlan = turn(7);
+  play(noPlan, [call("e1"), say(CRM2_FINAL), answer(7)]);
+  assert.equal(types(noPlan, "turn/nudge").length, 0, "no plan");
+  const noCall = turn(7);
+  play(noCall, [plan(CRM2_PLAN), say(CRM2_FINAL), answer(7)]);
+  assert.equal(types(noCall, "turn/nudge").length, 0, "no tool call in the turn: an answer to a question about the error");
+  let id = 80;
+  for (const text of [
+    "run_typescript failed: TypeError: x is undefined. Do you want me to retry?",
+    "The call failed: TypeError: Cannot read properties of undefined (reading 'slice'). I fixed the mapping and the page is ready.",
+    "Error: the project Shop does not exist, create it first.",
+    "TypeError: Cannot read properties of undefined (reading 'slice')\nThe dashboard sequence returns no counters: I stopped here.",
+    "task failed: the build did not finish",
+    "deploy failed: the server answered 503",
+    'Le résultat est {"error": false, "rows": 3}',
+    '{"error":{"message":"x"},"result":{"rows":3}}',
+    "L'appel run_typescript a échoué : TypeError: x is undefined. Je corrige le champ lu puis je reprends."
+  ]) {
+    const entry = turn(++id);
+    play(entry, [plan(CRM2_PLAN), call("e1"), say(text), answer(id)]);
+    assert.equal(types(entry, "turn/nudge").length, 0, text);
+    assert.equal(types(entry, "turn/end").length, 1, text);
+  }
+});
+
+test("a tool error shares the nudge limit and respects a stop, a refused write and a cancelled turn", () => {
+  const entry = turn(7);
+  play(entry, [plan(CRM2_PLAN), call("e1"), say(CRM2_FINAL), answer(7)]);
+  play(entry, [say("run_typescript"), answer(types(entry, "turn/nudge")[0].data.requestId)]);
+  play(entry, [say(CRM2_FINAL), answer(types(entry, "turn/nudge")[1].data.requestId)]);
+  assert.deepEqual(types(entry, "turn/nudge").map((n) => n.data.reason), ["tool_error", "tool_name"]);
+  assert.equal(types(entry, "turn/end").length, 1, "two nudges in the turn, then it ends");
+  const stopped = turn(7);
+  sandbox.pushEvent(stopped, "turn/interrupt_requested", { protocol: "acp" });
+  play(stopped, [plan(CRM2_PLAN), call("e1"), say(CRM2_FINAL), answer(7)]);
+  assert.equal(types(stopped, "turn/nudge").length, 0, "after the Stop button");
+  const refused = turn(7);
+  play(refused, [plan(CRM2_PLAN), call("e1", "mcp_Convertigo.nocode_form_edit"),
+    update({ sessionUpdate: "tool_call_update", toolCallId: "e1", status: "completed",
+      rawOutput: { type: "success", content: [{ type: "text", text: JSON.stringify({ status: "refused", saved: false, reason: "user" }) }] } }),
+    say(CRM2_FINAL), answer(7)]);
+  assert.equal(types(refused, "turn/nudge").length, 0, "a write the user refused");
+  const cancelled = turn(7);
+  play(cancelled, [plan(CRM2_PLAN), call("e1"), say(CRM2_FINAL), answer(7, "cancelled")]);
+  assert.equal(types(cancelled, "turn/nudge").length, 0, "a cancelled turn");
+});
+
 const runtimePythons = JSON.parse(process.env.VIBE_TEST_PYTHONS || '[]');
 for (const python of runtimePythons) {
   for (const profile of ['mistral', 'convertigo']) {

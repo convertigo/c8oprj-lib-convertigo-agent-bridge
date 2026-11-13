@@ -736,6 +736,15 @@ test. It validates the generated `mistral` and `convertigo` configurations and
 feeds their actual ACP serializers through the turn handler, entirely offline.
 The current matrix covers 3.0.4 and 3.1.0; it does not replace live model tests.
 
+## Vibe turns ending on a tool error
+
+`vibeToolErrorAnswerOf` recognizes a final message that is only the error of a tool call: `<tool> failed: <JSON
+error | exception | one short line>`, a JSON error object, or an exception line with only stack lines after it.
+The turn is nudged (reason `tool_error`, the shared two-nudge bound) only when it made a tool call and the last
+ACP plan update (`entry.planEntries`, the todo list Tigo shows) still has a pending or in-progress step. A finished
+plan, no plan, prose that explains the error, Stop, cancellation and refused writes end the turn as before.
+Run `node --test tests/vibe_turn_nudge.test.js` and the Bridge suite after changing it.
+
 ## Flow MCP failures and per-request journal measures
 
 Flow MCP errors keep `isError:true` for every provider. `mcpResultError` recognizes MCP envelopes in

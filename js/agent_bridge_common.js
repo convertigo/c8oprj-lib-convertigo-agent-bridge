@@ -12378,6 +12378,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         entry.turnWriteRefused = false;
         entry.turnInterrupted = false;
         entry.turnActed = false;
+        entry.turnToolCalls = 0;
         entry.gatewayBudgetRefusal = null;
         entry.gatewayBudgetProbed = false;
       }
@@ -13269,8 +13270,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // message that was only the name of a tool ("run_typescript", no call), and one on an announcement of its next step;
   // the user saw "run_typescript" as the answer and had to write "continue" (usage tests 30/10). The Bridge sends one
   // corrective prompt in the same turn, at most VIBE_TURN_NUDGES_MAX times: always for a bare tool name; for an
-  // announcement only when it is short, asks nothing, and no write was refused in the turn. Never after a stop or an
-  // error. Each nudge is a turn/nudge event and a line of the work log.
+  // announcement only when it is short, asks nothing, and no write was refused in the turn; for the error of a tool call
+  // only while the agent's plan is unfinished (see vibeToolErrorAnswerOf). Never after a stop or an error. Each nudge is
+  // a turn/nudge event and a line of the work log.
   var VIBE_TURN_NUDGES_MAX = 2;
   var VIBE_BUILTIN_TOOL_NAMES = ["run_typescript", "bash", "git_bash", "powershell", "read_file", "write_file", "edit",
     "grep", "web_fetch", "web_search", "task", "todo", "skill", "search_tool_functions", "process"];
@@ -13421,6 +13423,142 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return VIBE_ANNOUNCES.test(sentences[sentences.length - 1]);
   }
 
+  // A final message that is only the error of a tool call. mistral-large-4 ended a turn 8 minutes in, its plan at 3 of 7
+  // steps, on a message that only repeated an earlier failure of its code: 'run_typescript failed: {"name":"TypeError",
+  // "message":"Cannot read properties of undefined (reading \'slice\')","stack":"..."}' (Electron Studio, 13/11); the
+  // user had to write "continue". The whole message (backticks, code fences and enclosing quotes stripped) is one of:
+  // - a tool name, "failed:" (or "error:"), then a JSON object, an exception line with its stack, or (for a compound
+  //   name such as run_typescript, not a word such as task) one short line;
+  // - an error object in JSON: {name: "<X>Error", message} or {error: ...} with no result or data;
+  // - an exception line ("TypeError: ...", "java.lang.IllegalStateException: ..."; a bare "Error:" is prose too) and
+  //   only stack lines after it.
+  // Anything else (a sentence that explains the error to the user, a question) is an answer.
+  var VIBE_TOOL_FAILED = /^([A-Za-z][A-Za-z0-9_.\-]*)\s+(?:failed|error)\s*:\s*([\s\S]+)$/i;
+  var VIBE_EXCEPTION_LINE = /^(?:Uncaught\s+)?((?:[a-z][A-Za-z0-9_$]*\.)*[A-Z][A-Za-z0-9_$]*(?:Error|Exception))(?::\s*(.*))?$/;
+  var VIBE_STACK_LINE = /^(?:at\s+\S|\.\.\.\s*\d+\s+(?:more|common frames)|Caused by:\s|$)/;
+  var VIBE_TOOL_ERROR_MAX = 8000;
+
+  // An exception line and its stack lines only, or null.
+  function vibeExceptionOf(text) {
+    var lines = String(text).split(/\r?\n/);
+    var head = VIBE_EXCEPTION_LINE.exec(trim(lines[0]));
+    if (!head || (head[2] && head[2].indexOf("?") >= 0)) {
+      return null;
+    }
+    for (var i = 1; i < lines.length; i++) {
+      if (!VIBE_STACK_LINE.test(trim(lines[i]))) {
+        return null;
+      }
+    }
+    return trim(lines[0]);
+  }
+
+  // The error object of a JSON message, or null.
+  function vibeJsonErrorOf(text) {
+    if (!/^\{[\s\S]*\}$/.test(text)) {
+      return null;
+    }
+    var value;
+    try {
+      value = JSON.parse(text);
+    } catch (_notJsonError) {
+      return null;
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+    if (typeof value.name === "string" && /(?:Error|Exception)$/.test(value.name) && typeof value.message === "string") {
+      return value.name + ": " + value.message;
+    }
+    var error = value.error;
+    if (error && typeof value.result === "undefined" && typeof value.data === "undefined") {
+      if (typeof error === "string") {
+        return error;
+      }
+      if (typeof error === "object") {
+        var said = trim(error.message || error.details || error.code || "");
+        return said.length ? said : JSON.stringify(error);
+      }
+    }
+    return null;
+  }
+
+  function vibeKnownToolName(entry, name) {
+    var lower = String(name).toLowerCase();
+    if (VIBE_BUILTIN_TOOL_NAMES.indexOf(lower) >= 0 || (entry.seenToolNames && entry.seenToolNames[lower] === true)) {
+      return true;
+    }
+    return /^mcp_[A-Za-z0-9_]+(?:[.\-][A-Za-z0-9_]+)*$/i.test(name) || VIBE_MCP_TOOL_NAME.test(name);
+  }
+
+  // {tool, error}: the tool ("" when the message does not name it) and the error in one line, or null.
+  function vibeToolErrorAnswerOf(entry, text) {
+    var body = trim(String(text || "")).replace(/^```[A-Za-z0-9_\-]*\s*\n?|\n?\s*```$/g, "");
+    body = trim(body.replace(/^[`*\s]+|[`*\s]+$/g, ""));
+    // Quotes around the whole message only: an error ends on a quote of its own ("Unexpected token ')'").
+    var quoted = /^(["'])([\s\S]*)\1$/.exec(body);
+    body = quoted ? trim(quoted[2]) : body;
+    if (!body.length || body.length > VIBE_TOOL_ERROR_MAX) {
+      return null;
+    }
+    var tool = "", error = null;
+    var failed = VIBE_TOOL_FAILED.exec(body);
+    if (failed && vibeKnownToolName(entry, failed[1])) {
+      var rest = trim(failed[2]);
+      tool = failed[1];
+      error = vibeJsonErrorOf(rest) || vibeExceptionOf(rest);
+      if (error === null && /^\{[\s\S]*\}$/.test(rest)) {
+        try {
+          JSON.parse(rest);
+          error = rest;
+        } catch (_notJsonFailure) {}
+      }
+      if (error === null && /[_.]/.test(tool) && rest.length <= 400 && !/[\r\n?]/.test(rest)) {
+        error = rest;
+      }
+    } else if (!failed) {
+      error = vibeJsonErrorOf(body) || vibeExceptionOf(body);
+    }
+    if (error === null) {
+      return null;
+    }
+    error = trim(String(error).replace(/\s+/g, " ").replace(/`/g, "'"));
+    return { tool: tool, error: error.length > 300 ? error.substring(0, 300) + "..." : error };
+  }
+
+  // The plan the agent last sent (ACP plan update, Vibe's todo list, the plan Tigo shows): {done, total, current} while a
+  // step is pending or in progress, else null. A cancelled step counts as finished; a step without text is not shown.
+  function vibeUnfinishedPlan(entry) {
+    var entries = entry.planEntries;
+    if (!entries || typeof entries.length !== "number" || !entries.length) {
+      return null;
+    }
+    var done = 0, open = 0, total = 0, current = "", next = "";
+    for (var i = 0; i < entries.length; i++) {
+      var step = entries[i] || {};
+      var status = trim(step.status || "").toLowerCase();
+      var content = trim(step.content || step.title || "");
+      if (!content.length) {
+        continue;
+      }
+      total++;
+      if (status === "completed") {
+        done++;
+      } else if (status === "in_progress") {
+        open++;
+        current = current || content;
+      } else if (status === "pending") {
+        open++;
+        next = next || content;
+      }
+    }
+    if (!open) {
+      return null;
+    }
+    current = current || next;
+    return { done: done, total: total, current: current.length > 160 ? current.substring(0, 160) + "..." : current };
+  }
+
   function vibeTurnEndNudge(entry, result) {
     result = result || {};
     var stopReason = trim(result.stopReason || result.stop_reason || "");
@@ -13433,6 +13571,13 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     if (printed) {
       if (printed.reason === "printed_call" && Number(entry.turnPrintedCallRetries || 0) >= vibePrintedCallRetryLimit()) { return null; }
       return { reason: printed.reason, tool: printed.tool, text: text };
+    }
+    // The error of a tool call only while the agent works through its plan: a turn that made no call, or a plan that is
+    // finished, ends as the agent chose.
+    var failure = text.length && Number(entry.turnToolCalls || 0) > 0 ? vibeToolErrorAnswerOf(entry, text) : null;
+    var plan = failure !== null ? vibeUnfinishedPlan(entry) : null;
+    if (plan !== null) {
+      return { reason: "tool_error", tool: failure.tool, error: failure.error, plan: plan, text: text };
     }
     // An announcement only after the turn acted: a plan or an explanation asked by the user ends on "ensuite, je
     // créerai..." with no call, or after reads only, and a nudge would push the agent into changing the project.
@@ -13451,6 +13596,11 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       ? "Note from the Agent Bridge: your last message was only the name of the tool `" + nudge.tool + "`, with no call to it, so your turn ended. Call the tool now, or give your final answer."
       : nudge.reason === "printed_call"
       ? "Note from the Agent Bridge: your last message wrote a call to the tool `" + nudge.tool + "` as text instead of making it, so it was not executed. Emit it as a real tool call, then continue."
+      : nudge.reason === "tool_error"
+      ? "Note from the Agent Bridge: your last message was only the error of " + (nudge.tool ? "a call to the tool `" + nudge.tool + "`" : "a tool call") +
+        ", not an answer, so your turn ended with your plan unfinished (" + nudge.plan.done + " of " + nudge.plan.total + " steps done" +
+        (nudge.plan.current ? "; current step: " + nudge.plan.current : "") + "). That tool call failed with this error: `" + nudge.error +
+        "`. Fix the call (for example a field your code read from a tool result that is not there) and continue the plan. If you cannot go on, give your final answer and say what blocks you."
       : "Note from the Agent Bridge: your last message announced a next step but made no tool call, so your turn ended. If you meant to do it, do it now with a tool call. If the user only asked for a plan or an explanation, or you need their answer, reply with one short closing sentence instead.";
     var nudged;
     try {
@@ -13474,12 +13624,17 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       endedRequestId: message.id,
       requestId: nudged.id,
       text: printedCall ? "" : said,
-      textLength: nudge.text.length
+      textLength: nudge.text.length,
+      error: nudge.error || "",
+      plan: nudge.plan ? { done: nudge.plan.done, total: nudge.plan.total } : null
     });
     var line = nudge.reason === "tool_name"
       ? "Agent Bridge: the agent ended its turn on the tool name `" + nudge.tool + "` without calling it; it was asked to go on (" + count + "/" + max + ")."
       : nudge.reason === "printed_call"
       ? "Agent Bridge: the agent ended its turn on a call to `" + nudge.tool + "` written as text; it was asked to make it (" + count + "/" + max + ")."
+      : nudge.reason === "tool_error"
+      ? "Agent Bridge: the agent ended its turn on the error of " + (nudge.tool ? "`" + nudge.tool + "`" : "a tool call") + " with its plan at " +
+        nudge.plan.done + "/" + nudge.plan.total + "; it was asked to fix the call and go on (" + count + "/" + max + ")."
       : "Agent Bridge: the agent ended its turn announcing a next step without doing it; it was asked to go on (" + count + "/" + max + ").";
     pushEvent(entry, "progress/message", { text: line, nudge: nudge.reason });
     try { log.info("(lib_ConvertigoAgentBridge) " + line + " Handle " + entry.handle + (printedCall ? "" : ", ended text: " + said)); } catch (_ignoreNudgeLog) {}
@@ -13629,6 +13784,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       entry.turnFinalText = "";
       entry.turnFinalTextOverflow = false;
       rememberVibeToolName(entry, eventData.title);
+      entry.turnToolCalls = Number(entry.turnToolCalls || 0) + 1;
       if (vibeToolActs(eventData.title)) {
         entry.turnActed = true;
       }
@@ -13679,6 +13835,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       return;
     }
     if (kind === "plan") {
+      // The agent's plan as it last sent it: a Vibe turn that ends on a tool error while a step is open is nudged.
+      var planEntries = update.entries || (update.plan && update.plan.entries) || null;
+      entry.planEntries = planEntries && typeof planEntries.length === "number" ? planEntries : null;
       pushEvent(entry, "plan/update", eventData);
       return;
     }
