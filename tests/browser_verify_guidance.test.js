@@ -1,5 +1,5 @@
 // The agent instructions send functional and visual browser proofs to the browser-verify sub-agent of the Convertigo
-// MCP; Flow sessions, which do not use that MCP surface, keep the scripted Playwright proof.
+// MCP; Flow sessions, which do not use that MCP surface, prove with the dedicated Playwright tools.
 // node tests/browser_verify_guidance.test.js
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -15,7 +15,7 @@ for (const provider of ['vibe', 'codex', 'claude']) {
   assert.match(text, /it never edits the project/, provider);
   assert.match(text, /verify the affected paths again/, provider);
   assert.match(text, /call it again with the id alone \(`runId`, or `verificationId` for `browser-verify`\) until the report comes/, provider);
-  assert.doesNotMatch(text, /For a functional proof \(a login/, provider + ': the scripted proof is only the fallback');
+  assert.doesNotMatch(text, /For a functional proof \(a login/, provider + ': the Flow proof is not theirs');
   assert.match(text, /Hand each build lot .* to a constructor sub-agent, `subagent-run` with `profile:"constructor"` and `inputs.project`/, provider);
 }
 // A Studio without the Flow capability falls back to the generalist profile: pretend it has it.

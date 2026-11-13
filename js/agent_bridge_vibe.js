@@ -116,6 +116,11 @@
         if (expectedFlowEndpoint.length) {
           intentFields.flowEndpoint = expectedFlowEndpoint;
         }
+        // Only a home with the Playwright server records the tools it leaves out: a home written before has them all
+        // and is written again once.
+        if (expectedPlaywright !== null) {
+          intentFields.playwrightDisabledTools = PLAYWRIGHT_MCP_EXCLUDED_TOOLS.join(",");
+        }
         var expectedIntent = vibeConfigIntent(intentFields);
         var recordedIntent = readVibeConfigIntent(setup.vibeHome);
         // The file-derived checks stay: they catch a config.toml deleted or hand-edited behind

@@ -147,6 +147,16 @@ same context.
   instead of the Studio JxBrowser, and a Codex or Vibe turn on it is prefixed by
   `withStudioAgentBrowserPrompt`, since their Studio homes take the viewer rules
   from the Convertigo skills. Run `node --test tests/electron_agent_browser.test.js`.
+- No managed runtime offers `browser_run_code_unsafe` (`PLAYWRIGHT_MCP_EXCLUDED_TOOLS`):
+  agents wrote whole Playwright programs with it instead of the dedicated tools.
+  The provider runtime passes `--disallowedTools mcp__playwright__browser_run_code_unsafe`
+  (`claudeCommand`); Codex and Vibe write `disabled_tools = ["browser_run_code_unsafe"]`
+  in the `playwright` server of `config.toml` (a Vibe home records it in its
+  intent, `playwrightDisabledTools`, so a home written before is written again
+  once). Proofs go to `browser-verify` (low-code) or to the dedicated tools
+  (navigate, snapshot, fill_form, click, type, evaluate, take_screenshot) for
+  Flow and without a verifier; `browser_evaluate` stays. Never recommend the
+  excluded tool in an instruction text. Run `node --test tests/playwright_tool_exclusion.test.js`.
 - Each conversation has a temporary folder for the agent's payloads, scripts and
   notes: `<cwd>/.agent-tmp/<conversation>` (`<session folder>/.agent-tmp` for a
   No Code Vibe session, inside what its sandbox writes). The start of each

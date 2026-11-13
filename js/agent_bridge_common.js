@@ -4244,6 +4244,15 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return agentCapabilityProfile({ agentProfile: profile }).label;
   }
 
+  // The tools of the managed Playwright MCP the agents are not offered. browser_run_code_unsafe runs any script in the
+  // Playwright MCP process: agents wrote whole Playwright programs with it (a Mistral Large 4 turn through Vibe called it
+  // again and again) instead of the dedicated tools the instructions name. Each runtime leaves it out of the server's
+  // tool list: the provider runtime with --disallowedTools (claudeCommand), Codex and Vibe with the disabled_tools of the
+  // server in config.toml (patchCodexPlaywrightMcpConfigText, writeLocalVibeConfig). browser_evaluate stays.
+  var PLAYWRIGHT_MCP_EXCLUDED_TOOLS = ["browser_run_code_unsafe"];
+  // How a proof drives the viewer without a verifier sub-agent (Flow, a session without browser-verify).
+  var PLAYWRIGHT_DEDICATED_PROOF_TOOLS = "the dedicated Playwright tools: `browser_navigate` to the page, `browser_snapshot` for the element refs, `browser_fill_form` to fill a whole form in one call, `browser_click`, `browser_type`, `browser_evaluate` to read several values in one call, and `browser_take_screenshot`";
+
   // The folder where an agent writes its temporary files (payloads, scripts, notes): one per conversation, under its
   // working directory, created by the Bridge when it starts the conversation's process (prepareAgentTempDir) and named
   // to the agent at the start of each turn (withAgentTempDirPrompt). A Studio session works in the workspace root, where
@@ -4362,13 +4371,14 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       isFlow ? "- Import generated or supplied images with `frontend-svelte-asset-import`, use its returned `resources/...` URL unchanged, and never copy assets with shell commands or into generated static folders." : "",
       isFlow ? "" : "- If `mobile-builder-open(stateOnly=true)` returns `status:\"stopped\"`, immediately call it once with `stateOnly=false, wait=false`; do not spend a timeout polling an inactive builder.",
       agentBrowser ? STUDIO_AGENT_BROWSER_PAGE_RULE : "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
-      "- Playwright MCP files live in `.playwright-mcp/` under your working directory: pass `filename:\".playwright-mcp/<name>.png\"` to `browser_take_screenshot` (a bare file name lands in the working directory itself); to reload the viewer, call `browser_navigate` with its URL, never `location.reload()` inside `browser_evaluate` (the navigation destroys the evaluation context); and a file the viewer downloads (an export) is saved without any dialog in `.playwright-mcp/downloads/`, where you can read it. Playwright does not manage the downloads of the attached Studio browser, so `page.waitForEvent('download')` never fires there: click, then wait for the file to appear in `.playwright-mcp/downloads/` (poll its listing with a bounded wait, newest file first) and read it. Playwright MCP only reads files inside your working directory: write `browser_run_code_unsafe` scripts in `.playwright-mcp/scripts/` and pass that relative path.",
+      "- Playwright MCP files live in `.playwright-mcp/` under your working directory: pass `filename:\".playwright-mcp/<name>.png\"` to `browser_take_screenshot` (a bare file name lands in the working directory itself); to reload the viewer, call `browser_navigate` with its URL, never `location.reload()` inside `browser_evaluate` (the navigation destroys the evaluation context); and a file the viewer downloads (an export) is saved without any dialog in `.playwright-mcp/downloads/`, where you can read it. Playwright does not manage the downloads of the attached Studio browser, so `page.waitForEvent('download')` never fires there: click, then wait for the file to appear in `.playwright-mcp/downloads/` (poll its listing with a bounded wait, newest file first) and read it. Playwright MCP only reads files inside your working directory: a file to upload with `browser_file_upload` goes in the temporary folder of this conversation.",
       AGENT_TEMP_DIR_RULE,
       "- For viewer automation, use the Playwright MCP tools exposed by the managed Codex configuration. Do not run ad hoc shell scripts with `require('playwright')`, and do not launch a separate browser unless explicitly needed.",
       agentBrowser ? STUDIO_AGENT_BROWSER_READY_RULE : (isFlow ? "- Use Playwright only after the capability pack reports that the dev viewer is ready and the managed browser target shows that viewer." : "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`."),
       "- Known-good fast check: `playwright.browser_tabs({action:\"list\"})`, then `playwright.browser_find({text:\"<visible text>\"})`; use `playwright.browser_evaluate({function:\"...\"})` only for DOM state or timing. Do not probe unsupported browser features first.",
-      // Flow sessions do not use the legacy Convertigo MCP surface, so browser-verify is not theirs: they keep the scripted proof.
-      isFlow ? "- For a functional proof (a login, a path through pages, a form, the values to check), do not drive the page one click or one evaluate per tool call: each call costs a full model step. Write the whole scenario as one Playwright script in a workspace file (`async (page) => { ...; return results; }`: navigate, click, fill, read the values, `page.screenshot({path:\".playwright-mcp/<page>.png\"})` at each page) and run it with one `playwright.browser_run_code_unsafe({filename:\"<file>\"})` call; keep each script under 45 s, one script per path, and fix and rerun the script instead of continuing by hand. Then check the screenshots (with `image-describe` when your model cannot read images)." : "- Delegate each functional and visual browser proof (a login, a path through pages, a form, the values and the look to check) to a verifier sub-agent, the Convertigo MCP tool `subagent-run` with `profile:\"verifier\"` (or its shortcut `browser-verify`), one run per lot: `task` = what to prove, and in `inputs`: `url` = `viewerHomeUrl`, `paths` = one plain-language path per user journey with the values to type and the result to read, `checks` = the acceptance criteria with the exact expected texts, `hints` = demo accounts and expected values. A call answers within about 50 s: on `status:\"running\"`, call it again with the id alone (`runId`, or `verificationId` for `browser-verify`) until the report comes. Its vision sub-agent drives the same viewer and returns each check with its evidence, the visual defects (glued texts, overlaps, cut text, missing accents) and its screenshots; it never edits the project. Fix what it reports and verify the affected paths again; check a doubtful finding with `image-describe` or one targeted Playwright call. Without `browser-verify`, do not drive the page one call per click: script each path as one `playwright.browser_run_code_unsafe({filename:\"<file>\"})` call.",
+      // Flow sessions do not use the legacy Convertigo MCP surface, so browser-verify is not theirs: they prove with the
+      // dedicated Playwright tools.
+      isFlow ? "- For a functional proof (a login, a path through pages, a form, the values to check), drive the viewer with " + PLAYWRIGHT_DEDICATED_PROOF_TOOLS + " with `filename:\".playwright-mcp/<page>.png\"` at each page. Each call costs a full model step: fill a form with one `browser_fill_form` and read the values of a page with one `browser_evaluate`, not one call per field or value. Then check the screenshots (with `image-describe` when your model cannot read images)." : "- Delegate each functional and visual browser proof (a login, a path through pages, a form, the values and the look to check) to a verifier sub-agent, the Convertigo MCP tool `subagent-run` with `profile:\"verifier\"` (or its shortcut `browser-verify`), one run per lot: `task` = what to prove, and in `inputs`: `url` = `viewerHomeUrl`, `paths` = one plain-language path per user journey with the values to type and the result to read, `checks` = the acceptance criteria with the exact expected texts, `hints` = demo accounts and expected values. A call answers within about 50 s: on `status:\"running\"`, call it again with the id alone (`runId`, or `verificationId` for `browser-verify`) until the report comes. Its vision sub-agent drives the same viewer and returns each check with its evidence, the visual defects (glued texts, overlaps, cut text, missing accents) and its screenshots; it never edits the project. Fix what it reports and verify the affected paths again; check a doubtful finding with `image-describe` or one targeted Playwright call. Without `browser-verify`, prove each path with " + PLAYWRIGHT_DEDICATED_PROOF_TOOLS + "; fill a form with one `browser_fill_form` and read the values of a page with one `browser_evaluate`, not one call per field or value.",
       agentBrowser ? "" : (isFlow ? "- If the browser target is `about:blank`, use the capability pack readiness contract before browser proof." : "- If the browser target is `about:blank` while builder status is `building`, poll `mobile-builder-open(stateOnly=true, wait=true)` before Playwright. If status is `stopped`, launch asynchronously instead."),
       agentBrowser ? STUDIO_AGENT_BROWSER_FAILURE_RULE : (isFlow ? "- If Playwright is unavailable, disabled, still on `about:blank`, or attached to another endpoint, report the host configuration problem instead of bypassing it." : "- If `mobile-builder-open` reports `browserControlReady:true` but the Playwright/browser-control MCP tools are unavailable, disabled, still on `about:blank`, or attached to another endpoint, report the configuration problem to the user instead of bypassing it with Node scripts, raw CDP WebSocket code, or a new browser."),
       "- If a prompt says Convertigo runtime reveal mode is enabled, pass `reveal:true` only on supported Convertigo mutation/viewer tools that should visibly move Studio or No Code Studio; do not add it to read-only calls.",
@@ -5105,6 +5115,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     lines.push('command = "' + tomlEscape(codexPlaywrightMcpCommand(options, installDir)) + '"');
     lines.push("args = " + tomlArray(codexPlaywrightMcpArgs(options, installDir)));
     lines.push("startup_timeout_sec = 30");
+    // the tools of the server Codex does not offer the model (PLAYWRIGHT_MCP_EXCLUDED_TOOLS)
+    lines.push("disabled_tools = " + tomlArray(PLAYWRIGHT_MCP_EXCLUDED_TOOLS));
     lines.push("enabled = " + (enabled ? "true" : "false"));
     var nextText = lines.join("\n").replace(/\n+$/, "\n");
     return {
@@ -9113,6 +9125,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     flowEndpoint: true,
     noLog: true,
     playwrightCommand: true,
+    playwrightDisabledTools: true,
     playwrightEndpoint: true,
     revealMode: true,
     viewerDebugPort: true,
@@ -9548,6 +9561,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         'command = ' + tomlArray([playwright.command]),
         'args = ' + tomlArray(playwright.args),
         'startup_timeout_sec = 30.0',
+        '# the tools of the server Vibe does not offer the model (PLAYWRIGHT_MCP_EXCLUDED_TOOLS)',
+        'disabled_tools = ' + tomlArray(PLAYWRIGHT_MCP_EXCLUDED_TOOLS),
         '',
         '[mcp_servers.env]',
         'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"',
