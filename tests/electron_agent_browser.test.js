@@ -184,10 +184,11 @@ test("each runtime launches its Playwright MCP on the agent browser", () => {
 });
 
 const JXBROWSER_PAGE = /Studio JxBrowser exposes one existing visible page over CDP/;
-const AGENT_BROWSER_PAGE = /The Studio agent browser, a dedicated browser window of the Electron Studio, exposes ONE existing page over CDP, `about:blank` until you navigate it\. Reuse that page: navigate it with the Playwright `browser_navigate` tool to the viewer URL \(the `viewerHomeUrl`, else `viewerBaseUrl`, that `mobile-builder-open` returns/;
+const AGENT_BROWSER_PAGE = /The Studio agent browser, a dedicated browser window of the Electron Studio, exposes ONE existing page over CDP, `about:blank` until you navigate it\. Reuse that page: navigate it with the Playwright `browser_navigate` tool to the viewer URL \(the `viewerHomeUrl` that `mobile-builder-open` returns, never its `viewerBaseUrl`;/;
 
 function assertAgentBrowserWording(text, label) {
   assert.match(text, AGENT_BROWSER_PAGE, label);
+  assert.doesNotMatch(text, /else `viewerBaseUrl`/, label);
   assert.match(text, /Do not open a new tab or page \(not supported\), do not close tabs or the browser, never call `Browser\.close`, and do not drive it with ad hoc `require\('playwright'\)` scripts or raw CDP/, label);
   assert.match(text, /its `browserControlReady:true` only says the agent browser answers, and `browserDebugPortMatched` is always true there/, label);
   assert.doesNotMatch(text, /JxBrowser (exposes|viewer over CDP)/, label);
