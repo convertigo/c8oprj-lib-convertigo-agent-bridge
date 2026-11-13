@@ -1415,6 +1415,7 @@
       agentBrowser ? STUDIO_AGENT_BROWSER_PAGE_RULE : "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
       // The absolute path: "under your working directory" was read as the Studio workspace, where the screenshot was not (run 10).
       "- Playwright MCP files live in `" + claudePlaywrightOutputDir(options) + "`: pass `filename:\"" + claudePlaywrightOutputDir(options) + "/<name>.png\"` to `browser_take_screenshot` (a bare file name lands in the working directory itself) and read it at that path; to reload the viewer, call `browser_navigate` with its URL, never `location.reload()` inside `browser_evaluate`; and a file the viewer downloads (an export) is saved without any dialog in `" + claudePlaywrightOutputDir(options) + "/downloads/`. Playwright does not manage the downloads of the attached Studio browser, so `page.waitForEvent('download')` never fires there: click, then wait for the file to appear in `" + claudePlaywrightOutputDir(options) + "/downloads/` (poll its listing with a bounded wait, newest file first) and read it. Playwright MCP only reads files inside `" + claudeWorkingDir(options) + "`: write `browser_run_code_unsafe` scripts in `" + claudePlaywrightOutputDir(options) + "/scripts/` and pass that path.",
+      AGENT_TEMP_DIR_RULE,
       agentBrowser ? STUDIO_AGENT_BROWSER_FAILURE_RULE + " If no viewer automation is configured at all, report the result as implemented but functionally unvalidated." : "- If the `playwright` MCP server is unavailable, disabled, still on `about:blank`, or attached to another endpoint after readiness, report the host configuration problem to the user instead of bypassing it; if no viewer automation is configured at all, report the result as implemented but functionally unvalidated.",
       "- If `mobile-builder-open(stateOnly=true)` returns `status:\"stopped\"`, immediately call it once with `stateOnly=false, wait=false`; do not spend a timeout polling an inactive builder.",
       "- If a prompt says Convertigo runtime reveal mode is enabled, pass `reveal:true` only on supported Convertigo mutation/viewer tools; do not add it to read-only calls.",
@@ -1465,6 +1466,7 @@
       agentBrowser ? STUDIO_AGENT_BROWSER_READY_RULE : "- Use Playwright only after `frontend-svelte-action` with `actionId:\"dev.open\"` reports `browserControlReady:true`.",
       agentBrowser ? STUDIO_AGENT_BROWSER_PAGE_RULE : "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
       "- Playwright MCP files live in `" + claudePlaywrightOutputDir(options) + "`: screenshots go there (read them at that path), and a file the viewer downloads (an export) is saved without any dialog in `" + claudePlaywrightOutputDir(options) + "/downloads/`. Playwright does not manage the downloads of the attached Studio browser, so `page.waitForEvent('download')` never fires there: click, then wait for the file to appear in `" + claudePlaywrightOutputDir(options) + "/downloads/` (poll its listing, newest file first) and read it. Playwright MCP only reads files inside `" + claudeWorkingDir(options) + "`: write `browser_run_code_unsafe` scripts in `" + claudePlaywrightOutputDir(options) + "/scripts/` and pass that path.",
+      AGENT_TEMP_DIR_RULE,
       agentBrowser ? STUDIO_AGENT_BROWSER_FAILURE_RULE + " If no viewer automation is configured at all, report the result as implemented but functionally unvalidated." : "- If the `playwright` MCP server is unavailable, disabled, still on `about:blank`, or attached to another endpoint after readiness, report the host configuration problem to the user instead of bypassing it; if no viewer automation is configured at all, report the result as implemented but functionally unvalidated.",
       "",
       "## Working rules",
@@ -2315,6 +2317,7 @@
     entry.assistantSurface = trim(options.assistantSurface);
     entry.userId = trim(options.userId);
     entry.conversationId = trim(options.conversationId || options.threadid || (setup.setup.home && setup.setup.home.conversationId));
+    prepareAgentTempDir(entry, entry.conversationId || handle, options, false);
     entry.projectId = trim(options.projectId || options.projectName || options.targetProject || (setup.setup.home && setup.setup.home.projectId));
     entry.nocodeMcpTokenHandle = trim(options.nocodeMcpTokenHandle || options.noCodeMcpTokenHandle || options.mcpBearerTokenHandle);
     entry.noCodeMcpTokenHandle = trim(options.noCodeMcpTokenHandle);
@@ -2579,6 +2582,7 @@
     if (menuCommand.length) {
       promptText = trim(promptText);
     } else {
+      promptText = withAgentTempDirPrompt(promptText, entry.agentTempDir);
       promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
     }
     var cursor = entry.nextIndex;

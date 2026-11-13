@@ -2231,6 +2231,7 @@
     entry.assistantSurface = trim(options.assistantSurface);
     entry.userId = trim(options.userId);
     entry.conversationId = trim(options.conversationId || options.threadid || (setup.setup.home && setup.setup.home.conversationId));
+    prepareAgentTempDir(entry, entry.conversationId || handle, options, false);
     entry.projectId = trim(options.projectId || options.projectName || options.targetProject || (setup.setup.home && setup.setup.home.projectId));
     entry.nocodeMcpTokenHandle = trim(options.nocodeMcpTokenHandle || options.noCodeMcpTokenHandle || options.mcpBearerTokenHandle);
     entry.noCodeMcpTokenHandle = trim(options.noCodeMcpTokenHandle);
@@ -2572,6 +2573,7 @@
       entry.codexAppServerReasoningSummaryPending = {};
       entry.codexAppServerStreamedItems = {};
       entry.codexAppServerItemDeltas = {};
+      promptText = withAgentTempDirPrompt(promptText, entry.agentTempDir);
       promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
       promptText = withStudioAgentBrowserPrompt(promptText, entry.playwrightCdpEndpoint);
       if (!trim(entry.codexThreadId || entry.sessionId).length) {
@@ -2635,6 +2637,7 @@
     entry.lastCodexProgressMessage = "";
     entry.lastCodexAnswerChunk = "";
     entry.codexTurnEnded = false;
+    promptText = withAgentTempDirPrompt(promptText, entry.agentTempDir);
     promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
     promptText = withStudioAgentBrowserPrompt(promptText, entry.playwrightCdpEndpoint);
     entry.command = codexCommand(entry.codexPath || "codex", entry, options, promptText);

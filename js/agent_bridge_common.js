@@ -3775,6 +3775,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       "- Vibe has no MCP `resources/read`: read a guide with `flow-resource-get` and its `uri` (`flow://guide/<name>`, `flow://lib/<library>/<guide>`); the text is in `structuredContent.text`.",
       "- Provide model credentials through the process environment; do not copy secrets into this isolated home.",
       "- Never hand-edit Convertigo YAML or generated files: change source objects through the MCP tools.",
+      AGENT_TEMP_DIR_RULE,
       "",
       "## After a context compaction (Convertigo Flow)",
       "",
@@ -4243,6 +4244,54 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return agentCapabilityProfile({ agentProfile: profile }).label;
   }
 
+  // The folder where an agent writes its temporary files (payloads, scripts, notes): one per conversation, under its
+  // working directory, created by the Bridge when it starts the conversation's process (prepareAgentTempDir) and named
+  // to the agent at the start of each turn (withAgentTempDirPrompt). A Studio session works in the workspace root, where
+  // an agent had left such files (`_mcp_payloads/`); the working directory is also where every runtime writes (a
+  // confined No Code session: its own folder) and the only place Playwright MCP reads a file from (browser_file_upload).
+  // The home of a runtime is often shared by the conversations of a user, so its instructions give the rule and each
+  // turn gives the path.
+  var AGENT_TEMP_DIR_NAME = ".agent-tmp";
+  var AGENT_TEMP_DIR_TURN_MARKER = "Temporary folder of this conversation";
+  var AGENT_TEMP_DIR_RULE = "- When you need a temporary file (a payload, a script, a note), write it in the temporary folder of this conversation, which each turn names (`" + AGENT_TEMP_DIR_TURN_MARKER + ": <path>`), never at the workspace or project root.";
+
+  // <cwd>/.agent-tmp/<conversation>, or <cwd>/.agent-tmp when the working directory belongs to the conversation alone
+  // (a No Code Vibe session folder); "" without a working directory.
+  function agentTempDir(cwd, conversationKey, ownFolder) {
+    var base = trim(cwd);
+    if (!base.length) {
+      return "";
+    }
+    var folder = childPath(base, AGENT_TEMP_DIR_NAME);
+    return ownFolder === true ? folder : childPath(folder, stableId("conversation", trim(conversationKey) || "session"));
+  }
+
+  // Sets entry.agentTempDir and creates the folder, but for a settings probe, which never gets a turn.
+  function prepareAgentTempDir(entry, conversationKey, options, ownFolder) {
+    entry.agentTempDir = agentTempDir(entry.cwd, conversationKey, ownFolder);
+    if (entry.agentTempDir.length && !boolValue(options && options.settingsProbe, false)) {
+      try {
+        ensureDirectory(new File(entry.agentTempDir));
+      } catch (_ignoreTempDirAtStart) {}
+    }
+    return entry.agentTempDir;
+  }
+
+  // The turn's line naming the folder, created again if it went away; none when it cannot be created.
+  function withAgentTempDirPrompt(promptText, tempDir) {
+    var text = String(promptText || "");
+    var dir = trim(tempDir);
+    if (!dir.length || text.indexOf(AGENT_TEMP_DIR_TURN_MARKER) !== -1) {
+      return text;
+    }
+    try {
+      ensureDirectory(new File(dir));
+    } catch (_ignoreTempDirAtTurn) {
+      return text;
+    }
+    return AGENT_TEMP_DIR_TURN_MARKER + ": `" + dir + "` (write temporary files there: payloads, scripts, notes; never at the workspace or project root).\n\n" + text;
+  }
+
   // The viewer rules of the agent browser of the Electron Studio (studioAgentBrowserCdpPort), in place of the Studio
   // JxBrowser ones: a dedicated browser window whose one page stays on about:blank until the agent navigates it (the
   // Studio does not show the viewer there), where a new page cannot be opened (no Target.createTarget) and where
@@ -4287,6 +4336,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         "Use only the no-code tools that skill allows: nocode-app-create, nocode-form-*, nocode-baserow-*, and nocode-report-create when it is listed. A No Code session has no log-view and no other Convertigo tool.",
         "For a new application over business records (a list, an entry form, a detail, a dashboard), call nocode-app-create once with the business spec before anything else, then change its result with nocode-form-edit.",
         "Never fall back to requestable-execute, databaseobject-*, project tools, batch wrappers, shell, raw HTTP, or filesystem access to read or modify forms.",
+        AGENT_TEMP_DIR_RULE.replace(/^- /, ""),
         "Read an existing form with nocode-form-get using its document id before auditing, proposing improvements, or editing. Tool names may use underscores instead of hyphens.",
         "Use the current form/page/element context as the default target. Never infer content from the form name alone. Read results describe the saved version, not unsaved editor changes.",
         "A review or request for suggestions does not authorize mutations. Never use an empty edit/update as a read operation.",
@@ -4313,6 +4363,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       isFlow ? "" : "- If `mobile-builder-open(stateOnly=true)` returns `status:\"stopped\"`, immediately call it once with `stateOnly=false, wait=false`; do not spend a timeout polling an inactive builder.",
       agentBrowser ? STUDIO_AGENT_BROWSER_PAGE_RULE : "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
       "- Playwright MCP files live in `.playwright-mcp/` under your working directory: pass `filename:\".playwright-mcp/<name>.png\"` to `browser_take_screenshot` (a bare file name lands in the working directory itself); to reload the viewer, call `browser_navigate` with its URL, never `location.reload()` inside `browser_evaluate` (the navigation destroys the evaluation context); and a file the viewer downloads (an export) is saved without any dialog in `.playwright-mcp/downloads/`, where you can read it. Playwright does not manage the downloads of the attached Studio browser, so `page.waitForEvent('download')` never fires there: click, then wait for the file to appear in `.playwright-mcp/downloads/` (poll its listing with a bounded wait, newest file first) and read it. Playwright MCP only reads files inside your working directory: write `browser_run_code_unsafe` scripts in `.playwright-mcp/scripts/` and pass that relative path.",
+      AGENT_TEMP_DIR_RULE,
       "- For viewer automation, use the Playwright MCP tools exposed by the managed Codex configuration. Do not run ad hoc shell scripts with `require('playwright')`, and do not launch a separate browser unless explicitly needed.",
       agentBrowser ? STUDIO_AGENT_BROWSER_READY_RULE : (isFlow ? "- Use Playwright only after the capability pack reports that the dev viewer is ready and the managed browser target shows that viewer." : "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`."),
       "- Known-good fast check: `playwright.browser_tabs({action:\"list\"})`, then `playwright.browser_find({text:\"<visible text>\"})`; use `playwright.browser_evaluate({function:\"...\"})` only for DOM state or timing. Do not probe unsupported browser features first.",

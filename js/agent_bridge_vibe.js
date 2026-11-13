@@ -696,6 +696,8 @@
     entry.playwrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
     entry.viewerCdpEndpoint = trim(options.viewerCdpEndpoint || entry.playwrightCdpEndpoint);
     entry.playwrightMcpEnabled = trim(setup.setup.config && setup.setup.config.selected && setup.setup.config.selected.playwrightEndpoint).length > 0;
+    // a No Code session folder belongs to its conversation alone: its temporary folder is <folder>/.agent-tmp
+    prepareAgentTempDir(entry, trim(options.conversationId) || handle, options, noCodeSandbox !== null);
     registry.put(handle, entry);
     try {
       enforceUserLimit(registry, entry);
@@ -1108,6 +1110,7 @@
     if (!trim(promptText).length) {
       return { ok: false, status: "error", handle: handle, error: "prompt is required", timestamp: now() };
     }
+    promptText = withAgentTempDirPrompt(promptText, entry.agentTempDir);
     promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
     promptText = withStudioAgentBrowserPrompt(promptText, entry.playwrightMcpEnabled === true ? entry.playwrightCdpEndpoint : "");
     var messageId = trim(options.messageId);

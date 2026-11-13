@@ -147,6 +147,16 @@ same context.
   instead of the Studio JxBrowser, and a Codex or Vibe turn on it is prefixed by
   `withStudioAgentBrowserPrompt`, since their Studio homes take the viewer rules
   from the Convertigo skills. Run `node --test tests/electron_agent_browser.test.js`.
+- Each conversation has a temporary folder for the agent's payloads, scripts and
+  notes: `<cwd>/.agent-tmp/<conversation>` (`<session folder>/.agent-tmp` for a
+  No Code Vibe session, inside what its sandbox writes). The start of each
+  runtime creates it (`prepareAgentTempDir`, not for a settings probe), each
+  turn names it first (`withAgentTempDirPrompt`, created again if it went away),
+  and the instructions say to write temporary files there, never at the
+  workspace or project root (a Studio agent had written `_mcp_payloads/` at the
+  workspace root). Homes are often shared by a user's conversations, so the
+  instruction files carry the rule and the turn carries the path. Nothing purges
+  these folders yet. Run `node --test tests/agent_temp_dir.test.js`.
 
 ## Flow capability pack for Vibe
 
