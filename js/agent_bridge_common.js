@@ -7400,13 +7400,17 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         // The gateway profile runs Vibe's generic backend, which forwards the thinking level as
         // reasoning_effort: a level the model refuses (including "off") is never offered.
         var usableLevels = vibeThinkingLevelsFor(efforts[alias], true);
-        var offeredLevels = (model.reasoningLevels || []).filter(function (level) {
-          return usableLevels.indexOf(String(level.id).toLowerCase()) >= 0;
-        });
+        // In the order of the levels (off, low, medium, high, max), the catalog's entry when it has one: a level the cached
+        // catalog lacked was added last with its raw id, so the effort list read "Low, High, medium".
+        var cachedLevels = model.reasoningLevels || [];
+        var offeredLevels = [];
         for (var l = 0; l < usableLevels.length; l++) {
-          var present = false;
-          for (var o = 0; o < offeredLevels.length; o++) { if (String(offeredLevels[o].id).toLowerCase() === usableLevels[l]) { present = true; } }
-          if (!present) { offeredLevels.push({ id: usableLevels[l], label: usableLevels[l], description: "Accepted by this gateway model" }); }
+          var cached = null;
+          for (var o = 0; o < cachedLevels.length && !cached; o++) {
+            if (String(cachedLevels[o].id).toLowerCase() === usableLevels[l]) { cached = cachedLevels[o]; }
+          }
+          offeredLevels.push(cached || { id: usableLevels[l], label: usableLevels[l].charAt(0).toUpperCase() + usableLevels[l].substring(1),
+            description: "Accepted by this gateway model" });
         }
         model.reasoningLevels = offeredLevels;
         model.defaultReasoning = vibeDefaultThinkingFor(usableLevels, model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING);

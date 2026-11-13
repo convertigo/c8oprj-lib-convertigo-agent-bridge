@@ -86,3 +86,16 @@ test('gateway effort controls also work before the first provider cache is writt
   assert.equal(provider.supports.reasoning, true);
   assert.equal(provider.models[0].defaultReasoning, 'high');
 });
+
+test('the effort list follows the order of the levels and names a level the cached catalog lacked (Low, Medium, High)', () => {
+  const f = fixture([]);
+  const provider = f.s.applyGatewayOfferToProvider({ id: 'convertigo', supports: { reasoning: true }, reasoningMode: 'runtime_selectable',
+    gateway: { models: ['reasoning-model'], efforts: { 'reasoning-model': ['low', 'medium', 'high'] } },
+    models: [{ id: 'reasoning-model', label: 'Reasoning model', provider: 'convertigo', defaultReasoning: 'low',
+      reasoningLevels: [{ id: 'low', label: 'Low', description: 'Cached' }, { id: 'high', label: 'High', description: 'Cached' }] }] });
+  const levels = provider.models[0].reasoningLevels;
+  assert.deepEqual(Array.from(levels, level => level.id), ['low', 'medium', 'high']);
+  assert.deepEqual(Array.from(levels, level => level.label), ['Low', 'Medium', 'High']);
+  assert.equal(levels[0].description, 'Cached', 'the catalog entry is kept when it exists');
+  assert.equal(levels[1].description, 'Accepted by this gateway model');
+});
