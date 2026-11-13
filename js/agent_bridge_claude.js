@@ -2158,6 +2158,11 @@
     if (noCodeRefusal !== null) {
       return noCodeRefusal;
     }
+    // per-user keys: Claude Code runs unconfined (it would read the other agents' environment) and never on the server key
+    var gatewayKeyRefusal = userGatewayKeyIsolationRefusal(options, "claude", null) || userGatewayKeyRefusal(options, "claude");
+    if (gatewayKeyRefusal !== null) {
+      return gatewayKeyRefusal;
+    }
     try {
       C8O.agentBridge.sweepExpired({});
     } catch (_ignoreStartSweep) {}
@@ -2186,7 +2191,10 @@
       var requestedPlaywrightCdpEndpoint = resolvePlaywrightMcpCdpEndpoint(options);
       var activePlaywrightCdpEndpoint = trim(existing.playwrightCdpEndpoint || existing.viewerCdpEndpoint);
       var viewerChanged = requestedPlaywrightCdpEndpoint.length && activePlaywrightCdpEndpoint !== requestedPlaywrightCdpEndpoint;
-      if (mcpTokenChanged || revealModeChanged || modelChanged || effortChanged || viewerChanged) {
+      // per-user keys: a new key of the user restarts the process that holds the old one in its environment
+      var gatewayKeyChanged = trim(existing.gatewayKeyFingerprint) !== (userGatewayKeysOn(options) && runtimeUsesGateway("claude", options)
+        ? userGatewayCredential(options).fingerprint : "");
+      if (mcpTokenChanged || revealModeChanged || modelChanged || effortChanged || viewerChanged || gatewayKeyChanged) {
         pushEvent(existing, "warning", {
           message: mcpTokenChanged
             ? "Claude Code must restart to renew its managed Convertigo MCP authorization."
@@ -2203,6 +2211,7 @@
         stopEntry(existing, true);
         existing = null;
       } else {
+        rememberEntryGatewayKey(existing, options);
         writeEntryPidFile(existing);
         rememberSessionHandle(handle);
         return {
@@ -2285,6 +2294,8 @@
         env[envKey] = extraEnv[envKey];
       }
     }
+    // per-user keys: no gateway key inherited from the engine; on a gateway model the user's key is ANTHROPIC_AUTH_TOKEN
+    var userGatewayKey = applyUserGatewayKey(env, options, "claude");
     env.TERM = env.TERM || "xterm-256color";
     var cwd = normalizeDirectory(options.cwd, setup.setup.workspaceRoot, setup.setup.workspaceRoot);
     var ttlMillis = intValue(options.ttlSeconds, DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
@@ -2310,6 +2321,11 @@
     entry.mcpBearerTokenHandle = trim(options.mcpBearerTokenHandle);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
     entry.mcpLeaseTokenId = managedMcpTokenId(options);
+    entry.gatewayKeyFingerprint = userGatewayKey.fingerprint;
+    entry.gatewayKeyHandle = userGatewayKey.handle;
+    entry.userGatewayKeys = userGatewayKey.on;
+    entry.unsetEnv = userGatewayKey.unset;
+    rememberEntryGatewayKey(entry, options);
     entry.mcpEndpoint = resolveMcpEndpoint(options);
     entry.mcpConfigFile = setup.setup.mcp && setup.setup.mcp.path ? setup.setup.mcp.path : "";
     entry.viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
@@ -2433,6 +2449,7 @@
     restartOptions.mcpEndpoint = entry.mcpEndpoint;
     restartOptions.mcpBearerTokenHandle = entry.mcpBearerTokenHandle;
     restartOptions.nocodeMcpTokenHandle = entry.nocodeMcpTokenHandle;
+    restartOptions.gatewayKeyHandle = trim(options.gatewayKeyHandle) || entry.gatewayKeyHandle || "";
     restartOptions.agentRevealMode = entry.convertigoRevealMode === true ? "true" : "false";
     restartOptions.ttlSeconds = Math.max(30, Math.floor(entry.ttlMillis / 1000));
     return restartOptions;
@@ -3465,6 +3482,9 @@
         return;
       }
       pushEvent(entry, "claude/event", { method: "system/" + subtype, params: message, provider: "claude" });
+      if (subtype === "api_retry" && Number(message.error_status) === 429) {
+        claudeCheckGatewayBudget(entry);
+      }
       if (subtype.indexOf("task_") === 0) {
         claudeTrackBackgroundTask(entry, message);
       }
@@ -3623,6 +3643,34 @@
   }
 
   // A model of the Convertigo gateway is named provider/model (mistral/zai-glm-5-3); Claude models are not.
+  // Claude Code retries every 429 (CLAUDE_CODE_MAX_RETRIES) and reads only its status: on a gateway model, its first
+  // retry of a turn asks the gateway once whether a budget is used up. If so the turn ends with the normalized error
+  // instead of the retries; a rate limit keeps them.
+  function claudeCheckGatewayBudget(entry, deps) {
+    deps = deps || {};
+    if (!claudeGatewayModel(entry.model) || entry.gatewayBudgetProbed === true || entry.gatewayBudgetRefusal) {
+      return null;
+    }
+    entry.gatewayBudgetProbed = true;
+    // per-user keys: the key behind the entry's handle, else the one it holds in memory (its handle may be purged)
+    var key = entry.userGatewayKeys === true
+      ? (userGatewayCredential(entryGatewayKeyOptions(entry, {})).key || entryHeldGatewayKey(entry))
+      : convertigoGatewayApiKey({ workspaceRoot: entry.workspaceRoot }, "");
+    if (!trim(key).length) {
+      return null;
+    }
+    var budget = (deps.probe || probeGatewayBudget)({}, key, entry.model);
+    if (budget === null) {
+      return null;
+    }
+    entry.gatewayBudgetRefusal = { code: budget.code, scope: budget.scope, retryable: false, at: now() };
+    pushEvent(entry, "turn/error", { requestId: entry.turnRequestId || null, budget: budget, provider: "claude" });
+    try {
+      TURN_INTERRUPT_ADAPTERS["claude-stream-json"](entry);
+    } catch (_ignoreBudgetInterrupt) {}
+    return budget;
+  }
+
   function claudeGatewayModel(model) {
     var name = trim(model);
     return name.indexOf("/") > 0 && !/^claude-/.test(name);

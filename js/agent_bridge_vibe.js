@@ -207,7 +207,7 @@
         }
         var venvPython = venvBinPath(setup.venvDir, "python");
         runInstallStep([venvPython, "-m", "pip", "install", "--upgrade", "pip"], 180000, "Vibe pip bootstrap", "https://pypi.org");
-        runInstallStep([venvPython, "-m", "pip", "install", "--upgrade", "mistral-vibe==3.1.0"], 600000, "Vibe runtime installation", "https://pypi.org");
+        runInstallStep([venvPython, "-m", "pip", "install", "--upgrade", managedVibePackageRequirement()], 600000, "Vibe runtime installation", "https://pypi.org");
 
         setup = detectRuntime(options);
         var managedVibeReady = commandPathStartsWith(setup.vibe, setup.venvDir) && commandPathStartsWith(setup.vibeAcp, setup.venvDir);
@@ -229,7 +229,7 @@
         if (fallbackSkills.error) {
           messages.push(fallbackSkills.error);
         }
-        var fallbackAuthentication = inspectVibeAuthentication(setup.vibeHome, profile);
+        var fallbackAuthentication = inspectVibeAuthentication(setup.vibeHome, profile, options);
         var fallbackReady = fallbackAuthentication.configured === true && fallbackSkills.ok !== false;
         if (!fallbackReady) {
           messages.push(fallbackAuthentication.configured === true
@@ -268,7 +268,7 @@
     var runtimeReady = setup.vibe.found && setup.vibeAcp.found && (!workspaceFirst || (
       commandPathStartsWith(setup.vibe, setup.venvDir) && commandPathStartsWith(setup.vibeAcp, setup.venvDir)
     ));
-    var authentication = inspectVibeAuthentication(setup.vibeHome, profile);
+    var authentication = inspectVibeAuthentication(setup.vibeHome, profile, options);
     startupMark("setup/install");
     var skills = installAgentSkills(options, "vibe", setup.vibeHome);
     startupMark("setup/skills");
@@ -383,6 +383,11 @@
       return noCodeRefusal;
     }
     options = optionsWithRequestFallbacks(options || {});
+    // per-user keys: no start without the user's key, never on the server key
+    var gatewayKeyRefusal = userGatewayKeyRefusal(options, "vibe");
+    if (gatewayKeyRefusal !== null) {
+      return gatewayKeyRefusal;
+    }
     var requestedModel = trim(options.model || options.agentModel);
     var handle = trim(options.handle) || makeHandle("vibe");
     try {
@@ -441,11 +446,26 @@
       var catalogChanged = requestedCatalogKey.length > 0 && (trim(existing.mcpCatalogKey) || "feedback:off") !== requestedCatalogKey;
       // A No Code process started before its config.toml removed the shell and file tools still has them.
       var toolPolicyChanged = trim(existing.toolPolicy) !== vibeToolPolicy(options);
+      // per-user keys: the key lives in the process environment, a new key (renewed, revoked then granted) restarts it
+      var requestedGatewayKeyFingerprint = userGatewayKeysOn(options) && runtimeUsesGateway("vibe", options)
+        ? userGatewayCredential(options).fingerprint : "";
+      var gatewayKeyChanged = trim(existing.gatewayKeyFingerprint) !== requestedGatewayKeyFingerprint;
       if (requestedMcpTokenFingerprint.length
           && trim(existing.mcpBearerTokenFingerprint) !== requestedMcpTokenFingerprint) {
         pushEvent(existing, "warning", {
           phase: "mcp/auth",
           message: "Vibe must restart to renew its managed Convertigo MCP authorization."
+        });
+        stopEntry(existing, true);
+        existing = null;
+      } else if (gatewayKeyChanged) {
+        if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
+          options.sessionId = trim(existing.sessionId);
+        }
+        pushEvent(existing, "warning", {
+          phase: "gateway/key",
+          reason: "gateway_key_changed",
+          message: "Vibe restarts on this conversation with the current Tigo key of its user."
         });
         stopEntry(existing, true);
         existing = null;
@@ -507,6 +527,13 @@
       }
     }
     if (existing !== null && typeof existing !== "undefined" && processAlive(existing.process)) {
+      // a process started unconfined before this server had per-user keys does not go on beside them
+      var reuseRefusal = userGatewayKeyIsolationRefusal(options, "vibe",
+        { confined: !!(existing.sandbox && existing.sandbox.confined === true), policy: trim(existing.noCodePolicy) });
+      if (reuseRefusal !== null) {
+        stopEntry(existing, true);
+        return reuseRefusal;
+      }
       if (existing.prewarm === true && !boolValue(options.prewarm, false)) {
         // the conversation's first message takes its prewarmed process: the conversation's TTL applies from now on
         existing.prewarm = false;
@@ -521,6 +548,7 @@
           message: String(configureExistingError)
         });
       }
+      rememberEntryGatewayKey(existing, options);
       rememberSessionHandle(handle);
       return {
         ok: true,
@@ -596,6 +624,7 @@
       options.credentialsPolicy = "vibe-home";
     }
     var credentials = applyCredentialsPolicy(env, options, vibeHome);
+    var userGatewayKey = applyUserGatewayKey(env, options, "vibe");
     if (vibeHome.length) {
       env.VIBE_HOME = vibeHome;
     }
@@ -630,6 +659,13 @@
     } catch (sandboxError) {
       return { ok: false, status: "error", phase: "sandbox", error: String(sandboxError), timestamp: now() };
     }
+    var isolationRefusal = userGatewayKeyIsolationRefusal(options, "vibe", noCodeSandbox);
+    if (isolationRefusal !== null) {
+      return isolationRefusal;
+    }
+    if (isConvertigoGatewayProfile(options)) {
+      applyGatewayBudgetHook(env, noCodeSandbox);
+    }
     startupMark("sandbox");
     var noCode = normalizeSkillProfile(options) === "nocode";
     var ttlMillis = intValue(options.ttlSeconds, noCode ? NOCODE_TTL_SECONDS : DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
@@ -643,6 +679,11 @@
     entry.vibeProfile = resolveVibeProfile(options);
     entry.mcpBearerTokenFingerprint = mcpBearerTokenFingerprint(options);
     entry.mcpLeaseTokenId = managedMcpTokenId(options);
+    entry.gatewayKeyFingerprint = userGatewayKey.fingerprint;
+    entry.gatewayKeyHandle = userGatewayKey.handle;
+    entry.userGatewayKeys = userGatewayKey.on;
+    entry.unsetEnv = userGatewayKey.unset;
+    rememberEntryGatewayKey(entry, options);
     entry.noCodeAccess = noCodeAccessOptions(options);
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
@@ -790,8 +831,8 @@
         ok: false,
         status: "error",
         phase: entry.phase,
-        error: String(e),
-        acpError: e.acpError || null,
+        error: redactUserGatewayKey(entry, String(e)),
+        acpError: redactUserGatewayKey(entry, e.acpError || null),
         handle: handle,
         state: statusOf(entry),
         timestamp: now()
@@ -827,6 +868,7 @@
         mcpBearerTokenHandle: options.mcpBearerTokenHandle,
         nocodeMcpToken: options.nocodeMcpToken || options.noCodeMcpToken,
         nocodeMcpTokenHandle: options.nocodeMcpTokenHandle || options.noCodeMcpTokenHandle,
+        gatewayKeyHandle: options.gatewayKeyHandle,
         install: false,
         autoConfigure: true,
         disableViewerDebugPortReservation: true,
@@ -928,7 +970,10 @@
     }
     deps = deps || {};
     var api = deps.api !== undefined ? deps.api : loadImageDescribe();
-    var key = deps.key !== undefined ? deps.key : convertigoGatewayApiKey({ workspaceRoot: entry.workspaceRoot }, entry.vibeHome);
+    // per-user keys: the user's key only, never the server's
+    var key = deps.key !== undefined ? deps.key : (entry.userGatewayKeys === true
+      ? userGatewayCredential(entryGatewayKeyOptions(entry, deps.options)).key
+      : convertigoGatewayApiKey({ workspaceRoot: entry.workspaceRoot }, entry.vibeHome));
     if (api === null || !trim(key).length) {
       return report;
     }
@@ -945,6 +990,11 @@
       encodeBase64: base.encodeBase64,
       now: base.now,
       post: function (url, apiKey, body, timeoutMs) {
+        // image-describe calls its own gateway constant: the configured gateway (agentbridge.gateway.url) wins
+        var gatewayUrl = convertigoGatewayUrl({});
+        if (api.GATEWAY_URL && String(url).indexOf(api.GATEWAY_URL) === 0 && gatewayUrl !== String(api.GATEWAY_URL).replace(/\/+$/, "")) {
+          url = gatewayUrl + String(url).substring(String(api.GATEWAY_URL).replace(/\/+$/, "").length);
+        }
         return base.post(url, apiKey, body, Math.max(1000, Math.min(Number(timeoutMs), deadline - now())));
       }
     };
@@ -968,6 +1018,13 @@
         report.text += "\n\nAttached image \"" + name + "\": you cannot see images, so the Agent Bridge had it described by the vision model `"
           + trim(result.model) + "`" + (result.truncated === true ? " (its description was cut)" : "") + ". The description:\n" + description;
       } catch (describeError) {
+        var describeBudget = gatewayBudgetError(String(describeError && describeError.message ? describeError.message : describeError));
+        if (describeBudget !== null) {
+          // no further call: the budget does not come back, and the gateway's message is not repeated
+          report.budget = describeBudget;
+          report.failed.push({ path: blind[b].path, name: name, reason: "budget_exceeded" });
+          break;
+        }
         report.failed.push({ path: blind[b].path, name: name, reason: String(describeError && describeError.message ? describeError.message : describeError) });
       }
     }
@@ -1034,6 +1091,15 @@
       noCodeRefusal.handle = handle;
       return noCodeRefusal;
     }
+    // per-user keys: the user's key is still there at each prompt (the Assistant drops it with the right), or no prompt
+    if (entry.userGatewayKeys === true) {
+      var gatewayKeyRefusal = userGatewayKeyRefusal(entryGatewayKeyOptions(entry, options), "vibe");
+      if (gatewayKeyRefusal !== null) {
+        gatewayKeyRefusal.handle = handle;
+        return gatewayKeyRefusal;
+      }
+      rememberEntryGatewayKey(entry, entryGatewayKeyOptions(entry, options));
+    }
     writeStartupTimings(startupTimer("prompt", { handle: handle }), entry.workspaceRoot, "received");
     entry.prewarm = false;
 
@@ -1055,7 +1121,13 @@
       promptBlocks.push(images.blocks[imageIndex]);
     }
     var describeTimer = startupTimer("describe", { handle: handle });
-    var described = describeImagesForBlindModel(entry, images.skipped);
+    var described = describeImagesForBlindModel(entry, images.skipped, { options: options });
+    if (described.budget) {
+      // the budget is used up: the prompt is not sent, the turn ends here with the normalized error
+      writeStartupTimings(describeTimer, entry.workspaceRoot, "budget_exceeded");
+      return { ok: false, status: "failed", handle: handle, code: described.budget.code, scope: described.budget.scope,
+        retryable: false, budget: described.budget, error: GATEWAY_BUDGET_MESSAGE, state: statusOf(entry), timestamp: now() };
+    }
     if (described.described.length || described.failed.length) {
       describeTimer.fields.described = described.described.length;
       describeTimer.fields.failed = described.failed.length;
@@ -1111,7 +1183,7 @@
           status: "completed",
           handle: handle,
           requestId: pending.id,
-          response: response,
+          response: redactUserGatewayKey(entry, response),
           cursor: entry.nextIndex,
           state: statusOf(entry),
           timestamp: now()
@@ -1136,8 +1208,8 @@
         ok: false,
         status: "error",
         handle: handle,
-        error: String(e),
-        acpError: e.acpError || null,
+        error: redactUserGatewayKey(entry, String(e)),
+        acpError: redactUserGatewayKey(entry, e.acpError || null),
         state: statusOf(entry),
         timestamp: now()
       };
@@ -1156,13 +1228,8 @@
       forgetSessionHandle(handle);
       return { ok: true, status: "not_found", handle: handle, timestamp: now() };
     }
-    try {
-      if (processAlive(entry.process) && entry.sessionId) {
-        acpRequest(entry, "session/close", { sessionId: entry.sessionId }, 3000);
-      }
-    } catch (e) {
-      pushEvent(entry, "warning", { message: String(e), phase: "session/close" });
-    }
+    // An explicit close is the fallback when session/cancel did not finish the turn.
+    // Do not wait on another protocol write (session/close) to the same blocked pipe.
     var stateBeforeRemove = statusOf(entry);
     stopEntry(entry, true);
     return {
@@ -1356,6 +1423,10 @@
   // Convertigo gateway profile: store the per-user virtual key in the user scoped home.
   C8O.agentBridge.vibeGatewayKeyStore = function (options) {
     options = optionsWithRequestFallbacks(options || {});
+    if (userGatewayKeysOn(options)) {
+      // per-user keys: a key is never written to a home
+      return { ok: false, status: "error", code: "user_keys_managed", error: "Tigo keys are managed per user on this server.", timestamp: now() };
+    }
     var key = trim(options.gatewayApiKey);
     if (!key.length) {
       return { ok: false, status: "error", error: "gatewayApiKey is required", timestamp: now() };

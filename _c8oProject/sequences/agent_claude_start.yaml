@@ -5,6 +5,7 @@ responseTimeout: 900
     'include("js/vibe_agent_bridge.js");
     C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.claudeStart({
+      gatewayKeyHandle: typeof gatewayKeyHandle === "undefined" ? "" : gatewayKeyHandle,
       tigoResourcesHandle: typeof tigoResourcesHandle === "undefined" ? "" : tigoResourcesHandle,
       handle: typeof handle === "undefined" ? "" : handle,
       workspaceRoot: typeof workspaceRoot === "undefined" ? "" : workspaceRoot,
@@ -152,6 +153,13 @@ responseTimeout: 900
   comment: Opaque server-side handle of the managed MCP bearer token.
 ↓tigoResourcesHandle [variables.RequestableVariable-1792084008480]: 
   comment: Opaque server-only Tigo MCP context handle; never contains credentials.
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15
+↓gatewayKeyHandle [variables.RequestableVariable-1794320000104]: 
+  comment: Opaque server-only handle of the No Code user's Tigo gateway key (per-user keys); never contains the key.
   value: 
     - ↑ciphered: true
     - ↑traceable: false

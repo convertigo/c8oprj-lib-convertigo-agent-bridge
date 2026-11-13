@@ -92,6 +92,7 @@ test('both managed Vibe profiles retain system trust through rewrites and migrat
 
 test('managed installation requests the qualified Vibe version', () => {
   const source = fs.readFileSync('js/agent_bridge_vibe.js', 'utf8');
-  assert.match(source, /"pip", "install", "--upgrade", "mistral-vibe==3\.1\.0"/);
+  assert.match(source, /"pip", "install", "--upgrade", managedVibePackageRequirement\(\)/);
+  assert.equal(scope().managedVibePackageRequirement(), "mistral-vibe==3.1.0");
   assert.doesNotMatch(source, /"pip", "install", "--upgrade", "mistral-vibe"/);
 });

@@ -5,6 +5,7 @@ responseTimeout: 120
     'include("js/vibe_agent_bridge.js");
     C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.settings({
+      gatewayKeyHandle: typeof gatewayKeyHandle === "undefined" ? "" : gatewayKeyHandle,
       provider: typeof provider === "undefined" ? "" : provider,
       model: typeof model === "undefined" ? "" : model,
       reasoningEffort: typeof reasoningEffort === "undefined" ? "" : reasoningEffort,
@@ -115,3 +116,10 @@ responseTimeout: 120
 ↓vibeProfile [variables.RequestableVariable-1789560000019]: 
   comment: 'Vibe profile filter for the vibe provider: mistral (default) or convertigo. The convertigo pseudo-provider is always listed with provider=all.'
   description: 'Vibe profile filter for the vibe provider: mistral (default) or convertigo. The convertigo pseudo-provider is always listed with provider=all.'
+↓gatewayKeyHandle [variables.RequestableVariable-1794320000106]: 
+  comment: Opaque server-only handle of the No Code user's Tigo gateway key (per-user keys); never contains the key.
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15

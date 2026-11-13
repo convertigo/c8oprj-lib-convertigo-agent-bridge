@@ -89,6 +89,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   var RUNTIME_UPDATE_CACHE_KEY = "lib_ConvertigoAgentBridge.runtimeUpdateCache.v1";
   var RUNTIME_UPDATE_CACHE_FILE = "runtime-update-checks.json";
   var DEFAULT_RUNTIME_UPDATE_CACHE_MS = 21600000;
+  var MANAGED_VIBE_VERSION = "3.1.0";
   var STORAGE_CLEANUP_FILE = "storage-cleanup.json";
   var DEFAULT_STORAGE_CLEANUP_INTERVAL_MS = 21600000;
   var DEFAULT_STORAGE_ORPHAN_GRACE_MS = 86400000;
@@ -149,8 +150,23 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return copy;
   }
 
+  // The operator may point the agents at another gateway (staging, a test double): global symbol agentbridge.gateway.url,
+  // an https URL, or http on this machine only (loopback, Docker's host.docker.internal). Anything else is ignored.
+  var CONVERTIGO_LLM_GATEWAY_URL_SYMBOL = "agentbridge.gateway.url";
+
+  function configuredGatewayUrl() {
+    var value = "";
+    try { value = trim(Engine.theApp.databaseObjectsManager.symbolsGetValue(CONVERTIGO_LLM_GATEWAY_URL_SYMBOL)); } catch (_ignoreNoGatewaySymbol) {}
+    if (!value.length) {
+      return "";
+    }
+    var https = /^https:\/\/[^\s\/?#@]+(\/[^\s?#]*)?$/.test(value);
+    var localHttp = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]|host\.docker\.internal)(:\d{1,5})?(\/[^\s?#]*)?$/.test(value);
+    return https || localHttp ? value : "";
+  }
+
   function convertigoGatewayUrl(options) {
-    var url = trim(options && (options.llmGatewayUrl || options.gatewayUrl)) || CONVERTIGO_LLM_GATEWAY_URL;
+    var url = trim(options && (options.llmGatewayUrl || options.gatewayUrl)) || configuredGatewayUrl() || CONVERTIGO_LLM_GATEWAY_URL;
     return url.replace(/\/+$/, "");
   }
 
@@ -214,6 +230,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   }
 
   function convertigoGatewayApiKey(options, vibeHome) {
+    // per-user keys: the user's key from its handle, else none (never the key file, a home .env or a raw option)
+    if (userGatewayKeysOn(options)) { return userGatewayCredential(options).key; }
     var explicit = trim(options && (options.gatewayApiKey || options.llmGatewayApiKey));
     if (explicit.length) { return explicit; }
     return resolveConvertigoGatewayKey(options, vibeHome).key;
@@ -256,7 +274,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       get.setConfig(requestConfig.build());
       response = Engine.theApp.httpClient4.execute(get);
       var gatewayStatus = response.getStatusLine().getStatusCode();
-      convertigoGatewayKeyRejected = gatewayStatus === 401 || gatewayStatus === 403;
+      // a per-user key that the gateway refuses is not the key file's fault: no file diagnostics then
+      convertigoGatewayKeyRejected = (gatewayStatus === 401 || gatewayStatus === 403) && !userGatewayKeysOn(options);
       if (convertigoGatewayKeyRejected) {
         try { log.warn("The Convertigo gateway rejected the agent key (HTTP " + gatewayStatus + "). Check " + filePath(convertigoGatewayKeyFile(options))); } catch (_ignoreRejectedKeyLog) {}
       }
@@ -281,39 +300,60 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // Empty results are retried after cache expiry; an explicit refresh rechecks every model.
   var GATEWAY_REASONING_EFFORTS = ["low", "medium", "high", "max"];
 
-  function probeGatewayModelEffort(options, apiKey, name, effort) {
-    var connection = null, stream = null;
+  // One JSON POST to the gateway's chat completions through the engine's HTTP client and its proxy settings, as the
+  // model list (fetchConvertigoGatewayModelIds): {status, text}, or null when it could not be sent or read.
+  function postGatewayChatCompletion(options, apiKey, payload, readTimeoutMs) {
+    var response = null, stream = null;
     try {
-      connection = new URL(convertigoGatewayUrl(options) + "/chat/completions").openConnection();
-      connection.setConnectTimeout(4000);
-      connection.setReadTimeout(20000);
-      connection.setRequestMethod("POST");
-      connection.setDoOutput(true);
-      connection.setRequestProperty("Content-Type", "application/json");
-      connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-      var body = JSON.stringify({ model: name, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false, reasoning_effort: effort });
-      var out = connection.getOutputStream();
-      out.write(new java.lang.String(body).getBytes("UTF-8"));
-      out.close();
-      var code = connection.getResponseCode();
-      stream = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
+      var url = convertigoGatewayUrl(options) + "/chat/completions";
+      var post = new Packages.org.apache.http.client.methods.HttpPost(url);
+      post.setHeader("Accept", "application/json");
+      post.setHeader("Authorization", "Bearer " + apiKey);
+      post.setEntity(new Packages.org.apache.http.entity.StringEntity(JSON.stringify(payload),
+        Packages.org.apache.http.entity.ContentType.APPLICATION_JSON));
+      var requestConfig = Packages.org.apache.http.client.config.RequestConfig.custom()
+        .setConnectTimeout(4000).setSocketTimeout(readTimeoutMs).setConnectionRequestTimeout(4000).setRedirectsEnabled(false);
+      configureHttpRequestProxy(post, requestConfig, url);
+      post.setConfig(requestConfig.build());
+      response = Engine.theApp.httpClient4.execute(post);
+      var status = Number(response.getStatusLine().getStatusCode());
+      var entity = response.getEntity();
+      stream = entity === null ? null : entity.getContent();
       var text = stream === null ? "" : String(new java.lang.String(stream.readAllBytes(), "UTF-8"));
-      if (code === 200) { return "yes"; }
-      if ((code === 400 || code === 422) && /reasoning_effort|thinking_level/i.test(text)) { return "no"; }
-      return "unknown";
-    } catch (_ignoreEffortProbe) {
-      return "unknown";
+      return { status: status, text: text };
+    } catch (_ignoreGatewayPost) {
+      return null;
     } finally {
-      try { if (stream !== null) stream.close(); } catch (_ignoreProbeStreamClose) {}
-      try { if (connection !== null) connection.disconnect(); } catch (_ignoreProbeDisconnect) {}
+      try { if (stream !== null) stream.close(); } catch (_ignoreGatewayPostStreamClose) {}
+      try { if (response !== null) response.close(); } catch (_ignoreGatewayPostResponseClose) {}
     }
+  }
+
+  function probeGatewayModelEffort(options, apiKey, name, effort) {
+    var answer = postGatewayChatCompletion(options, apiKey,
+      { model: name, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false, reasoning_effort: effort }, 20000);
+    if (answer === null) { return "unknown"; }
+    if (answer.status === 200) { return "yes"; }
+    if ((answer.status === 400 || answer.status === 422) && /reasoning_effort|thinking_level/i.test(answer.text)) { return "no"; }
+    // a used-up budget refuses every probe the same way: no further one (convertigoGatewayModelNames)
+    if (answer.status === 429 && gatewayBudgetError(answer.text) !== null) { return "budget"; }
+    return "unknown";
+  }
+
+  // A request the gateway refuses before any model call when a budget is used up (else one output token): the budget
+  // error, or null. For a runtime that retries every 429 without reading its body (Claude Code's api_retry).
+  function probeGatewayBudget(options, apiKey, model) {
+    var answer = postGatewayChatCompletion(options, apiKey,
+      { model: model, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false }, 8000);
+    return answer !== null && answer.status === 429 ? gatewayBudgetError(answer.text) : null;
   }
 
   function probeGatewayModelEfforts(options, apiKey, name) {
     var supported = [];
     for (var i = 0; i < GATEWAY_REASONING_EFFORTS.length; i++) {
       var answer = probeGatewayModelEffort(options, apiKey, name, GATEWAY_REASONING_EFFORTS[i]);
-      if (answer === "unknown") { return null; }
+      if (answer === "budget" && options) { options.gatewayBudgetRefused = true; }
+      if (answer === "unknown" || answer === "budget") { return null; }
       if (answer === "yes") { supported.push(GATEWAY_REASONING_EFFORTS[i]); }
     }
     return supported;
@@ -675,6 +715,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       if (abi === 0 && (policy === "files" || policy === "sandboxed-shell")) {
         policy = "mcp-only";
       }
+      // per-user Tigo keys: no shell until Vibe keeps the key out of its tools' reach (docs/nocode-user-keys.md)
+      if (policy === "sandboxed-shell" && serverUsesUserGatewayKeys()) {
+        policy = "files";
+      }
       return {
         policy: policy,
         configured: VIBE_NOCODE_POLICIES.indexOf(configured) >= 0 ? configured : "",
@@ -955,7 +999,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
           for (var effortIndex = 0; effortIndex < fetched.length; effortIndex++) {
             var modelName = fetched[effortIndex];
             var levels = Object.prototype.hasOwnProperty.call(knownEfforts, modelName) ? normalizeGatewayEfforts(knownEfforts[modelName]) : null;
-            if (levels === null || !levels.length || gatewayModelCatalogRefreshRequested(options)) {
+            if (options.gatewayBudgetRefused !== true && (levels === null || !levels.length || gatewayModelCatalogRefreshRequested(options))) {
               var probedLevels = probeGatewayModelEfforts(options, apiKey, modelName);
               // A timeout, quota or access error is not evidence that reasoning is unsupported.
               if (probedLevels !== null) { levels = probedLevels; }
@@ -1169,6 +1213,603 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       }
     }
     return decision;
+  }
+
+  // ---- No Code per-user gateway key (tigo-nocode-contract.md section 8) ----
+  // On a server whose C8Oforms issues one gateway key per user (APIV2_TigoUserKey), a No Code agent on the Convertigo
+  // gateway runs on its user's key only. The Assistant gets that key server side, keeps it in server memory behind an
+  // opaque handle (gatewayKeyHandle) and passes the handle; the Bridge puts the key in the agent's environment at launch.
+  // It is never written to the workspace key file, a home .env or a log, and nothing falls back to the server key: a
+  // missing, expired or foreign handle refuses the call (gateway_credential_missing). The Studio keeps its key file.
+  var USER_GATEWAY_KEY_PROJECT = "C8Oforms";
+  var USER_GATEWAY_KEY_SEQUENCE = "APIV2_TigoUserKey";
+  // the server's registration with TigoAccess (piece A3): without it C8Oforms answers not_configured, the server is not
+  // in the per-user scheme yet and keeps its shared key; once registered, never again
+  var USER_GATEWAY_KEY_SERVER_SYMBOL = "C8Oforms.tigo.server.id";
+  var USER_GATEWAY_KEY_HANDLE_PATTERN = /^lib_ConvertigoAssistant\.gatewayKey\.[A-Za-z0-9_-]{8,128}$/;
+  var USER_GATEWAY_KEY_PATTERN = /^sk-[A-Za-z0-9_-]{16,256}$/;
+
+  function userGatewayKeySequenceAvailable() {
+    try {
+      var project = Engine.theApp.databaseObjectsManager.getOriginalProjectByName(USER_GATEWAY_KEY_PROJECT);
+      if (project == null || project.getSequenceByName(USER_GATEWAY_KEY_SEQUENCE) == null) {
+        return false;
+      }
+      var server = Engine.theApp.databaseObjectsManager.symbolsGetValue(USER_GATEWAY_KEY_SERVER_SYMBOL);
+      return server !== null && typeof server !== "undefined" && trim(String(server)).length > 0;
+    } catch (_ignoreNoUserKeySequence) {
+      return false;
+    }
+  }
+
+  function engineIsStudio() {
+    try {
+      return Engine.isStudioMode() == true;
+    } catch (_ignoreNoStudioMode) {
+      return false;
+    }
+  }
+
+  // Once seen on this engine, the per-user path stays on until the engine restarts: a C8Oforms reloaded or redeployed
+  // without APIV2_TigoUserKey for a while must not put the server key back, nor let an unconfined agent start while
+  // other agents hold their users' keys.
+  var USER_GATEWAY_KEYS_SEEN = "lib_ConvertigoAgentBridge.userGatewayKeysSeen";
+
+  function userGatewayKeysSeen(mark) {
+    try {
+      var store = getServerStore();
+      if (store === null) {
+        return false;
+      }
+      if (mark === true) {
+        store.set(USER_GATEWAY_KEYS_SEEN, "true");
+        return true;
+      }
+      var value = store.get(USER_GATEWAY_KEYS_SEEN);
+      return value !== null && typeof value !== "undefined" && String(value) === "true";
+    } catch (_ignoreSeen) {
+      return false;
+    }
+  }
+
+  // A server (not the Studio) whose C8Oforms issues user keys, or did since the engine started: whatever the profile of
+  // a call, its agents must not read the No Code agents' environment.
+  function serverUsesUserGatewayKeys() {
+    if (engineIsStudio()) {
+      return false;
+    }
+    if (userGatewayKeySequenceAvailable()) {
+      return userGatewayKeysSeen(true);
+    }
+    return userGatewayKeysSeen(false);
+  }
+
+  // true where the per-user path is the only one: a No Code session, on a server, whose C8Oforms issues user keys
+  // (or did since the engine started)
+  function userGatewayKeysOn(options) {
+    if (normalizeSkillProfile(options || {}) !== "nocode" || engineIsStudio()) {
+      return false;
+    }
+    if (userGatewayKeySequenceAvailable()) {
+      return userGatewayKeysSeen(true);
+    }
+    return userGatewayKeysSeen(false);
+  }
+
+  function userGatewayKeyHandle(options) {
+    options = options || {};
+    return trim(options.gatewayKeyHandle || optionOrRequest(options, "gatewayKeyHandle"));
+  }
+
+  // {key, fingerprint, handle, reason}: reason "ok", or why there is no key (missing, invalid, expired, foreign)
+  function userGatewayCredential(options) {
+    options = options || {};
+    var handle = userGatewayKeyHandle(options);
+    var none = function (reason) { return { key: "", fingerprint: "", handle: handle, reason: reason }; };
+    if (!handle.length) {
+      return none("missing");
+    }
+    if (!USER_GATEWAY_KEY_HANDLE_PATTERN.test(handle)) {
+      return none("invalid");
+    }
+    var raw = serverSecretGet(handle);
+    if (!raw.length) {
+      return none("expired");
+    }
+    var bundle = null;
+    try { bundle = JSON.parse(raw); } catch (_ignoreBadBundle) {}
+    if (!bundle || typeof bundle !== "object") {
+      return none("invalid");
+    }
+    var owner = trim(bundle.owner);
+    var user = trim(options.userId || options.ownerKey);
+    if (!owner.length || !user.length || owner !== user) {
+      return none("foreign");
+    }
+    var key = trim(bundle.key);
+    if (!USER_GATEWAY_KEY_PATTERN.test(key)) {
+      return none("invalid");
+    }
+    var fingerprint = gatewayKeyFingerprint(key);
+    // expired for a new start; a running process may go on with the key it already holds (acceptFingerprint)
+    if (!(Number(bundle.expiresAt) > now()) && !(trim(options.acceptFingerprint).length && trim(options.acceptFingerprint) === fingerprint)) {
+      return none("expired");
+    }
+    return { key: key, fingerprint: fingerprint, handle: handle, reason: "ok" };
+  }
+
+  // Condition 8 of the A4 security review: the keys an entry was given stay with it, in memory only, so that its events
+  // are redacted after the handle it started with is purged or replaced (the Assistant renews the same key under a new
+  // handle). A non-enumerable property: JSON.stringify, for...in and Object.keys never see it.
+  var ENTRY_GATEWAY_KEYS_PROPERTY = "__gatewayRedactionKeys";
+  var ENTRY_GATEWAY_KEYS_MAX = 8;
+
+  function entryRedactionKeys(entry) {
+    var keys = entry ? entry[ENTRY_GATEWAY_KEYS_PROPERTY] : null;
+    return Array.isArray(keys) ? keys : [];
+  }
+
+  function keepEntryRedactionKey(entry, key) {
+    if (!USER_GATEWAY_KEY_PATTERN.test(trim(key))) {
+      return;
+    }
+    var keys = entryRedactionKeys(entry);
+    if (keys.indexOf(String(key)) >= 0) {
+      return;
+    }
+    // the first key is the one the process environment holds: it stays, the others make room
+    var kept = keys.length < ENTRY_GATEWAY_KEYS_MAX ? keys : [keys[0]].concat(keys.slice(keys.length - ENTRY_GATEWAY_KEYS_MAX + 2));
+    Object.defineProperty(entry, ENTRY_GATEWAY_KEYS_PROPERTY, {
+      value: kept.concat([String(key)]), enumerable: false, writable: true, configurable: true
+    });
+  }
+
+  // The key the process environment holds, from the entry's memory (by its fingerprint): "" without one.
+  function entryHeldGatewayKey(entry) {
+    var keys = entryRedactionKeys(entry);
+    for (var i = 0; i < keys.length; i++) {
+      if (gatewayKeyFingerprint(keys[i]) === trim(entry.gatewayKeyFingerprint)) {
+        return keys[i];
+      }
+    }
+    return "";
+  }
+
+  // At its start and at each prompt: the user's key behind the handle it was given joins the entry's redaction keys, and
+  // a newer handle of the same key replaces the one it started with. True when the handle holds a key of its user.
+  function rememberEntryGatewayKey(entry, options) {
+    if (!entry || entry.userGatewayKeys !== true) {
+      return false;
+    }
+    var credential = userGatewayCredential(options);
+    if (credential.reason !== "ok") {
+      return false;
+    }
+    keepEntryRedactionKey(entry, credential.key);
+    if (credential.fingerprint === trim(entry.gatewayKeyFingerprint) && credential.handle !== trim(entry.gatewayKeyHandle)) {
+      entry.gatewayKeyHandle = credential.handle;
+    }
+    return true;
+  }
+
+  // The user's keys a running entry holds, for redaction only: those it kept in memory, and the one behind its handle
+  // even past its lifetime.
+  function entryGatewayKeysForRedaction(entry) {
+    if (!entry || entry.userGatewayKeys !== true) {
+      return [];
+    }
+    if (trim(entry.gatewayKeyHandle).length) {
+      try {
+        var bundle = JSON.parse(serverSecretGet(entry.gatewayKeyHandle) || "null");
+        var key = bundle ? trim(bundle.key) : "";
+        if (USER_GATEWAY_KEY_PATTERN.test(key) && gatewayKeyFingerprint(key) === trim(entry.gatewayKeyFingerprint)) {
+          keepEntryRedactionKey(entry, key);
+        }
+      } catch (_ignoreRedactionKey) {}
+    }
+    return entryRedactionKeys(entry);
+  }
+
+  // The floor under the known keys, for an entry with a per-user key: any key-shaped token in its events and stderr.
+  // A letter or digit right before "sk-" is part of a word ("desk-booking-...", "risk-assessment-..."), not a key,
+  // except at the end of an ANSI color code ("\u001b[1m"), a percent-encoded byte ("%20", "%3D") or an escaped "\n".
+  // A new RegExp at each use: the stdout and stderr readers of an entry redact in two threads, and a shared /g
+  // expression keeps its lastIndex between them.
+  var USER_GATEWAY_KEY_FLOOR_SOURCE = "(^|[^A-Za-z0-9]|\\u001b\\[[0-9;]*m|%[0-9A-Fa-f]{2}|\\\\[nrt])sk-[A-Za-z0-9_-]{16,}";
+
+  function userGatewayKeyFloor(global) {
+    return new RegExp(USER_GATEWAY_KEY_FLOOR_SOURCE, global ? "g" : "");
+  }
+
+  function replacePatternInStrings(value, pattern, replacement, depth) {
+    if (depth > 12 || value === null || typeof value === "undefined") {
+      return value;
+    }
+    if (typeof value === "string") {
+      return value.replace(pattern, replacement);
+    }
+    if (Array.isArray(value)) {
+      return value.map(function (item) { return replacePatternInStrings(item, pattern, replacement, depth + 1); });
+    }
+    if (typeof value === "object") {
+      var copy = {};
+      for (var name in value) {
+        if (Object.prototype.hasOwnProperty.call(value, name)) {
+          copy[name] = replacePatternInStrings(value[name], pattern, replacement, depth + 1);
+        }
+      }
+      return copy;
+    }
+    return value;
+  }
+
+  function containsPattern(value, pattern, depth) {
+    if (depth > 12 || value === null || typeof value === "undefined") {
+      return false;
+    }
+    if (typeof value === "string") {
+      return pattern.test(value);
+    }
+    if (typeof value === "object") {
+      for (var name in value) {
+        if (Object.prototype.hasOwnProperty.call(value, name) && containsPattern(value[name], pattern, depth + 1)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function replaceInStrings(value, search, replacement, depth) {
+    if (depth > 12 || value === null || typeof value === "undefined") {
+      return value;
+    }
+    if (typeof value === "string") {
+      return value.indexOf(search) >= 0 ? value.split(search).join(replacement) : value;
+    }
+    if (Array.isArray(value)) {
+      return value.map(function (item) { return replaceInStrings(item, search, replacement, depth + 1); });
+    }
+    if (typeof value === "object") {
+      var copy = {};
+      for (var name in value) {
+        if (Object.prototype.hasOwnProperty.call(value, name)) {
+          copy[name] = replaceInStrings(value[name], search, replacement, depth + 1);
+        }
+      }
+      return copy;
+    }
+    return value;
+  }
+
+  function containsString(value, search, depth) {
+    if (depth > 12 || value === null || typeof value === "undefined") {
+      return false;
+    }
+    if (typeof value === "string") {
+      return value.indexOf(search) >= 0;
+    }
+    if (typeof value === "object") {
+      for (var name in value) {
+        if (Object.prototype.hasOwnProperty.call(value, name) && containsString(value[name], search, depth + 1)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // An agent allowed a shell can print its own key (env, /proc/self/environ): it never travels further in an event of
+  // the Bridge (the panel, the conversation record, the feedback). What the runtime itself writes (its journal) and
+  // what it sends its model stay outside the Bridge (docs/nocode-user-keys.md).
+  function redactUserGatewayKey(entry, data) {
+    if (!entry || entry.userGatewayKeys !== true) {
+      return data;
+    }
+    var keys = entryGatewayKeysForRedaction(entry);
+    for (var i = 0; i < keys.length; i++) {
+      if (containsString(data, keys[i], 0)) {
+        data = replaceInStrings(data, keys[i], "sk-***", 0);
+      }
+    }
+    return containsPattern(data, userGatewayKeyFloor(false), 0) ? replacePatternInStrings(data, userGatewayKeyFloor(true), "$1sk-***", 0) : data;
+  }
+
+  // What a running entry was started with, to check its user's key again at a prompt (the prompt's handle first).
+  function entryGatewayKeyOptions(entry, options) {
+    options = options || {};
+    return {
+      skillProfile: "nocode",
+      provider: entry.provider,
+      vibeProfile: entry.vibeProfile,
+      model: entry.model,
+      gatewayKeyHandle: trim(options.gatewayKeyHandle) || trim(entry.gatewayKeyHandle),
+      userId: trim(entry.ownerKey) || trim(entry.userId),
+      acceptFingerprint: trim(entry.gatewayKeyFingerprint)
+    };
+  }
+
+  // Does this runtime call the gateway? Vibe on the convertigo profile, Claude Code on a gateway model (provider/model).
+  function runtimeUsesGateway(provider, options) {
+    provider = normalizeProvider(provider);
+    if (provider === "vibe" || provider === "convertigo") {
+      return provider === "convertigo" || resolveVibeProfile(options || {}) === "convertigo";
+    }
+    if (provider === "claude") {
+      // claudeGatewayModel (agent_bridge_claude.js)
+      var model = trim((options || {}).model || (options || {}).agentModel);
+      return model.indexOf("/") > 0 && !/^claude-/.test(model);
+    }
+    return false;
+  }
+
+  // On a multi-user server an agent must not read another agent's /proc/<pid>/environ, where the per-user key is. The
+  // Landlock helper gives a confined process /proc/self and the system-wide files only, and Landlock refuses ptrace
+  // (hence /proc/<pid>/environ) across domains. An unconfined process of the engine's user reads every agent's
+  // environment: with per-user keys on, a No Code agent runs confined, or without native tools (mcp-only).
+  // noCodeSandbox: what noCodeSessionSandbox gave Vibe (null: none); Claude Code and Codex are not confined.
+  function userGatewayKeyIsolationRefusal(options, provider, noCodeSandbox) {
+    // every agent of such a server, whatever its profile or caller (a WEB_ADMIN low-code session too): Landlock does
+    // not hold an unconfined reader back
+    if (!serverUsesUserGatewayKeys()) {
+      return null;
+    }
+    provider = normalizeProvider(provider);
+    if ((provider === "vibe" || provider === "convertigo") && noCodeSandbox && noCodeSandbox.confined === true
+        && (noCodeSandbox.policy === "files" || noCodeSandbox.policy === "mcp-only")) {
+      return null;
+    }
+    return {
+      ok: false,
+      status: "failed",
+      code: "agent_isolation_unavailable",
+      error: "agent_isolation_unavailable: This agent cannot run isolated from the other users' agents on this server. "
+        + "With per-user Tigo keys, only a No Code agent confined by Landlock (files or mcp-only) runs here.",
+      timestamp: now()
+    };
+  }
+
+  // null, or the refusal of a call that needs the user's key and has none. No fallback to the server key.
+  function userGatewayKeyRefusal(options, provider) {
+    if (!userGatewayKeysOn(options) || !runtimeUsesGateway(provider, options)) {
+      return null;
+    }
+    var credential = userGatewayCredential(options);
+    if (credential.reason === "ok") {
+      return null;
+    }
+    return {
+      ok: false,
+      status: "failed",
+      code: "gateway_credential_missing",
+      reason: credential.reason,
+      error: "gateway_credential_missing: The Tigo key of this account is not available. Try again in a moment.",
+      timestamp: now()
+    };
+  }
+
+  // The per-user key replaces whatever the engine's environment or a home .env held: a No Code process gets its user's
+  // key, or no gateway key at all. unset: the names the process must not inherit from the engine (startProcess).
+  function applyUserGatewayKey(env, options, provider) {
+    var applied = { on: false, fingerprint: "", handle: "", unset: [] };
+    if (!userGatewayKeysOn(options)) {
+      return applied;
+    }
+    applied.on = true;
+    delete env[CONVERTIGO_LLM_API_KEY_ENV];
+    delete env[CONVERTIGO_LLM_API_KEY_FILE_MARKER];
+    applied.unset = [CONVERTIGO_LLM_API_KEY_ENV, CONVERTIGO_LLM_API_KEY_FILE_MARKER];
+    if (runtimeUsesGateway(provider, options)) {
+      var credential = userGatewayCredential(options);
+      if (credential.reason === "ok") {
+        if (normalizeProvider(provider) !== "claude") {
+          env[CONVERTIGO_LLM_API_KEY_ENV] = credential.key;
+        }
+        applied.fingerprint = credential.fingerprint;
+        applied.handle = credential.handle;
+      }
+    }
+    return applied;
+  }
+
+  // ---- Gateway budget exhaustion (tigo-nocode-contract.md section 6) ----
+  // LiteLLM 1.99.1 refuses a request over a budget with HTTP 429, error type "budget_exceeded" (BudgetExceededError,
+  // turned into a ProxyException by auth_exception_handler.py). Its message names the level:
+  //   "Budget has been exceeded! Key=<descriptor> Current cost: X, Max budget: Y"            key
+  //   "ExceededBudget: Key over <duration> budget. Spend=..., Limit=..."                       key
+  //   "Budget has been exceeded! User=<id> in Team=<id> Current cost: X, Max budget: Y"      member
+  //   "Budget has been exceeded! Team=<id> Current cost: X, Max budget: Y"                     team
+  //   "ExceededBudget: Team=<id> over <duration> budget. ..."                                  team
+  //   "ExceededBudget: User=<id> over budget. Spend=X, Budget=Y"                               user
+  //   "ExceededBudget: End User=<id> over budget. ..."                                         user
+  //   "Budget has been exceeded! Current cost: X, Max budget: Y" (the member check of the key
+  //   authentication, an organisation, a project, a tag, the proxy itself)                    unknown
+  // An RPM/TPM limit ("Rate limit exceeded for ...") or an upstream 429 is not a budget: it keeps its retryable
+  // handling. The Bridge is the first trusted component that sees the runtime's failure: from here on the error is
+  // {code: "budget_exceeded", scope, retryable: false}, without the gateway message or any entity id.
+  var GATEWAY_BUDGET_SCOPES = ["member", "team", "key", "user", "unknown"];
+  var GATEWAY_BUDGET_MESSAGE = "budget_exceeded: The Tigo budget is used up.";
+  var GATEWAY_BUDGET_EVENT_TYPES = { "turn/error": true, "acp/response_error": true, "error": true, "stderr": true, "turn/failed": true };
+
+  function gatewayErrorTexts(value, depth, out) {
+    if (value === null || value === undefined || depth > 6 || out.length > 60) {
+      return out;
+    }
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      out.push(String(value));
+      return out;
+    }
+    if (typeof value === "object") {
+      for (var name in value) {
+        if (Object.prototype.hasOwnProperty.call(value, name)) {
+          if (name === "type" || name === "code" || name === "errorType") {
+            out.push(name + ":" + String(value[name]));
+          }
+          gatewayErrorTexts(value[name], depth + 1, out);
+        }
+      }
+      return out;
+    }
+    try { out.push(String(value)); } catch (_ignoreText) {}
+    return out;
+  }
+
+  function gatewayBudgetScope(text) {
+    if (/\bUser=\S+\s+in\s+Team=/.test(text)) { return "member"; }
+    if (/\bEnd User=/.test(text)) { return "user"; }
+    if (/\bKey=|\bKey over\b/.test(text)) { return "key"; }
+    if (/\bTeam=/.test(text)) { return "team"; }
+    if (/ExceededBudget:\s*User=/.test(text)) { return "user"; }
+    return "unknown";
+  }
+
+  // {code: "budget_exceeded", scope, retryable: false} for a LiteLLM budget refusal (an error object, its text, or an
+  // already normalized error), else null
+  function gatewayBudgetError(value) {
+    if (value && typeof value === "object" && value.code === "budget_exceeded" && GATEWAY_BUDGET_SCOPES.indexOf(value.scope) >= 0) {
+      return { code: "budget_exceeded", scope: value.scope, retryable: false };
+    }
+    if (value && typeof value === "object" && value.budget && typeof value.budget === "object") {
+      var announced = gatewayBudgetError(value.budget);
+      if (announced !== null) {
+        return announced;
+      }
+    }
+    var text = gatewayErrorTexts(value, 0, []).join("\n");
+    if (!text.length) {
+      return null;
+    }
+    var typed = /(^|[^A-Za-z0-9_])budget_exceeded([^A-Za-z0-9_]|$)/.test(text);
+    var worded = /Budget has been exceeded!|ExceededBudget:/.test(text);
+    if (!typed && !worded) {
+      return null;
+    }
+    return { code: "budget_exceeded", scope: gatewayBudgetScope(text), retryable: false };
+  }
+
+  // The data of an error event (or a stderr line) that carries a budget refusal: the normalized error, the turn's
+  // request id and provider, a neutral message; never the gateway message, a key descriptor or an entity id.
+  function normalizedBudgetEventData(type, data) {
+    if (GATEWAY_BUDGET_EVENT_TYPES[type] !== true || !data || typeof data !== "object" || data.budgetNormalized === true) {
+      return data;
+    }
+    var budget = gatewayBudgetError(data);
+    if (budget === null) {
+      return data;
+    }
+    if (type === "stderr") {
+      return { line: "[gateway] " + GATEWAY_BUDGET_MESSAGE, code: budget.code, scope: budget.scope, retryable: false, budgetNormalized: true };
+    }
+    var normalized = { code: budget.code, scope: budget.scope, retryable: false, budget: budget, message: GATEWAY_BUDGET_MESSAGE, budgetNormalized: true };
+    ["requestId", "method", "provider", "phase", "turnId", "threadId", "sessionId"].forEach(function (name) {
+      if (data[name] !== null && typeof data[name] !== "undefined") {
+        normalized[name] = data[name];
+      }
+    });
+    return normalized;
+  }
+
+  // Vibe 3.1 reports any 429 as "Rate limit exceeded" (ACP -31001), the gateway's body dropped: the runtime's budget
+  // hook (sandbox/python/c8o_gateway_budget.py) prints GATEWAY_BUDGET_MARKER {"scope": ...} on stderr when the 429 it
+  // reads is a budget refusal, and gives up instead of retrying. The Bridge keeps it for the error of the turn.
+  var GATEWAY_BUDGET_MARKER = "C8O_GATEWAY_BUDGET_EXCEEDED";
+
+  function noteGatewayBudgetMarker(entry, line) {
+    var text = trim(line);
+    if (text.indexOf(GATEWAY_BUDGET_MARKER) !== 0 || !entry || normalizeProvider(entry.provider) !== "vibe" || trim(entry.vibeProfile) !== "convertigo") {
+      return false;
+    }
+    var scope = "unknown";
+    try {
+      var parsed = JSON.parse(trim(text.substring(GATEWAY_BUDGET_MARKER.length)));
+      if (parsed && GATEWAY_BUDGET_SCOPES.indexOf(parsed.scope) >= 0) {
+        scope = parsed.scope;
+      }
+    } catch (_ignoreBadMarker) {}
+    var first = !entry.gatewayBudgetRefusal;
+    entry.gatewayBudgetRefusal = { code: "budget_exceeded", scope: scope, retryable: false, at: now() };
+    if (first) {
+      pushEvent(entry, "gateway/budget_exceeded", { code: "budget_exceeded", scope: scope, retryable: false });
+    }
+    return true;
+  }
+
+  // stdout and stderr have a reader thread each: the marker printed before Vibe's error can be read after it. A
+  // rate-limited prompt error of a Vibe on the gateway waits for it a little (the stdout reader, on this error only).
+  var GATEWAY_BUDGET_MARKER_WAIT_MS = 500;
+
+  function awaitGatewayBudgetMarker(entry, error) {
+    if (!entry || entry.gatewayBudgetRefusal || normalizeProvider(entry.provider) !== "vibe" || trim(entry.vibeProfile) !== "convertigo") {
+      return;
+    }
+    var code = error && typeof error === "object" ? Number(error.code) : 0;
+    if (code !== -31001 && !/rate limit|429/i.test(gatewayErrorTexts(error, 0, []).join(" "))) {
+      return;
+    }
+    var deadline = now() + GATEWAY_BUDGET_MARKER_WAIT_MS;
+    while (!entry.gatewayBudgetRefusal && now() < deadline) {
+      try { java.lang.Thread.sleep(25); } catch (_ignoreMarkerWait) { return; }
+    }
+  }
+
+  // The error events of a turn whose runtime announced a budget refusal carry it (the runtime's own error says less).
+  function withGatewayBudgetRefusal(entry, type, data) {
+    if (!entry || !entry.gatewayBudgetRefusal || GATEWAY_BUDGET_EVENT_TYPES[type] !== true || type === "stderr"
+        || !data || typeof data !== "object" || data.budgetNormalized === true) {
+      return data;
+    }
+    var copy = {};
+    for (var name in data) {
+      if (Object.prototype.hasOwnProperty.call(data, name)) {
+        copy[name] = data[name];
+      }
+    }
+    copy.budget = { code: "budget_exceeded", scope: entry.gatewayBudgetRefusal.scope, retryable: false };
+    return copy;
+  }
+
+  // The budget hook of a vibe-acp on the gateway: sandbox/python on PYTHONPATH (already there for a confined one) and
+  // the switch its sitecustomize.py reads; an unconfined one keeps Python's own moves (C8O_SANDBOX_MOVES=0).
+  function applyGatewayBudgetHook(env, noCodeSandbox) {
+    var folder = confinedPythonPath();
+    if (!folder.length) {
+      return false;
+    }
+    env.C8O_GATEWAY_BUDGET_HOOK = "1";
+    var confined = !!(noCodeSandbox && noCodeSandbox.confined === true && trim(noCodeSandbox.pythonPath).length);
+    if (!confined) {
+      env.C8O_SANDBOX_MOVES = "0";
+      env.PYTHONPATH = folder + (trim(env.PYTHONPATH).length ? String(File.pathSeparator) + env.PYTHONPATH : "");
+    }
+    return true;
+  }
+
+  // A home written before the per-user keys holds the server key (and its marker) in its .env: removed, so that nothing
+  // can fall back to it. Other lines (a MISTRAL_API_KEY of the vibe profile) stay.
+  function scrubGatewayKeyFromEnvFile(file) {
+    try {
+      if (file === null || !file.isFile()) {
+        return false;
+      }
+      var lines = readTextFile(file).split(/\r?\n/);
+      var kept = [];
+      var removed = false;
+      var names = [CONVERTIGO_LLM_API_KEY_ENV, CONVERTIGO_LLM_API_KEY_FILE_MARKER];
+      for (var i = 0; i < lines.length; i++) {
+        var match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(lines[i]);
+        if (match && names.indexOf(match[1]) >= 0) {
+          removed = true;
+        } else {
+          kept.push(lines[i]);
+        }
+      }
+      if (removed) {
+        writeTextFile(file, kept.join("\n"));
+      }
+      return removed;
+    } catch (_ignoreScrub) {
+      return false;
+    }
   }
 
   // The PSC of a desktop Studio (<workspace>/studio/psc.txt) carries the registered owner email. A Convertigo 8.5 engine
@@ -1431,7 +2072,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       "codexRuntimeMode", "codexProtocol",
       "agentRevealMode", "convertigoRevealMode", "uiRevealMode", "revealMode",
       "nocodeMcpToken", "noCodeMcpToken", "mcpBearerToken",
-      "nocodeMcpTokenHandle", "noCodeMcpTokenHandle", "mcpBearerTokenHandle",
+      "nocodeMcpTokenHandle", "noCodeMcpTokenHandle", "mcpBearerTokenHandle", "gatewayKeyHandle",
       "browserDebugUrl", "browserDevToolsJsonUrl", "browserDevToolsWebSocketUrl",
       "playwrightCdpEndpoint", "playwrightMcpEndpoint", "viewerCdpEndpoint", "viewerDebugPort"
     ].forEach(function (name) {
@@ -5564,7 +6205,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       var homeDir = new File(report.home);
       ensureDirectory(homeDir);
       syncNewestAgentUserFile(vibeCredentialSourceDirs(options, homeDir), homeDir, ".env", report);
-      if (isConvertigoGatewayProfile(options)) {
+      if (userGatewayKeysOn(options)) {
+        // the user's key reaches the process environment only (applyUserGatewayKey)
+        report.gatewayKey = scrubGatewayKeyFromEnvFile(new File(homeDir, ".env")) ? "user_key_scrubbed" : "user_key";
+      } else if (isConvertigoGatewayProfile(options)) {
         report.gatewayKey = syncConvertigoGatewayKey(options, homeDir, report).reason;
       }
       report.message = "Scoped VIBE_HOME credentials synchronized";
@@ -5946,7 +6590,16 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return info;
   }
 
-  function inspectVibeAuthentication(vibeHome, profile) {
+  function inspectVibeAuthentication(vibeHome, profile, options) {
+    if (profile === "convertigo" && options && userGatewayKeysOn(options)) {
+      // per-user keys: the Assistant brings the user's key at each start; a settings read without one is managed
+      if (!userGatewayKeyHandle(options).length) {
+        return authenticationInfo(true, "user_key", "", "managed");
+      }
+      return userGatewayCredential(options).reason === "ok"
+        ? authenticationInfo(true, "user_key", "")
+        : authenticationInfo(false, "", "tigo_user_key", "user_key_unavailable");
+    }
     if (profile === "convertigo") {
       if (environmentHasValue(CONVERTIGO_LLM_API_KEY_ENV)) {
         return authenticationInfo(true, "environment", "");
@@ -9446,11 +10099,18 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return 0;
   }
 
+  function managedVibePackageRequirement() {
+    return "mistral-vibe==" + MANAGED_VIBE_VERSION;
+  }
+
   function runtimeUpdateStatus(provider, command, latest, source) {
     command = command || {};
     latest = latest || {};
     var installedVersion = extractRuntimeVersion(command.version);
-    var latestVersion = extractRuntimeVersion(latest.latestVersion);
+    var availableVersion = extractRuntimeVersion(latest.latestVersion);
+    // The update action installs the qualified version, not necessarily the registry's newest package.
+    // Apply this when reading old cached checks too, without changing the registry cache itself.
+    var latestVersion = provider === "vibe" && availableVersion.length ? MANAGED_VIBE_VERSION : availableVersion;
     return {
       provider: provider,
       installed: command.found === true,
@@ -9458,6 +10118,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       path: String(command.path || ""),
       installedVersion: installedVersion,
       latestVersion: latestVersion,
+      availableVersion: availableVersion,
+      targetVersion: provider === "vibe" ? MANAGED_VIBE_VERSION : latestVersion,
       checked: latest.checked === true,
       cached: latest.cached === true,
       updateAvailable: installedVersion.length > 0 && latestVersion.length > 0 && compareRuntimeVersions(installedVersion, latestVersion) < 0,
@@ -10077,7 +10739,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       runtime: runtime,
       authentication: gatewayProfile && convertigoGatewayKeyRejected
         ? rejectedGatewayKeyAuthentication(options)
-        : inspectVibeAuthentication(setup.vibeHome, resolveVibeProfile(options)),
+        : inspectVibeAuthentication(setup.vibeHome, resolveVibeProfile(options), options),
       setup: compactVibeSetup(setup),
       skills: skills,
       source: {
@@ -11697,7 +12359,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       index: entry.nextIndex++,
       at: now(),
       type: String(type),
-      data: data || {}
+      data: normalizedBudgetEventData(String(type), withGatewayBudgetRefusal(entry, String(type), redactUserGatewayKey(entry, data || {})))
     };
     // Every provider reports its turns with these three events: keep a common "turn running"
     // flag so interrupt() needs no provider-specific state. Only the end of the running turn's request ends it: a second
@@ -11715,6 +12377,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         entry.turnWriteRefused = false;
         entry.turnInterrupted = false;
         entry.turnActed = false;
+        entry.gatewayBudgetRefusal = null;
+        entry.gatewayBudgetProbed = false;
       }
       entry.turnActive = true;
       keepManagedMcpLease(entry);
@@ -13045,6 +13709,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       return;
     }
     if (streamName !== "stdout" && streamName !== "codex-session") {
+      if (noteGatewayBudgetMarker(entry, text)) {
+        return;
+      }
       pushEvent(entry, streamName, { line: text });
       return;
     }
@@ -13071,6 +13738,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
             entry.restartDetail = turnRefusal;
           }
           if (message.error) {
+            awaitGatewayBudgetMarker(entry, message.error);
             pushEvent(entry, "turn/error", {
               requestId: message.id,
               method: pending.method,
@@ -13415,7 +14083,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       firstCursor: entry.firstIndex,
       nextCursor: entry.nextIndex,
       pendingCount: entry.pending.size(),
-      lastError: entry.lastError,
+      // a budget refusal the runtime wrote there is told by its code, never by the gateway's message
+      lastError: gatewayBudgetError(entry.lastError) !== null ? GATEWAY_BUDGET_MESSAGE : redactUserGatewayKey(entry, entry.lastError),
       closedAt: entry.closedAt
     };
   }
@@ -13430,6 +14099,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     var pb = new ProcessBuilder(toJavaList(guard.command));
     pb.directory(new File(entry.cwd));
     applyEngineProxyEnvironment(pb.environment(), agentProxyTargetUrl(entry.provider, env));
+    (entry.unsetEnv || []).forEach(function (name) { pb.environment().remove(String(name)); });
     envObjectToMap(pb.environment(), env);
     entry.process = pb.start();
     startupMark("process/spawn");
@@ -13495,16 +14165,33 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     if (typeof adapter !== "function") {
       return { ok: false, status: "unsupported", handle: handle, protocol: String(entry.protocol), timestamp: now() };
     }
-    try {
-      if (adapter(entry) !== true) {
-        return { ok: false, status: "not_interruptible", handle: handle, timestamp: now() };
+    // A full stdin pipe can block writeJson itself. The wait budget must include delivery,
+    // otherwise a long tool call can prevent both the interrupt and its close fallback.
+    var delivery = new Packages.java.util.concurrent.atomic.AtomicReference();
+    var interruptedProcess = entry.process;
+    var interruptedRequest = trim(entry.turnRequestId);
+    var signal = new Thread(new Runnable({
+      run: function () {
+        try {
+          if (entry.process !== interruptedProcess || entry.turnActive !== true || trim(entry.turnRequestId) !== interruptedRequest) {
+            delivery.set("obsolete");
+          } else {
+            delivery.set(adapter(entry) === true ? "sent" : "unsupported");
+          }
+        } catch (interruptError) {
+          delivery.set("error: " + String(interruptError));
+        }
       }
-    } catch (interruptError) {
-      return { ok: false, status: "error", handle: handle, error: String(interruptError), timestamp: now() };
-    }
-    pushEvent(entry, "turn/interrupt_requested", { protocol: String(entry.protocol) });
+    }), "lib_ConvertigoAgentBridge-interrupt-" + handle);
+    signal.setDaemon(true);
     var deadline = now() + intValue(options.waitMs, 8000, 0, 30000);
+    pushEvent(entry, "turn/interrupt_requested", { protocol: String(entry.protocol) });
+    signal.start();
     while (entry.turnActive === true && processAlive(entry.process) && now() < deadline) {
+      var delivered = delivery.get();
+      if (delivered !== null && String(delivered) !== "sent") {
+        return { ok: false, status: String(delivered) === "unsupported" ? "not_interruptible" : "error", handle: handle, timestamp: now() };
+      }
       try { Thread.sleep(100); } catch (_ignoreInterruptSleep) {}
     }
     var stopped = entry.turnActive !== true && processAlive(entry.process);
@@ -13624,11 +14311,6 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   };
 
   function stopEntry(entry, removeFromRegistry) {
-    try {
-      if (entry.writer !== null) {
-        entry.writer.close();
-      }
-    } catch (_ignoreWriterClose) {}
     var stoppedTree = false;
     if (entryUsesPidTree(entry) && Number(entry.pid || 0) > 0) {
       try {
@@ -13647,6 +14329,15 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
           }
         }
       } catch (_ignoreDestroy) {}
+    }
+    // BufferedWriter.close shares its lock with write/flush. Kill the process first
+    // so a blocked pipe is released; never wait on its writer while it is still alive.
+    if (!processAlive(entry.process)) {
+      try {
+        if (entry.writer !== null) {
+          entry.writer.close();
+        }
+      } catch (_ignoreWriterClose) {}
     }
     deleteEntryPidFile(entry);
     entry.status = entry.status === "error" ? "error" : "closed";
