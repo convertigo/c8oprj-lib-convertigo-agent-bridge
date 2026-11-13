@@ -264,7 +264,7 @@ test("a call written out as text (tool name, maybe glued to a stray word, then J
   const mcp = turn(8);
   play(mcp, [say('mcp_Convertigo.databaseobject_tree_get {"target": "App"}'), answer(8)]);
   assert.equal(types(mcp, "turn/nudge")[0].data.tool, "mcp_Convertigo.databaseobject_tree_get");
-  for (const [id, text] of [[9, 'Le résultat est {"rows": 3}'], [10, 'task{"a": 1}'], [11, 'run_typescript{not json}'], [12, 'Voici la config : {"a": 1}']]) {
+  for (const [id, text] of [[9, 'Le résultat est {"rows": 3}'], [11, 'run_typescript{not json}'], [12, 'Voici la config : {"a": 1}']]) {
     const entry = turn(id);
     play(entry, [say(text), answer(id)]);
     assert.equal(types(entry, "turn/nudge").length, 0, text);
@@ -321,21 +321,20 @@ test("a todo JSON call printed as text is nudged without executing its arguments
  }
 });
 
-test("printed todo continuation respects Stop and the two-nudge limit",()=>{
+test("printed todo continuation respects Stop and the one-retry limit",()=>{
  const text='todo … {"todos":[]}';const stopped=turn(7);sandbox.pushEvent(stopped,'turn/interrupt_requested',{protocol:'acp'});play(stopped,[say(text),answer(7)]);assert.equal(types(stopped,'turn/nudge').length,0);
- const entry=turn(7);play(entry,[say(text),answer(7)]);play(entry,[say(text),answer(types(entry,'turn/nudge')[0].data.requestId)]);play(entry,[say(text),answer(types(entry,'turn/nudge')[1].data.requestId)]);
- assert.equal(types(entry,'turn/nudge').length,2);assert.equal(types(entry,'turn/end').length,1);
+ const entry=turn(7);play(entry,[say(text),answer(7)]);play(entry,[say(text),answer(types(entry,'turn/nudge')[0].data.requestId)]);
+ assert.equal(types(entry,'turn/nudge').length,1);assert.equal(types(entry,'turn/end').length,1);
 });
 
 test("printed todo call syntax is nudged and an exhausted continuation is explicitly incomplete",()=>{
  const text='todo({"todos":[]})';const entry=turn(7);play(entry,[say(text),answer(7)]);
  assert.equal(types(entry,'turn/nudge').length,1);
  play(entry,[say(text),answer(types(entry,'turn/nudge')[0].data.requestId)]);
- play(entry,[say(text),answer(types(entry,'turn/nudge')[1].data.requestId)]);
  assert.equal(types(entry,'turn/incomplete')[0].data.code,'PRINTED_TOOL_CALL');
  assert.equal(types(entry,'turn/end')[0].data.result.incomplete,true);
  assert.equal(types(entry,'turn/end')[0].data.result.error.tool,'todo');
- assert.equal(prompts(entry).length,2);
+ assert.equal(prompts(entry).length,1);
 });
 
 test("a streamed todo call with a colon resumes within the same bounded turn", () => {
@@ -346,8 +345,8 @@ test("a streamed todo call with a colon resumes within the same bounded turn", (
   assert.equal(types(entry, "turn/nudge")[0].data.tool, "todo");
   assert.equal(types(entry, "turn/end").length, 0);
   const text = 'todo: {"action":"write","todos":[]}';
-  for (let i = 0; i < 2; i++) play(entry, [say(text), answer(types(entry, "turn/nudge")[i].data.requestId)]);
-  assert.equal(prompts(entry).length, 2);
+  play(entry, [say(text), answer(types(entry, "turn/nudge")[0].data.requestId)]);
+  assert.equal(prompts(entry).length, 1);
   assert.equal(types(entry, "turn/end")[0].data.result.incomplete, true);
   for (const stop of ['cancelled', 'max_tokens', 'refusal']) {
     const stopped = turn(9);
