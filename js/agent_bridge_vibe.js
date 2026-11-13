@@ -1228,8 +1228,8 @@
       forgetSessionHandle(handle);
       return { ok: true, status: "not_found", handle: handle, timestamp: now() };
     }
-    // An explicit close is the fallback when session/cancel did not finish the turn.
-    // Do not wait on another protocol write (session/close) to the same blocked pipe.
+    // All explicit closes, idle sessions included, use bounded process shutdown.
+    // The cancel fallback must not wait on another session/close write to a blocked pipe.
     var stateBeforeRemove = statusOf(entry);
     stopEntry(entry, true);
     return {
