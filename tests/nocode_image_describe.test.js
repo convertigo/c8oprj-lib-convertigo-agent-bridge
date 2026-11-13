@@ -110,7 +110,7 @@ test('nothing is described in the Studio, without image-describe or without a ga
 
 test('vibePrompt filters a No Code session\'s paths, adds the descriptions and keeps the note for the images left', () => {
   assert.match(vibeSource, /entry\.noCode === true \? function \(path\) \{ return noCodeAttachmentAllowed\(entry, path\); \} : null\);/);
-  assert.match(vibeSource, /var described = describeImagesForBlindModel\(entry, images\.skipped\);/);
+  assert.match(vibeSource, /var described = describeImagesForBlindModel\(entry, images\.skipped, \{ options: options \}\);/);
   assert.match(vibeSource, /promptBlocks\[0\]\.text \+= described\.text;\n\s+images\.skipped = images\.skipped\.filter/);
   assert.match(vibeSource, /new File\(project\.getDirFile\(\), "js\/tools_image_describe\.js"\)/);
   assert.match(commonSource, /summed\[VIBE_DESCRIBED_IMAGES_FILE\] = described\.segment;/);
@@ -147,4 +147,23 @@ test('each described image shows in the turn as an image-describe call, read fro
   assert.deepEqual(JSON.parse(done.detail), { description: 'Nom, Date', model: 'mistral/mistral-large-4', image: { path: mine + '/conversations/a/attachments/form.png', mimeType: 'image/png', bytes: 1200 } });
   assert.match(vibeSource, /var turnCursor = entry\.nextIndex;\n\s+pushDescribedImageEvents\(entry, described\);/);
   assert.match(vibeSource, /status: "submitted",\n\s+handle: handle,\n\s+requestId: pending\.id,\n\s+cursor: turnCursor,/);
+});
+
+test('a used-up budget stops the descriptions at the first refusal and ends the prompt before it is sent', () => {
+  const clock = { now: 0 };
+  const calls = [];
+  const api = {
+    javaHost: () => ({ decodeBase64() {}, encodeBase64() {}, now: () => clock.now, post: () => ({}) }),
+    run(params) {
+      calls.push(params.path);
+      throw new Error('The LLM gateway refused the image request (HTTP 429): Budget has been exceeded! User=lu-1 in Team=t-1 Current cost: 2, Max budget: 1');
+    }
+  };
+  const report = withFakes({ File: FakeFile, now: () => clock.now }, () =>
+    describeImagesForBlindModel(entry, [blind('a.png'), blind('b.png')], { api, key: 'sk-user', record() {} }));
+  assert.equal(calls.length, 1, 'no further call once the budget is used up');
+  assert.deepEqual(Object.assign({}, report.budget), { code: 'budget_exceeded', scope: 'member', retryable: false });
+  assert.equal(report.failed[0].reason, 'budget_exceeded', 'the gateway message is not kept');
+  assert.equal(report.text, '');
+  assert.match(vibeSource, /if \(described\.budget\) \{[\s\S]{0,300}code: described\.budget\.code, scope: described\.budget\.scope,\n\s+retryable: false, budget: described\.budget, error: GATEWAY_BUDGET_MESSAGE/);
 });

@@ -4,6 +4,7 @@ comment: Send a prompt to a running Vibe ACP session. By default the call return
     'include("js/vibe_agent_bridge.js");
     C8O.agentBridge.requireCaller();
     result = C8O.agentBridge.vibePrompt({
+      gatewayKeyHandle: typeof gatewayKeyHandle === "undefined" ? "" : gatewayKeyHandle,
       tigoResourcesHandle: typeof tigoResourcesHandle === "undefined" ? "" : tigoResourcesHandle,
       handle: typeof handle === "undefined" ? "" : handle,
       prompt: typeof prompt === "undefined" ? "" : prompt,
@@ -50,6 +51,13 @@ comment: Send a prompt to a running Vibe ACP session. By default the call return
   description: Optional JSON array of local image paths attached to the prompt. Sent to Vibe as ACP image blocks when the active model supports images.
 ↓tigoResourcesHandle [variables.RequestableVariable-1792084008575]: 
   comment: Opaque server-only Tigo MCP context handle; never contains credentials.
+  value: 
+    - ↑ciphered: true
+    - ↑traceable: false
+    - →→: xd8e180806a1c1d83a6255212121ab827
+  visibility: 15
+↓gatewayKeyHandle [variables.RequestableVariable-1794320000102]: 
+  comment: Opaque server-only handle of the No Code user's Tigo gateway key (per-user keys); never contains the key.
   value: 
     - ↑ciphered: true
     - ↑traceable: false

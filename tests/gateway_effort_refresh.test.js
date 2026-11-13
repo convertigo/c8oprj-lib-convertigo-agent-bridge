@@ -55,12 +55,7 @@ test('ordinary catalog renewal keeps positive efforts; an explicit refresh reche
 test('an unrelated unsupported parameter is not a negative effort capability', () => {
   const f = fixture([]);
   let body = '{"error":{"message":"max_tokens is not supported"}}';
-  f.s.java = { lang: { String: function (text) { this.getBytes = () => text; this.toString = () => text; } } };
-  f.s.URL = function () { return { openConnection: () => ({
-    setConnectTimeout() {}, setReadTimeout() {}, setRequestMethod() {}, setDoOutput() {}, setRequestProperty() {},
-    getOutputStream: () => ({ write() {}, close() {} }), getResponseCode: () => 400,
-    getErrorStream: () => ({ readAllBytes: () => body, close() {} }), disconnect() {}
-  }) }; };
+  f.s.postGatewayChatCompletion = () => ({ status: 400, text: body });
   assert.equal(f.s.probeGatewayModelEffort({}, 'synthetic-test-value', f.model, 'high'), 'unknown');
   body = '{"error":{"message":"reasoning_effort high is not supported"}}';
   assert.equal(f.s.probeGatewayModelEffort({}, 'synthetic-test-value', f.model, 'high'), 'no');
