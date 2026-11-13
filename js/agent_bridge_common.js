@@ -13599,7 +13599,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     var prompt = nudge.reason === "tool_name"
       ? "Note from the Agent Bridge: your last message was only the name of the tool `" + nudge.tool + "`, with no call to it, so your turn ended. Call the tool now, or give your final answer."
       : nudge.reason === "printed_call"
-      ? "Note from the Agent Bridge: your last message wrote a call to the tool `" + nudge.tool + "` as text instead of making it, so it was not executed. Emit it as a real tool call, then continue."
+      ? "Note from the Agent Bridge: your last message wrote a call to the tool `" + nudge.tool + "` as text instead of making it, so it was not executed. Emit it as a real tool call, then continue. If you only meant to show an example, give a brief final explanation instead."
       : nudge.reason === "tool_error"
       ? "Note from the Agent Bridge: your last message was only the error of " + (nudge.tool ? "a call to the tool `" + nudge.tool + "`" : "a tool call") +
         ", not an answer, so your turn ended with your plan unfinished (" + nudge.plan.done + " of " + nudge.plan.total + " steps done" +
