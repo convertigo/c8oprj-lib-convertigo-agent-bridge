@@ -3602,11 +3602,42 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return agentCapabilityProfile({ agentProfile: profile }).label;
   }
 
+  // The viewer rules of the agent browser of the Electron Studio (studioAgentBrowserCdpPort), in place of the Studio
+  // JxBrowser ones: a dedicated browser window whose one page stays on about:blank until the agent navigates it (the
+  // Studio does not show the viewer there), where a new page cannot be opened (no Target.createTarget) and where
+  // Browser.close would end the browser itself.
+  var STUDIO_AGENT_BROWSER_ATTACHED = "They are attached to the Studio agent browser over CDP.";
+  var STUDIO_AGENT_BROWSER_PAGE_RULE = "- The Studio agent browser, a dedicated browser window of the Electron Studio, exposes ONE existing page over CDP, `about:blank` until you navigate it. Reuse that page: navigate it with the Playwright `browser_navigate` tool to the viewer URL (the `viewerHomeUrl`, else `viewerBaseUrl`, that `mobile-builder-open` returns; for Flow, the dev viewer URL of the capability pack), then use snapshot, click and evaluate on it. Do not open a new tab or page (not supported), do not close tabs or the browser, never call `Browser.close`, and do not drive it with ad hoc `require('playwright')` scripts or raw CDP. This replaces the Studio JxBrowser rules of the Convertigo skills.";
+  var STUDIO_AGENT_BROWSER_READY_RULE = "- Navigate the agent browser once the viewer is ready: `mobile-builder-open` reports `status:\"ready\"` (while it reports `building`, poll `mobile-builder-open(stateOnly=true, wait=true)`), or the Flow capability pack reports its dev viewer ready. `mobile-builder-open` does not drive this browser: do not wait for `browserDebugPortMatched` or `browserControlReady`.";
+  var STUDIO_AGENT_BROWSER_FAILURE_RULE = "- If the Playwright tools are unavailable, disabled, or cannot reach the agent browser after one retry about 10 s later (the Studio restarts it when it stops), report the host configuration problem to the user instead of bypassing it with Node scripts, raw CDP WebSocket code, or a new browser. A page on `about:blank` only means it is not navigated yet.";
+
+  // Codex and Vibe Studio homes take their viewer rules from the Convertigo skills, written for the Studio JxBrowser:
+  // a turn of a conversation attached to the agent browser of the Electron Studio restates the rules of that browser.
+  var STUDIO_AGENT_BROWSER_TURN_MARKER = "Convertigo Studio agent browser for this turn";
+
+  function withStudioAgentBrowserPrompt(promptText, playwrightCdpEndpoint) {
+    var text = String(promptText || "");
+    var studioEndpoint = studioAgentBrowserCdpEndpoint();
+    if (!studioEndpoint.length || trim(playwrightCdpEndpoint) !== studioEndpoint || text.indexOf(STUDIO_AGENT_BROWSER_TURN_MARKER) !== -1) {
+      return text;
+    }
+    return [
+      STUDIO_AGENT_BROWSER_TURN_MARKER + ":",
+      "- The managed Playwright MCP tools are attached to the Studio agent browser over CDP.",
+      STUDIO_AGENT_BROWSER_PAGE_RULE,
+      STUDIO_AGENT_BROWSER_READY_RULE,
+      STUDIO_AGENT_BROWSER_FAILURE_RULE,
+      "",
+      text
+    ].join("\n");
+  }
+
   function agentSkillInstructions(provider, profile) {
     var capabilityProfile = agentCapabilityProfile({ agentProfile: profile });
     var isNoCode = capabilityProfile.id === "nocode";
     var isFlow = capabilityProfile.id === "flow";
     var isVibe = normalizeProvider(provider) === "vibe";
+    var agentBrowser = studioAgentBrowserCdpPort() > 0;
     if (isNoCode) {
       return [
         "# Convertigo No Code Agent Instructions",
@@ -3638,15 +3669,15 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       isFlow ? "- After the first frontend read of every turn, call the idempotent `dev.ensure` action with `wait:false` before mutation so a resumed conversation repairs a stopped viewer immediately." : "",
       isFlow ? "- Import generated or supplied images with `frontend-svelte-asset-import`, use its returned `resources/...` URL unchanged, and never copy assets with shell commands or into generated static folders." : "",
       isFlow ? "" : "- If `mobile-builder-open(stateOnly=true)` returns `status:\"stopped\"`, immediately call it once with `stateOnly=false, wait=false`; do not spend a timeout polling an inactive builder.",
-      "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
+      agentBrowser ? STUDIO_AGENT_BROWSER_PAGE_RULE : "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
       "- Playwright MCP files live in `.playwright-mcp/` under your working directory: pass `filename:\".playwright-mcp/<name>.png\"` to `browser_take_screenshot` (a bare file name lands in the working directory itself); to reload the viewer, call `browser_navigate` with its URL, never `location.reload()` inside `browser_evaluate` (the navigation destroys the evaluation context); and a file the viewer downloads (an export) is saved without any dialog in `.playwright-mcp/downloads/`, where you can read it. Playwright does not manage the downloads of the attached Studio browser, so `page.waitForEvent('download')` never fires there: click, then wait for the file to appear in `.playwright-mcp/downloads/` (poll its listing with a bounded wait, newest file first) and read it. Playwright MCP only reads files inside your working directory: write `browser_run_code_unsafe` scripts in `.playwright-mcp/scripts/` and pass that relative path.",
       "- For viewer automation, use the Playwright MCP tools exposed by the managed Codex configuration. Do not run ad hoc shell scripts with `require('playwright')`, and do not launch a separate browser unless explicitly needed.",
-      isFlow ? "- Use Playwright only after the capability pack reports that the dev viewer is ready and the managed browser target shows that viewer." : "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`.",
+      agentBrowser ? STUDIO_AGENT_BROWSER_READY_RULE : (isFlow ? "- Use Playwright only after the capability pack reports that the dev viewer is ready and the managed browser target shows that viewer." : "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`."),
       "- Known-good fast check: `playwright.browser_tabs({action:\"list\"})`, then `playwright.browser_find({text:\"<visible text>\"})`; use `playwright.browser_evaluate({function:\"...\"})` only for DOM state or timing. Do not probe unsupported browser features first.",
       // Flow sessions do not use the legacy Convertigo MCP surface, so browser-verify is not theirs: they keep the scripted proof.
       isFlow ? "- For a functional proof (a login, a path through pages, a form, the values to check), do not drive the page one click or one evaluate per tool call: each call costs a full model step. Write the whole scenario as one Playwright script in a workspace file (`async (page) => { ...; return results; }`: navigate, click, fill, read the values, `page.screenshot({path:\".playwright-mcp/<page>.png\"})` at each page) and run it with one `playwright.browser_run_code_unsafe({filename:\"<file>\"})` call; keep each script under 45 s, one script per path, and fix and rerun the script instead of continuing by hand. Then check the screenshots (with `image-describe` when your model cannot read images)." : "- Delegate each functional and visual browser proof (a login, a path through pages, a form, the values and the look to check) to a verifier sub-agent, the Convertigo MCP tool `subagent-run` with `profile:\"verifier\"` (or its shortcut `browser-verify`), one run per lot: `task` = what to prove, and in `inputs`: `url` = `viewerHomeUrl`, `paths` = one plain-language path per user journey with the values to type and the result to read, `checks` = the acceptance criteria with the exact expected texts, `hints` = demo accounts and expected values. A call answers within about 50 s: on `status:\"running\"`, call it again with the id alone (`runId`, or `verificationId` for `browser-verify`) until the report comes. Its vision sub-agent drives the same viewer and returns each check with its evidence, the visual defects (glued texts, overlaps, cut text, missing accents) and its screenshots; it never edits the project. Fix what it reports and verify the affected paths again; check a doubtful finding with `image-describe` or one targeted Playwright call. Without `browser-verify`, do not drive the page one call per click: script each path as one `playwright.browser_run_code_unsafe({filename:\"<file>\"})` call.",
-      isFlow ? "- If the browser target is `about:blank`, use the capability pack readiness contract before browser proof." : "- If the browser target is `about:blank` while builder status is `building`, poll `mobile-builder-open(stateOnly=true, wait=true)` before Playwright. If status is `stopped`, launch asynchronously instead.",
-      isFlow ? "- If Playwright is unavailable, disabled, still on `about:blank`, or attached to another endpoint, report the host configuration problem instead of bypassing it." : "- If `mobile-builder-open` reports `browserControlReady:true` but the Playwright/browser-control MCP tools are unavailable, disabled, still on `about:blank`, or attached to another endpoint, report the configuration problem to the user instead of bypassing it with Node scripts, raw CDP WebSocket code, or a new browser.",
+      agentBrowser ? "" : (isFlow ? "- If the browser target is `about:blank`, use the capability pack readiness contract before browser proof." : "- If the browser target is `about:blank` while builder status is `building`, poll `mobile-builder-open(stateOnly=true, wait=true)` before Playwright. If status is `stopped`, launch asynchronously instead."),
+      agentBrowser ? STUDIO_AGENT_BROWSER_FAILURE_RULE : (isFlow ? "- If Playwright is unavailable, disabled, still on `about:blank`, or attached to another endpoint, report the host configuration problem instead of bypassing it." : "- If `mobile-builder-open` reports `browserControlReady:true` but the Playwright/browser-control MCP tools are unavailable, disabled, still on `about:blank`, or attached to another endpoint, report the configuration problem to the user instead of bypassing it with Node scripts, raw CDP WebSocket code, or a new browser."),
       "- If a prompt says Convertigo runtime reveal mode is enabled, pass `reveal:true` only on supported Convertigo mutation/viewer tools that should visibly move Studio or No Code Studio; do not add it to read-only calls.",
       isFlow ? "- Keep viewer starts and synchronization asynchronous until the final acceptance proof." : "- For `mobile-builder-open`, use `wait:false` for reveal/focus polls; reserve long `wait:true` calls for readiness proof and omit `reveal` unless the user specifically needs UI focus.",
       isVibe ? "- Treat the Convertigo MCP transport as serial: issue exactly one Convertigo MCP tool call per assistant message, including reads. Never group Convertigo tool calls in one response." : "",
@@ -4009,22 +4040,60 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return text;
   }
 
+  // The Electron Studio names the CDP port of its agent browser on the engine command line; the Eclipse Studio never
+  // sets it. That browser is a dedicated process of the Studio, one for the whole Studio, with one page that the agent
+  // navigates itself; the Studio restarts it when it stops, so the port stays valid while the process is down.
+  var STUDIO_AGENT_BROWSER_CDP_PORT_PROPERTY = "convertigo.studio.cdp.port";
+
+  // The port of the agent browser of the Electron Studio, 0 without it (Eclipse Studio, server) or when the value is
+  // not a port.
+  function studioAgentBrowserCdpPort() {
+    try {
+      var value = System.getProperty(STUDIO_AGENT_BROWSER_CDP_PORT_PROPERTY);
+      if (value === null || typeof value === "undefined") {
+        return 0;
+      }
+      var text = trim(String(value));
+      if (!/^[0-9]{1,5}$/.test(text)) {
+        return 0;
+      }
+      var port = Number(text);
+      return port >= 1024 && port <= 65535 ? port : 0;
+    } catch (_ignoreStudioAgentBrowserCdpPort) {
+      return 0;
+    }
+  }
+
+  function studioAgentBrowserCdpEndpoint() {
+    var port = studioAgentBrowserCdpPort();
+    return port > 0 ? "http://127.0.0.1:" + port : "";
+  }
+
   function resolvePlaywrightMcpCdpEndpoint(options) {
     options = options || {};
+    var endpoint = "";
     var viewerDebugPort = intValue(options.viewerDebugPort, 0, 0, 65535);
     if (viewerDebugPort >= 1024) {
-      return "http://127.0.0.1:" + viewerDebugPort;
+      endpoint = "http://127.0.0.1:" + viewerDebugPort;
+    } else {
+      endpoint = trim(
+        options.playwrightCdpEndpoint ||
+        options.viewerCdpEndpoint ||
+        options.browserDebugUrl ||
+        options.browserDevToolsWebSocketUrl ||
+        options.browserDevToolsJsonUrl ||
+        options.playwrightMcpEndpoint
+      );
+      if (endpoint.match(/\/json\/?$/)) {
+        endpoint = endpoint.replace(/\/json\/?$/, "");
+      }
     }
-    var endpoint = trim(
-      options.playwrightCdpEndpoint ||
-      options.viewerCdpEndpoint ||
-      options.browserDebugUrl ||
-      options.browserDevToolsWebSocketUrl ||
-      options.browserDevToolsJsonUrl ||
-      options.playwrightMcpEndpoint
-    );
-    if (endpoint.match(/\/json\/?$/)) {
-      return endpoint.replace(/\/json\/?$/, "");
+    // In the Electron Studio, the agent browser replaces whatever viewer endpoint a conversation would get (its leased
+    // port included, which has no effect there): one endpoint for the whole Studio, so a running process never needs a
+    // restart for it. A call that resolves no endpoint (No Code, settings reads, a home without a viewer) still gets none.
+    var studioEndpoint = studioAgentBrowserCdpEndpoint();
+    if (studioEndpoint.length && endpoint.length) {
+      return studioEndpoint;
     }
     return endpoint;
   }
@@ -4076,16 +4145,26 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
 
   function ensureManagedViewerDebugPort(options) {
     options = options || {};
+    // The Electron Studio has one agent browser for the whole Studio: its port is the viewer port of every conversation
+    // that gets one (it travels in X-Convertigo-Viewer-Debug-Port like a leased port), without a lease file.
+    var studioCdpPort = studioAgentBrowserCdpPort();
     var explicitPort = intValue(options.viewerDebugPort, 0, 0, 65535);
     if (explicitPort >= 1024) {
-      options.viewerDebugPort = explicitPort;
-      return explicitPort;
+      options.viewerDebugPort = studioCdpPort > 0 ? studioCdpPort : explicitPort;
+      return options.viewerDebugPort;
     }
     if (boolValue(options.disableViewerDebugPortReservation || options.skipViewerDebugPortReservation, false)) {
       return 0;
     }
     if (normalizeSkillProfile(options) === "nocode") {
       return 0;
+    }
+    if (studioCdpPort > 0) {
+      if (!trim(options.conversationId || options.threadid || options.handle).length) {
+        return 0;
+      }
+      options.viewerDebugPort = studioCdpPort;
+      return studioCdpPort;
     }
     var leaseFile = viewerDebugPortLeaseFile(options);
     if (leaseFile === null) {

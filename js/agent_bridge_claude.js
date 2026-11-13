@@ -1390,6 +1390,8 @@
     var isNoCode = capabilityProfile.id === "nocode";
     // A Studio home with Flow available holds both packs: the router picks one per task.
     var routed = !isNoCode && flowCapabilityAvailable();
+    // The agent browser of the Electron Studio in place of the Studio JxBrowser viewer (studioAgentBrowserCdpPort).
+    var agentBrowser = !isNoCode && studioAgentBrowserCdpPort() > 0;
     return [
       "# Convertigo Agent Instructions",
       "",
@@ -1408,12 +1410,12 @@
         : "- Use the `" + capabilityProfile.mcpServerName + "` MCP server (tools named `mcp__" + capabilityProfile.mcpServerName + "__*`) whenever you need to inspect, modify, save, reload, or validate Convertigo projects.",
       "- The Convertigo MCP server is the only source of truth for Convertigo projects. If it is unavailable, returns an authorization error (HTTP 401/403), or its tools are missing, stop immediately and report the configuration defect to the user. Never browse the workspace filesystem, project folders, or descriptors as a substitute for MCP.",
       "- When `mobile-builder-open` returns `browserDebugUrl`, `browserDevToolsJsonUrl`, or `browserDevToolsWebSocketUrl`, treat it as the visible Studio mobile viewer and prefer inspecting or driving that viewer over opening a separate browser.",
-      "- For viewer automation, use the managed `playwright` MCP server tools (`mcp__playwright__browser_tabs`, `mcp__playwright__browser_snapshot`, `mcp__playwright__browser_click`, `mcp__playwright__browser_evaluate`, ...). They are attached to the Studio JxBrowser viewer over CDP. Do not run ad hoc scripts with `require('playwright')`, raw CDP, or a separate browser.",
-      "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`. If the browser target is `about:blank` while builder status is `building`, poll `mobile-builder-open(stateOnly=true, wait=true)` first.",
-      "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
+      "- For viewer automation, use the managed `playwright` MCP server tools (`mcp__playwright__browser_tabs`, `mcp__playwright__browser_snapshot`, `mcp__playwright__browser_click`, `mcp__playwright__browser_evaluate`, ...). " + (agentBrowser ? STUDIO_AGENT_BROWSER_ATTACHED : "They are attached to the Studio JxBrowser viewer over CDP.") + " Do not run ad hoc scripts with `require('playwright')`, raw CDP, or a separate browser.",
+      agentBrowser ? STUDIO_AGENT_BROWSER_READY_RULE : "- Use Playwright only after `mobile-builder-open` reports both `browserDebugPortMatched:true` and `browserControlReady:true`. If the browser target is `about:blank` while builder status is `building`, poll `mobile-builder-open(stateOnly=true, wait=true)` first.",
+      agentBrowser ? STUDIO_AGENT_BROWSER_PAGE_RULE : "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
       // The absolute path: "under your working directory" was read as the Studio workspace, where the screenshot was not (run 10).
       "- Playwright MCP files live in `" + claudePlaywrightOutputDir(options) + "`: pass `filename:\"" + claudePlaywrightOutputDir(options) + "/<name>.png\"` to `browser_take_screenshot` (a bare file name lands in the working directory itself) and read it at that path; to reload the viewer, call `browser_navigate` with its URL, never `location.reload()` inside `browser_evaluate`; and a file the viewer downloads (an export) is saved without any dialog in `" + claudePlaywrightOutputDir(options) + "/downloads/`. Playwright does not manage the downloads of the attached Studio browser, so `page.waitForEvent('download')` never fires there: click, then wait for the file to appear in `" + claudePlaywrightOutputDir(options) + "/downloads/` (poll its listing with a bounded wait, newest file first) and read it. Playwright MCP only reads files inside `" + claudeWorkingDir(options) + "`: write `browser_run_code_unsafe` scripts in `" + claudePlaywrightOutputDir(options) + "/scripts/` and pass that path.",
-      "- If the `playwright` MCP server is unavailable, disabled, still on `about:blank`, or attached to another endpoint after readiness, report the host configuration problem to the user instead of bypassing it; if no viewer automation is configured at all, report the result as implemented but functionally unvalidated.",
+      agentBrowser ? STUDIO_AGENT_BROWSER_FAILURE_RULE + " If no viewer automation is configured at all, report the result as implemented but functionally unvalidated." : "- If the `playwright` MCP server is unavailable, disabled, still on `about:blank`, or attached to another endpoint after readiness, report the host configuration problem to the user instead of bypassing it; if no viewer automation is configured at all, report the result as implemented but functionally unvalidated.",
       "- If `mobile-builder-open(stateOnly=true)` returns `status:\"stopped\"`, immediately call it once with `stateOnly=false, wait=false`; do not spend a timeout polling an inactive builder.",
       "- If a prompt says Convertigo runtime reveal mode is enabled, pass `reveal:true` only on supported Convertigo mutation/viewer tools; do not add it to read-only calls.",
       isNoCode ? "- You are in the C8Oforms / No-Code Studio surface, not in Eclipse Studio. A selected Convertigo project is optional in this surface." : "- Work on the selected project unless the user explicitly asks for another project.",
@@ -1438,6 +1440,7 @@
 
   function claudeFlowInstructions(options) {
     var server = VIBE_FLOW_MCP_SERVER_NAME;
+    var agentBrowser = studioAgentBrowserCdpPort() > 0;
     return [
       "# Convertigo Agent Instructions (Flow)",
       "",
@@ -1458,11 +1461,11 @@
       "",
       "## Studio viewer",
       "",
-      "- For viewer automation, use the managed `playwright` MCP server tools (`mcp__playwright__browser_snapshot`, `mcp__playwright__browser_click`, `mcp__playwright__browser_evaluate`, ...). They are attached to the Studio JxBrowser viewer over CDP. Do not run ad hoc scripts with `require('playwright')`, raw CDP, or a separate browser.",
-      "- Use Playwright only after `frontend-svelte-action` with `actionId:\"dev.open\"` reports `browserControlReady:true`.",
-      "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
+      "- For viewer automation, use the managed `playwright` MCP server tools (`mcp__playwright__browser_snapshot`, `mcp__playwright__browser_click`, `mcp__playwright__browser_evaluate`, ...). " + (agentBrowser ? STUDIO_AGENT_BROWSER_ATTACHED : "They are attached to the Studio JxBrowser viewer over CDP.") + " Do not run ad hoc scripts with `require('playwright')`, raw CDP, or a separate browser.",
+      agentBrowser ? STUDIO_AGENT_BROWSER_READY_RULE : "- Use Playwright only after `frontend-svelte-action` with `actionId:\"dev.open\"` reports `browserControlReady:true`.",
+      agentBrowser ? STUDIO_AGENT_BROWSER_PAGE_RULE : "- Studio JxBrowser exposes one existing visible page over CDP, not a normal multi-tab browser. Reuse it and do not create, open, close, select, or navigate tabs/pages.",
       "- Playwright MCP files live in `" + claudePlaywrightOutputDir(options) + "`: screenshots go there (read them at that path), and a file the viewer downloads (an export) is saved without any dialog in `" + claudePlaywrightOutputDir(options) + "/downloads/`. Playwright does not manage the downloads of the attached Studio browser, so `page.waitForEvent('download')` never fires there: click, then wait for the file to appear in `" + claudePlaywrightOutputDir(options) + "/downloads/` (poll its listing, newest file first) and read it. Playwright MCP only reads files inside `" + claudeWorkingDir(options) + "`: write `browser_run_code_unsafe` scripts in `" + claudePlaywrightOutputDir(options) + "/scripts/` and pass that path.",
-      "- If the `playwright` MCP server is unavailable, disabled, still on `about:blank`, or attached to another endpoint after readiness, report the host configuration problem to the user instead of bypassing it; if no viewer automation is configured at all, report the result as implemented but functionally unvalidated.",
+      agentBrowser ? STUDIO_AGENT_BROWSER_FAILURE_RULE + " If no viewer automation is configured at all, report the result as implemented but functionally unvalidated." : "- If the `playwright` MCP server is unavailable, disabled, still on `about:blank`, or attached to another endpoint after readiness, report the host configuration problem to the user instead of bypassing it; if no viewer automation is configured at all, report the result as implemented but functionally unvalidated.",
       "",
       "## Working rules",
       "",

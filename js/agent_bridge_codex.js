@@ -2557,6 +2557,7 @@
       entry.codexAppServerStreamedItems = {};
       entry.codexAppServerItemDeltas = {};
       promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
+      promptText = withStudioAgentBrowserPrompt(promptText, entry.playwrightCdpEndpoint);
       if (!trim(entry.codexThreadId || entry.sessionId).length) {
         return { ok: false, status: "error", handle: handle, error: "Codex app-server thread id is missing", state: statusOf(entry), timestamp: now() };
       }
@@ -2619,6 +2620,7 @@
     entry.lastCodexAnswerChunk = "";
     entry.codexTurnEnded = false;
     promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
+    promptText = withStudioAgentBrowserPrompt(promptText, entry.playwrightCdpEndpoint);
     entry.command = codexCommand(entry.codexPath || "codex", entry, options, promptText);
     entry.envKeys = envKeys(env);
     pushEvent(entry, "turn/start", {

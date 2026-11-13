@@ -134,6 +134,19 @@ same context.
 - Playwright tool names are `mcp__playwright__browser_*` for Claude. A Claude
   conversation gets the Flow capability pack only with the `flow` profile
   (Codex and Vibe Studio homes get it with any Studio profile).
+- Electron Studio: the engine runs with the Java system property
+  `convertigo.studio.cdp.port`, the CDP port of the Studio agent browser (one
+  browser for the whole Studio, one page, `about:blank` until the agent
+  navigates it; no `Target.createTarget`; `Browser.close` ends it). The Eclipse
+  Studio never sets it. With it (`studioAgentBrowserCdpPort`, a value that is
+  not a port 1024-65535 is ignored), `ensureManagedViewerDebugPort` gives every
+  conversation that would lease a port that port instead, with no lease file,
+  and `resolvePlaywrightMcpCdpEndpoint` turns every endpoint it would resolve
+  into `http://127.0.0.1:<port>` (a call that resolves none still resolves
+  none). The agent instructions of the three runtimes describe that browser
+  instead of the Studio JxBrowser, and a Codex or Vibe turn on it is prefixed by
+  `withStudioAgentBrowserPrompt`, since their Studio homes take the viewer rules
+  from the Convertigo skills. Run `node --test tests/electron_agent_browser.test.js`.
 
 ## Flow capability pack for Vibe
 

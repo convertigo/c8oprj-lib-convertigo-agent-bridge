@@ -1043,6 +1043,7 @@
       return { ok: false, status: "error", handle: handle, error: "prompt is required", timestamp: now() };
     }
     promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
+    promptText = withStudioAgentBrowserPrompt(promptText, entry.playwrightMcpEnabled === true ? entry.playwrightCdpEndpoint : "");
     var messageId = trim(options.messageId);
     var promptBlocks = [{
       type: "text",
