@@ -725,7 +725,7 @@ Prefer the owning Convertigo MCP tools for authoring, without disabling native t
 ## Printed Vibe todo calls
 
 `vibePrintedCallOf` recognizes complete `todo {JSON}`, `todo … {JSON}`, `todo:{JSON}` and `todo({JSON})` responses and reuses the existing
-bounded turn nudge (two per turn, never after Stop/refusal/error). The Bridge asks for a real tool call;
+bounded printed-call retry (one per turn, never after Stop/refusal/error). The Bridge asks for a real tool call;
 it never executes printed arguments. Keep ordinary answers, questions and malformed JSON outside this rule.
 The short announcement detector also recognizes present-tense verification after a write;
 read-only turns and requests for user input still finish normally.
@@ -815,3 +815,18 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
   the registry result. Existing cached registry checks must follow the current
   target without rewriting the cache or starting a runtime.
 - Run tests/runtime_update_target.test.js with the runtime and proxy suites.
+
+## Printed JSON tool calls
+
+The ACP adapter retains the complete final-message candidate up to 262144 characters,
+separately from the short announcement tail. It never classifies a suffix after overflow.
+A known tool or namespaced MCP tool followed only by a JSON object (with up to eight
+non-word separator characters) can request a real tool call in the same session.
+It never executes arguments from text. Printed-call retries default to one per user
+turn; `agentbridge.vibe.printed_call_retries=0` disables them, and values above one
+are capped at one. Bare-name and announcement nudges retain their separate existing
+bounds. Stop, cancellation, errors and refused writes do not restart a turn.
+The existing `turn/nudge` and progress events record tool/count/limit/length, without
+copying printed arguments to the retry log. Run `node --test tests/printed_json_call.test.js
+tests/vibe_turn_nudge.test.js` and the full Bridge suite. All transcripts in the new
+regression tests are synthetic; no inference is needed.

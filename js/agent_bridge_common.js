@@ -12370,6 +12370,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         entry.turnRequestId = requestId;
         // What a Vibe turn-end nudge reads (see vibeTurnEndNudge): reset by each turn the user starts.
         entry.turnNudges = 0;
+        entry.turnPrintedCallRetries = 0;
+        entry.turnFinalText = "";
+        entry.turnFinalTextOverflow = false;
         entry.turnTail = "";
         entry.turnWriteRefused = false;
         entry.turnInterrupted = false;
@@ -12383,6 +12386,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         (!requestId.length || !trim(entry.turnRequestId).length || requestId === entry.turnRequestId))) {
       entry.turnActive = false;
       entry.turnRequestId = "";
+      entry.turnFinalText = "";
+      entry.turnFinalTextOverflow = false;
       touchManagedMcpLease(entry, true);
     }
     if (event.type === "turn/interrupt_requested") {
@@ -13316,8 +13321,48 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // The start of an arguments block written with extra escapes: an optional \( or {, then a quoted key and its colon.
   var VIBE_ESCAPED_ARGUMENTS = /^\s*\\?[({]?\s*\\?"[A-Za-z_]\w*\\?"\s*:/;
 
+  // Keep the beginning of the final message: a source in JSON can exceed the short announcement tail.
+  // Bounded storage, no suffix-only detection after overflow (a quoted example must never become a call).
+  var VIBE_FINAL_TEXT_MAX = 262144;
+
+  function vibePrintedCallRetryLimit() {
+    try {
+      var value = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue("agentbridge.vibe.printed_call_retries");
+      if (value !== null && typeof value !== "undefined" && trim(value).length) {
+        return intValue(String(value), 1, 0, 1);
+      }
+    } catch (_missingPrintedCallRetrySymbol) {}
+    return 1;
+  }
+
+  function vibeFinalText(entry) {
+    return entry.turnFinalTextOverflow === true ? "" : trim(typeof entry.turnFinalText === "string" ? entry.turnFinalText : entry.turnTail || "");
+  }
+
+  function vibePrintedJsonCallOf(entry, body) {
+    var names = VIBE_BUILTIN_TOOL_NAMES.concat(Object.keys(entry.seenToolNames || {}));
+    var lower = body.toLowerCase(), name = "";
+    for (var i = 0; i < names.length; i++) {
+      if (lower.indexOf(names[i].toLowerCase()) === 0 && names[i].length > name.length) {
+        name = body.substring(0, names[i].length);
+      }
+    }
+    // Generic MCP names are namespaced; arbitrary words followed by JSON are not tools.
+    if (!name.length) { name = (/^mcp_[A-Za-z0-9_]+(?:[.\-][A-Za-z0-9_]+)*/i.exec(body) || [""])[0]; }
+    if (!name.length) { return null; }
+    var block = /^[^\sA-Za-z0-9_{}?]{0,8}\s*(\{[\s\S]*\})$/.exec(body.substring(name.length));
+    if (!block) { return null; }
+    try {
+      var args = JSON.parse(block[1]);
+      if (args === null || typeof args !== "object" || Array.isArray(args)) { return null; }
+    } catch (_invalidPrintedJson) { return null; }
+    return { reason: "printed_call", tool: name };
+  }
+
   function vibePrintedCallOf(entry, text) {
     var body = trim(text).replace(/^[`'"*\s]+|[`'"*\s.:;!]+$/g, "");
+    var jsonCall = vibePrintedJsonCallOf(entry, body);
+    if (jsonCall !== null) { return jsonCall; }
     var alone = body.replace(/\(\s*\)$/, "");
     if (VIBE_BUILTIN_TOOL_NAMES.indexOf(alone.toLowerCase()) >= 0) {
       return { reason: "tool_name", tool: alone };
@@ -13349,6 +13394,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       }
       return { reason: "printed_call", tool: name };
     }
+    if (/^\s*\[/.test(rest)) { return null; }
     return /^([^\s?]{1,40}|\s+[^\s?]{1,40})?$/.test(rest) ? { reason: "tool_name", tool: name } : null;
   }
 
@@ -13381,9 +13427,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       Number(entry.turnNudges || 0) >= VIBE_TURN_NUDGES_MAX) {
       return null;
     }
-    var text = trim(entry.turnTail || "");
+    var text = vibeFinalText(entry);
     var printed = text.length ? vibePrintedCallOf(entry, text) : null;
     if (printed) {
+      if (printed.reason === "printed_call" && Number(entry.turnPrintedCallRetries || 0) >= vibePrintedCallRetryLimit()) { return null; }
       return { reason: printed.reason, tool: printed.tool, text: text };
     }
     // An announcement only after the turn acted: a plan or an explanation asked by the user ends on "ensuite, je
@@ -13396,38 +13443,45 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     if (nudge === null || !trim(entry.sessionId).length) {
       return false;
     }
-    var count = Number(entry.turnNudges || 0) + 1;
+    var printedCall = nudge.reason === "printed_call";
+    var max = printedCall ? vibePrintedCallRetryLimit() : VIBE_TURN_NUDGES_MAX;
+    var count = Number(printedCall ? entry.turnPrintedCallRetries || 0 : entry.turnNudges || 0) + 1;
     var prompt = nudge.reason === "tool_name"
       ? "Note from the Agent Bridge: your last message was only the name of the tool `" + nudge.tool + "`, with no call to it, so your turn ended. Call the tool now, or give your final answer."
       : nudge.reason === "printed_call"
-      ? "Note from the Agent Bridge: your last message wrote a call to the tool `" + nudge.tool + "` as text instead of making it, so your turn ended. Make the call now, or give your final answer."
+      ? "Note from the Agent Bridge: your last message wrote a call to the tool `" + nudge.tool + "` as text instead of making it, so it was not executed. Emit it as a real tool call, then continue."
       : "Note from the Agent Bridge: your last message announced a next step but made no tool call, so your turn ended. If you meant to do it, do it now with a tool call. If the user only asked for a plan or an explanation, or you need their answer, reply with one short closing sentence instead.";
     var nudged;
     try {
+      if (entry.turnInterrupted === true || entry.turnWriteRefused === true || entry.turnActive !== true || entry.status !== "running" || count > max) { return false; }
       nudged = sendAcpRequest(entry, "session/prompt", { sessionId: entry.sessionId, prompt: [{ type: "text", text: prompt }] });
     } catch (_ignoreNudgeSend) {
       return false;
     }
-    entry.turnNudges = count;
+    entry.turnNudges = Number(entry.turnNudges || 0) + 1;
+    if (printedCall) { entry.turnPrintedCallRetries = count; }
     entry.turnRequestId = String(nudged.id);
     entry.turnTail = "";
+    entry.turnFinalText = "";
+    entry.turnFinalTextOverflow = false;
     var said = nudge.text.length > 240 ? nudge.text.substring(0, 240) + "..." : nudge.text;
     pushEvent(entry, "turn/nudge", {
       reason: nudge.reason,
       tool: nudge.tool,
       count: count,
-      max: VIBE_TURN_NUDGES_MAX,
+      max: max,
       endedRequestId: message.id,
       requestId: nudged.id,
-      text: said
+      text: printedCall ? "" : said,
+      textLength: nudge.text.length
     });
     var line = nudge.reason === "tool_name"
-      ? "Agent Bridge: the agent ended its turn on the tool name `" + nudge.tool + "` without calling it; it was asked to go on (" + count + "/" + VIBE_TURN_NUDGES_MAX + ")."
+      ? "Agent Bridge: the agent ended its turn on the tool name `" + nudge.tool + "` without calling it; it was asked to go on (" + count + "/" + max + ")."
       : nudge.reason === "printed_call"
-      ? "Agent Bridge: the agent ended its turn on a call to `" + nudge.tool + "` written as text; it was asked to make it (" + count + "/" + VIBE_TURN_NUDGES_MAX + ")."
-      : "Agent Bridge: the agent ended its turn announcing a next step without doing it; it was asked to go on (" + count + "/" + VIBE_TURN_NUDGES_MAX + ").";
+      ? "Agent Bridge: the agent ended its turn on a call to `" + nudge.tool + "` written as text; it was asked to make it (" + count + "/" + max + ")."
+      : "Agent Bridge: the agent ended its turn announcing a next step without doing it; it was asked to go on (" + count + "/" + max + ").";
     pushEvent(entry, "progress/message", { text: line, nudge: nudge.reason });
-    try { log.info("(lib_ConvertigoAgentBridge) " + line + " Handle " + entry.handle + ", ended text: " + said); } catch (_ignoreNudgeLog) {}
+    try { log.info("(lib_ConvertigoAgentBridge) " + line + " Handle " + entry.handle + (printedCall ? "" : ", ended text: " + said)); } catch (_ignoreNudgeLog) {}
     return true;
   }
 
@@ -13546,6 +13600,11 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       eventData.text = extractContentText(update.content);
       // The text since the last tool call: what the turn ends on.
       entry.turnTail = (String(entry.turnTail || "") + String(eventData.text || "")).slice(-2000);
+      if (entry.provider === "vibe" && entry.turnFinalTextOverflow !== true) {
+        var finalText = String(entry.turnFinalText || "") + String(eventData.text || "");
+        entry.turnFinalTextOverflow = finalText.length > VIBE_FINAL_TEXT_MAX;
+        entry.turnFinalText = entry.turnFinalTextOverflow ? "" : finalText;
+      }
       pushEvent(entry, "answer/chunk", eventData);
       return;
     }
@@ -13566,6 +13625,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       rememberToolCallTitle(entry, eventData.toolCallId, eventData.title, update.kind);
       rememberAcpToolStart(entry, eventData.toolCallId);
       entry.turnTail = "";
+      entry.turnFinalText = "";
+      entry.turnFinalTextOverflow = false;
       rememberVibeToolName(entry, eventData.title);
       if (vibeToolActs(eventData.title)) {
         entry.turnActed = true;
@@ -13687,8 +13748,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
             // The turn goes on with the nudge: its own answer ends it.
           } else {
             var ended = message.result || {};
+            var endedStopReason = trim(ended.stopReason || ended.stop_reason || "");
             var printed = entry.provider === "vibe" && !entry.turnInterrupted && !entry.turnWriteRefused &&
-              (!ended.stopReason || ended.stopReason === "end_turn") ? vibePrintedCallOf(entry, entry.turnTail || "") : null;
+              (!endedStopReason.length || endedStopReason === "end_turn") ? vibePrintedCallOf(entry, vibeFinalText(entry)) : null;
             if (printed) {
               ended = Object.assign({}, ended, {incomplete: true, error: {code: "PRINTED_TOOL_CALL", tool: printed.tool,
                 message: "The agent printed a tool call without executing it. Automatic continuation did not complete it."}});
