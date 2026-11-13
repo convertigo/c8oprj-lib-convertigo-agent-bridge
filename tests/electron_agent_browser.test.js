@@ -189,7 +189,7 @@ const AGENT_BROWSER_PAGE = /The Studio agent browser, a dedicated browser window
 function assertAgentBrowserWording(text, label) {
   assert.match(text, AGENT_BROWSER_PAGE, label);
   assert.match(text, /Do not open a new tab or page \(not supported\), do not close tabs or the browser, never call `Browser\.close`, and do not drive it with ad hoc `require\('playwright'\)` scripts or raw CDP/, label);
-  assert.match(text, /do not wait for `browserDebugPortMatched` or `browserControlReady`/, label);
+  assert.match(text, /its `browserControlReady:true` only says the agent browser answers, and `browserDebugPortMatched` is always true there/, label);
   assert.doesNotMatch(text, /JxBrowser (exposes|viewer over CDP)/, label);
   assert.doesNotMatch(text, /reports both `browserDebugPortMatched:true` and `browserControlReady:true`/, label);
   assert.doesNotMatch(text, /do not create, open, close, select, or navigate tabs\/pages/, label);
