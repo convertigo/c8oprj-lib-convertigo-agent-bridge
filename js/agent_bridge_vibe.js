@@ -107,7 +107,8 @@
           viewerDebugPort: expectedBearerEnv.length ? expectedViewerDebugPort : 0,
           conversationId: expectedBearerEnv.length && expectedViewerDebugPort >= 1024 ? mcpConversationId(options) : ""
         };
-        // Only a No Code home records it: other homes keep the intent they were written with.
+        // Only a No Code home, or a Studio home while the Studio is read only, records it: other homes keep the intent
+        // they were written with, and a Studio home leaving read only is written again without its disabled_tools.
         var expectedToolPolicy = vibeToolPolicy(options);
         if (expectedToolPolicy.length) {
           intentFields.toolPolicy = expectedToolPolicy;
@@ -449,7 +450,8 @@
       // user's consent to send feedback). Vibe reads the tool list once, when its process starts.
       var requestedCatalogKey = trim(options.mcpCatalogKey);
       var catalogChanged = requestedCatalogKey.length > 0 && (trim(existing.mcpCatalogKey) || "feedback:off") !== requestedCatalogKey;
-      // A No Code process started before its config.toml removed the shell and file tools still has them.
+      // A No Code process started before its config.toml removed the shell and file tools still has them; so does a
+      // Studio process started before the Studio went read only, and one started read only lacks them after.
       var toolPolicyChanged = trim(existing.toolPolicy) !== vibeToolPolicy(options);
       // per-user keys: the key lives in the process environment, a new key (renewed, revoked then granted) restarts it
       var requestedGatewayKeyFingerprint = userGatewayKeysOn(options) && runtimeUsesGateway("vibe", options)

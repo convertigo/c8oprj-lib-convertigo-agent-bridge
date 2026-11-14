@@ -527,13 +527,30 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // The config.toml removes the tools a policy leaves out; Vibe's runtime builtins (bash, read_file...) stay in the
   // model's tool list and Vibe refuses to run them (test-nocode: `bash` answered "denied by approval policy"); under mcp-only and
   // files the Bridge also refuses any permission asked for another tool than a Convertigo MCP one. The Studio's own
-  // session (user studio) is never limited. Bumped when a policy changes: No Code homes rewrite config.toml, resident
-  // No Code sessions restart.
+  // session (user studio) is never limited by these policies (only by its own "Lecture seule", below). Bumped when a
+  // policy changes: No Code homes rewrite config.toml, resident No Code sessions restart.
   var VIBE_NOCODE_TOOL_POLICY_REVISION = "v5";
   var VIBE_NOCODE_POLICIES = ["mcp-only", "files", "sandboxed-shell", "full"];
   var VIBE_NOCODE_SHELL_TOOLS = ["bash*", "git_bash*", "powershell*"];
   var VIBE_NOCODE_FILE_TOOLS = ["read_file", "write_file", "edit"];
   var VIBE_NOCODE_OTHER_TOOLS = ["grep", "web_fetch", "web_search", "task"];
+
+  // "Lecture seule" of the Tigo panel in a Studio (lib_ConvertigoAssistant js/agent_write_confirm.js): the MCP refuses
+  // every write of the agent's managed token (lib_ConvertigoMCP js/studio_write_confirm.js), but the agent's own file
+  // and shell tools never reach the MCP. While the Studio is read only, its conversations run without them:
+  // - Codex: each turn runs in its read-only sandbox (turn/start sandboxPolicy), no restart;
+  // - the provider runtime: --disallowedTools for its file writers and its shell (claudeCommand), restart on a change;
+  // - Vibe: disabled_tools in config.toml (vibeToolPolicyLines; its runtime denies a builtin the catalogue lacks, whatever
+  //   its permission), restart on a change through toolPolicy.
+  // The choice is "user:studio" of lib_ConvertigoAssistant.writeConfirm (context.server), which the Assistant publishes
+  // when the user switches and at each message, before it starts and prompts the agent: a switch applies at the next
+  // turn, never in the running one (the MCP refuses the writes of that turn at once). A No Code session never runs read
+  // only (the Assistant refuses the choice to a No Code user; the MCP keeps "user:studio" to the managed tokens).
+  var STUDIO_WRITE_CONFIRM_KEY = "lib_ConvertigoAssistant.writeConfirm";
+  var STUDIO_WRITE_CONFIRM_OWNER = "user:studio";
+  // a Vibe home's toolPolicy while read only; bumped when the tools it removes change
+  var VIBE_STUDIO_READ_ONLY_POLICY = "studio-readonly-v1";
+  var VIBE_STUDIO_READ_ONLY_DISABLED_TOOLS = VIBE_NOCODE_SHELL_TOOLS.concat(["write_file", "edit"]);
 
   // The confinement of the No Code agents. The Bridge carries it: it was engine.util.AgentSandbox of the engine branch
   // hotfix-optims (8.4.7), which nothing but the Bridge used, and a policy that follows the agents had to wait for an
@@ -755,10 +772,40 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return normalizeSkillProfile(options || {}) === "nocode" ? engineNoCodeToolInfo().policy : "";
   }
 
+  // The Studio's choice for Tigo's changes: "readonly", "confirm" or "off" (nothing published, or unreadable: off), as
+  // lib_ConvertigoMCP reads it.
+  function studioWriteConfirmMode() {
+    try {
+      var store = getServerStore();
+      var choices = store === null ? null : store.get(STUDIO_WRITE_CONFIRM_KEY);
+      var json = choices === null || typeof choices === "undefined" ? null : choices.get(STUDIO_WRITE_CONFIRM_OWNER);
+      if (json === null || typeof json === "undefined") {
+        return "off";
+      }
+      var choice = JSON.parse(String(json));
+      var mode = trim(choice && choice.mode).toLowerCase();
+      if (mode === "off" || mode === "confirm" || mode === "readonly") {
+        return mode;
+      }
+      return choice && choice.on === true ? "confirm" : "off";
+    } catch (_unreadableChoice) {
+      return "off";
+    }
+  }
+
+  // Whether a session of this profile ("nocode", "generalist", "flow"...) runs without its own file writers and shell.
+  function studioReadOnlyProfile(profileId) {
+    return trim(profileId).toLowerCase() !== "nocode" && studioWriteConfirmMode() === "readonly";
+  }
+
+  function studioReadOnly(options) {
+    return studioReadOnlyProfile(normalizeSkillProfile(options || {}));
+  }
+
   // what a resident process was started with: a change of policy or of confinement restarts it
   function vibeToolPolicy(options) {
     if (normalizeSkillProfile(options || {}) !== "nocode") {
-      return "";
+      return studioReadOnly(options) ? VIBE_STUDIO_READ_ONLY_POLICY : "";
     }
     var info = engineNoCodeToolInfo();
     var confined = info.policy !== "full" && info.landlockAbi > 0;
@@ -770,6 +817,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // either on, Vibe offers its `wait` builtin, which waits for input sent during the turn, and the Tigo panel sends
   // none (test-nocode, sandboxed-shell: an agent asked a question then waited 300 s on « Waiting for input »).
   function vibeToolPolicyLines(options) {
+    // a read-only Studio home: no shell (its redirections write), no file writer; read_file, grep and the MCP stay
+    if (studioReadOnly(options)) {
+      return ["disabled_tools = " + tomlArray(VIBE_STUDIO_READ_ONLY_DISABLED_TOOLS)];
+    }
     var policy = noCodeToolPolicyName(options);
     if (!policy.length || policy === "full") {
       return [];

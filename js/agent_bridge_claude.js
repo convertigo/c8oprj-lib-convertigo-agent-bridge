@@ -237,6 +237,19 @@
     return PLAYWRIGHT_MCP_EXCLUDED_TOOLS.map(function (tool) { return "mcp__playwright__" + tool; });
   }
 
+  // The tools of the provider runtime that write files, while the Studio is read only (studioReadOnly): its shells (a
+  // redirection writes; Monitor runs a command), its file writers, and the worktree it would create. --disallowedTools
+  // takes them out of the model's tool list, sub-agents included; Read, Glob, Grep and the MCP servers stay. A name the
+  // installed version does not know is ignored (PowerShell outside Windows, MultiEdit of older versions).
+  var CLAUDE_READ_ONLY_DISALLOWED_TOOLS = ["Bash", "PowerShell", "Monitor", "Edit", "MultiEdit", "Write", "NotebookEdit", "EnterWorktree"];
+
+  // Everything the provider runtime does not offer this process: the excluded Playwright tools when it has the MCP
+  // config file (and so a `playwright` server), the file writers and shells while the Studio is read only.
+  function claudeDisallowedTools(entry) {
+    var tools = trim(entry && entry.mcpConfigFile).length ? claudeExcludedPlaywrightTools() : [];
+    return entry && entry.studioReadOnly === true ? tools.concat(CLAUDE_READ_ONLY_DISALLOWED_TOOLS) : tools;
+  }
+
   function writeClaudeMcpConfig(homePath, mcpEndpoint, options) {
     var file = claudeMcpConfigFile(homePath);
     var next = JSON.stringify(buildClaudeMcpConfig(mcpEndpoint, options, homePath), null, 2) + "\n";
@@ -2095,9 +2108,13 @@
         command.push("--mcp-config");
         command.push(entry.mcpConfigFile);
         command.push("--strict-mcp-config");
-        // the tools of the `playwright` server of that file the model is not offered (PLAYWRIGHT_MCP_EXCLUDED_TOOLS)
+      }
+      // the tools of the `playwright` server of that file the model is not offered (PLAYWRIGHT_MCP_EXCLUDED_TOOLS), and
+      // the file writers and shells of a read-only Studio, in one list
+      var disallowedTools = claudeDisallowedTools(entry);
+      if (disallowedTools.length) {
         command.push("--disallowedTools");
-        command.push(claudeExcludedPlaywrightTools().join(","));
+        command.push(disallowedTools.join(","));
       }
       // A gateway model goes through ANTHROPIC_MODEL only, as in the claude-glm launcher: --model with a name outside
       // Claude's catalog is refused.
@@ -2209,14 +2226,18 @@
       // per-user keys: a new key of the user restarts the process that holds the old one in its environment
       var gatewayKeyChanged = trim(existing.gatewayKeyFingerprint) !== (userGatewayKeysOn(options) && runtimeUsesGateway("claude", options)
         ? userGatewayCredential(options).fingerprint : "");
-      if (mcpTokenChanged || revealModeChanged || modelChanged || effortChanged || viewerChanged || gatewayKeyChanged) {
+      // the Studio went read only, or left it: the tools the process offers change (claudeDisallowedTools)
+      var readOnlyChanged = studioReadOnlyProfile(existing.skillProfile) !== (existing.studioReadOnly === true);
+      if (mcpTokenChanged || revealModeChanged || modelChanged || effortChanged || readOnlyChanged || viewerChanged || gatewayKeyChanged) {
         pushEvent(existing, "warning", {
           message: mcpTokenChanged
             ? "Claude Code must restart to renew its managed Convertigo MCP authorization."
             : (revealModeChanged ? "Claude Code must restart to update Convertigo reveal mode."
-              : (viewerChanged ? "Claude Code must restart to refresh the managed Playwright MCP viewer endpoint." : "Claude Code must restart to apply the requested model or effort.")),
+              : (viewerChanged ? "Claude Code must restart to refresh the managed Playwright MCP viewer endpoint."
+                : (readOnlyChanged ? "Claude Code must restart to apply the Studio's read-only mode to its file and shell tools."
+                  : "Claude Code must restart to apply the requested model or effort."))),
           provider: "claude",
-          reason: mcpTokenChanged ? "mcp_token_renewed" : (revealModeChanged ? "reveal_mode_changed" : (viewerChanged ? "playwright_endpoint_changed" : "model_changed")),
+          reason: mcpTokenChanged ? "mcp_token_renewed" : (revealModeChanged ? "reveal_mode_changed" : (viewerChanged ? "playwright_endpoint_changed" : (readOnlyChanged ? "read_only_changed" : "model_changed"))),
           previousEndpoint: activePlaywrightCdpEndpoint,
           requestedEndpoint: requestedPlaywrightCdpEndpoint
         });
@@ -2353,6 +2374,8 @@
     entry.playwrightMcpEndpoint = trim(options.playwrightMcpEndpoint);
     entry.playwrightMcpEnabled = !!(setup.setup.mcp && setup.setup.mcp.hasPlaywright === true);
     entry.convertigoRevealMode = revealModeEnabled(options, null);
+    // the Studio's "Lecture seule" when the process starts: a change restarts it (claudeStart, claudePrompt)
+    entry.studioReadOnly = studioReadOnlyProfile(entry.skillProfile);
     entry.reasoningEffort = requestedEffort;
     entry.claudePath = setup.setup.claude.path || "claude";
     entry.sessionId = trim(options.claudeSessionId || options.sessionId || options.externalSessionId);
@@ -2523,6 +2546,8 @@
       restartReason = "model_changed";
     } else if (requestedEffortRaw.length && requestedEffort !== trim(entry.reasoningEffort)) {
       restartReason = "effort_changed";
+    } else if (studioReadOnlyProfile(entry.skillProfile) !== (entry.studioReadOnly === true)) {
+      restartReason = "read_only_changed";
     }
     entry.convertigoRevealMode = revealModeEnabled(options, entry);
     try {

@@ -919,12 +919,35 @@
     return boolValue(options.bypassApprovalsAndSandbox, true) ? "danger-full-access" : "workspace-write";
   }
 
+  // The sandbox of a Codex turn while the Studio is read only (studioReadOnlyProfile): its shell and its patches cannot
+  // write, and its shell has no network (no way round the MCP through the engine's HTTP API); the MCP and Playwright
+  // servers run outside the sandbox. turn/start keeps an override for the next turns too, so every turn names its policy:
+  // the thread's own one again once the Studio leaves read only.
+  function codexTurnSandboxPolicy(entry, options, readOnly) {
+    if (readOnly === true) {
+      return { type: "readOnly", networkAccess: false };
+    }
+    var mode = codexSandboxMode(options);
+    if (mode === "danger-full-access") {
+      return { type: "dangerFullAccess" };
+    }
+    if (mode === "read-only") {
+      return { type: "readOnly" };
+    }
+    // workspace-write keeps the thread's settings (writable roots, network) unless read only replaced them
+    return entry.codexStudioReadOnly === true && mode === "workspace-write" ? { type: "workspaceWrite" } : null;
+  }
+
   function codexThreadParams(entry, options) {
+    var readOnly = studioReadOnlyProfile(entry.skillProfile);
+    if (readOnly) {
+      entry.codexStudioReadOnly = true;
+    }
     var params = {
       cwd: entry.cwd,
       approvalPolicy: codexApprovalPolicy(options),
       approvalsReviewer: "user",
-      sandbox: codexSandboxMode(options),
+      sandbox: readOnly ? "read-only" : codexSandboxMode(options),
       threadSource: "user"
     };
     if (trim(entry.model || options.model || options.agentModel).length) {
@@ -948,6 +971,12 @@
       cwd: entry.cwd,
       approvalPolicy: codexApprovalPolicy(options)
     };
+    var readOnly = studioReadOnlyProfile(entry.skillProfile);
+    var sandboxPolicy = codexTurnSandboxPolicy(entry, options, readOnly);
+    if (sandboxPolicy !== null) {
+      params.sandboxPolicy = sandboxPolicy;
+    }
+    entry.codexStudioReadOnly = readOnly;
     if (trim(entry.model || options.model || options.agentModel).length) {
       params.model = trim(entry.model || options.model || options.agentModel);
     }
@@ -1991,6 +2020,12 @@
     var serviceTier = trim(options.serviceTier || options.speedTier || entry.serviceTier);
     var bypass = boolValue(options.bypassApprovalsAndSandbox, true);
     var sandbox = trim(options.sandbox);
+    // read only (codexTurnSandboxPolicy): no bypass, the read-only sandbox for this run, a resumed one included
+    var readOnly = studioReadOnlyProfile(entry.skillProfile);
+    if (readOnly) {
+      bypass = false;
+      sandbox = "";
+    }
     if (entry.sessionId.length) {
       command.push("exec");
       command.push("resume");
@@ -2005,6 +2040,9 @@
       }
       if (bypass) {
         command.push("--dangerously-bypass-approvals-and-sandbox");
+      } else if (readOnly) {
+        command.push("-c");
+        command.push('sandbox_mode="read-only"');
       }
       if (model.length) {
         command.push("-m");
@@ -2028,6 +2066,9 @@
     }
     if (bypass) {
       command.push("--dangerously-bypass-approvals-and-sandbox");
+    } else if (readOnly) {
+      command.push("-c");
+      command.push('sandbox_mode="read-only"');
     } else if (sandbox.length) {
       command.push("-s");
       command.push(sandbox);

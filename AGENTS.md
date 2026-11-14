@@ -282,6 +282,37 @@ same context.
   writes (`cannot_ask`) instead of writing unconfirmed. Run
   `node --test tests/host_request_wait.test.js`.
 
+## Studio read only: the agents' own file and shell tools
+
+- "Lecture seule" of the Studio panel is `user:studio` with `mode: "readonly"` in
+  `lib_ConvertigoAssistant.writeConfirm` (`context.server`). The MCP refuses the
+  writes of the managed tokens; the agents' own file and shell tools never reach
+  the MCP, so the Bridge removes them (`studioWriteConfirmMode`,
+  `studioReadOnlyProfile`). The Assistant publishes the choice when the user
+  switches and at each message, before it calls start and prompt: a switch
+  applies at the next turn, the MCP covers the running one. No Code sessions
+  (any user but `studio`) are never concerned.
+- Codex: no restart. Each `turn/start` names its `sandboxPolicy` (the override
+  holds for later turns): `{type: "readOnly", networkAccess: false}` while read
+  only, the thread's own policy otherwise (`dangerFullAccess` by default; a
+  `workspace-write` thread gets `workspaceWrite` back once after read only). A
+  thread started or resumed read only gets `sandbox: "read-only"`; exec mode
+  drops the bypass for `-c sandbox_mode="read-only"`. Shell writes and patches
+  fail in the sandbox; MCP and Playwright servers run outside it.
+- The provider runtime (`agent_bridge_claude.js`): `--disallowedTools` adds Bash, PowerShell, Monitor, Edit,
+  MultiEdit, Write, NotebookEdit and EnterWorktree to the excluded Playwright
+  tool (one list, `claudeDisallowedTools`); unknown names are ignored. The entry
+  records `studioReadOnly`; a change restarts the process with `--resume`
+  (`read_only_changed`, at start and at prompt). Read, Glob, Grep and the MCP stay.
+- Vibe: `disabled_tools = ["bash*", "git_bash*", "powershell*", "write_file",
+  "edit"]` at the top of config.toml (`vibeToolPolicyLines`). Vibe 3 denies a
+  runtime builtin (shell, process, write, edit) that the catalogue lacks, even
+  with `permission = "always"`. `vibeToolPolicy` is `studio-readonly-v1` while
+  read only and "" otherwise, so the home intent rewrites config.toml and the
+  resident process restarts on the same session (`tool_policy_changed`).
+  Homes outside read only keep the intent they were written with.
+- Run `node --test tests/studio_read_only_tools.test.js`.
+
 ## Vibe image attachments
 
 - `agent_vibe_prompt` accepts `images` (JSON array of local paths). `vibePrompt`
@@ -741,7 +772,8 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 
 ## Studio native tools
 
-Every Studio skill profile keeps the Studio native tool policy; only No Code is restricted.
+Every Studio skill profile keeps the Studio native tool policy; only No Code is restricted, and a Studio while it
+is read only (see "Studio read only: the agents' own file and shell tools").
 Prefer the owning Convertigo MCP tools for authoring, without disabling native tools for Flow.
 
 ## Printed Vibe todo calls
