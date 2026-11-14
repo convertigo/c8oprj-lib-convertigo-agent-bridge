@@ -855,8 +855,10 @@ A known tool or namespaced MCP tool followed only by a JSON object (with up to e
 non-word separator characters) can request a real tool call in the same session.
 It never executes arguments from text. Printed-call retries default to one per user
 turn; `agentbridge.vibe.printed_call_retries=0` disables them, and values above one
-are capped at one. Bare-name and announcement nudges retain their separate existing
-bounds. Stop, cancellation, errors and refused writes do not restart a turn.
+are capped at one. All nudges still share the existing two-per-turn overall bound:
+a printed-call retry consumes one slot, and two earlier nudges prevent that retry.
+Bare-name and announcement nudges have no additional category limit. Stop,
+cancellation, errors and refused writes do not restart a turn.
 The existing `turn/nudge` and progress events record tool/count/limit/length, without
 copying printed arguments to the retry log. Run `node --test tests/printed_json_call.test.js
 tests/vibe_turn_nudge.test.js` and the full Bridge suite. All transcripts in the new
