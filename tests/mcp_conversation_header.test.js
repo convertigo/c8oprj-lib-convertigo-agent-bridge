@@ -21,4 +21,11 @@ headers = headersOf({ conversationId: 'agent-2', skillProfile: 'nocode', viewerD
 assert.deepEqual(named(headers, 'X-Convertigo-Conversation-Id'), ['agent-2'], 'in NoCode too: the preview captures wait under it');
 assert.deepEqual(named(headers, 'X-Convertigo-Viewer-Debug-Port'), [], 'NoCode drives no viewer');
 assert.equal(mcpConversationId({ handle: 'agent-3' }), 'agent-3');
+// Claude: in a home of the conversation only (a Studio conversation has its own), never in a shared one.
+codexSkillGuidanceVersion = () => 'test';
+const claudeHeaders = (options, home) => buildClaudeMcpConfig('http://localhost:18112/convertigo/api/mcp', options, home).mcpServers.convertigo.headers;
+assert.equal(claudeHeaders({ conversationId: 'agent-4', viewerDebugPort: 45991 }, '/w/agents/claude/homes/users/studio/conversations/conversation-ab12/claude-home')['X-Convertigo-Conversation-Id'], 'agent-4');
+assert.equal(claudeHeaders({ conversationId: 'agent-4', viewerDebugPort: 45991 }, '')['X-Convertigo-Conversation-Id'], 'agent-4', 'the home is resolved later: a viewer port is a conversation of its own');
+assert.equal(claudeHeaders({ conversationId: 'agent-4' }, '/w/agents/claude/homes/users/studio/claude-home')['X-Convertigo-Conversation-Id'], undefined, 'a user home is shared');
+assert.equal(claudeHeaders({ conversationId: 'bad id"', viewerDebugPort: 45991 }, '/w/agents/claude/homes/users/studio/conversations/conversation-ab12/claude-home')['X-Convertigo-Conversation-Id'], undefined);
 console.log('conversation header ok');

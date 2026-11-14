@@ -14435,7 +14435,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   };
 
   // A request of the Convertigo MCP waiting for the panel of the conversation (lib_ConvertigoAssistant.hostRequests,
-  // shared by the server's projects): a preview capture, or a No Code change waiting for the user's confirmation. The
+  // shared by the server's projects): a preview capture, or a change waiting for the user's confirmation (No Code or Studio). The
   // panel takes it when it reads the turn, after this wait for events: a wait that sees one returns at once, so its card
   // shows at once instead of after the whole wait (10 s, during which a held call sends no event). Once per request.
   var HOST_REQUESTS_KEY = "lib_ConvertigoAssistant.hostRequests";

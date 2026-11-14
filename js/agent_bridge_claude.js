@@ -163,6 +163,11 @@
     if (viewerDebugPort >= 1024) {
       headers["X-Convertigo-Viewer-Debug-Port"] = String(viewerDebugPort);
     }
+    // The Tigo conversation, as Vibe and Codex name it: the MCP shows the cards of "Confirmer avant de modifier" in it and
+    // records the sub-agent runs under it. Only in a home of this conversation: a shared home serves several.
+    if (mcpConversationId(options).length && (isConversationScopedClaudeHome(homePath) || (!trim(homePath).length && viewerDebugPort >= 1024))) {
+      headers["X-Convertigo-Conversation-Id"] = mcpConversationId(options);
+    }
     var servers = {};
     servers[serverName] = {
       type: "http",
