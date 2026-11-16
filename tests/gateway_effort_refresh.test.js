@@ -125,3 +125,10 @@ test('the effort list follows the order of the levels and names a level the cach
   assert.equal(levels[0].description, 'Cached', 'the catalog entry is kept when it exists');
   assert.equal(levels[1].description, 'Accepted by this gateway model');
 });
+
+test('the age of the cached provider settings a caller accepts reaches a settings read (the Assistant settings page: one week)', () => {
+  const source = fs.readFileSync('js/agent_bridge_common.js', 'utf8');
+  const list = source.slice(source.indexOf('function optionsWithRequestFallbacks('), source.indexOf('].forEach(function (name) {', source.indexOf('function optionsWithRequestFallbacks(')));
+  assert.match(list, /"settingsCacheMaxAgeMs"/, 'agent_settings does not declare it: the request fallbacks carry it');
+  assert.match(source, /var settingsCacheMaxAgeMs = intValue\(options\.settingsCacheMaxAgeMs \|\| options\.updateCheckCacheMs, DEFAULT_RUNTIME_UPDATE_CACHE_MS, 60000, 604800000\);/);
+});

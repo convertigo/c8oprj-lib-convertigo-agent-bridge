@@ -833,6 +833,9 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   rechecked once). New models are always probed. Rechecking every model on each
   refresh cost 3 models x 4 efforts, twice per settings read (provider, then the
   settings Vibe config): 29 s of an administrator's 62 s on test-nocode (16/11).
+  `settingsCacheMaxAgeMs` (how old cached provider settings may be before a full
+  read starts a settings Vibe; the Assistant settings page sends one week) is not a
+  variable of `agent_settings`: the request fallbacks carry it.
   An unrelated HTTP 400 is an unknown probe result, not
   evidence that reasoning is unsupported. After applying a gateway offer,
   recompute `supports.reasoning` and `reasoningMode` from the offered levels,

@@ -2490,7 +2490,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       "codexHomeScope", "vibeHomeScope", "claudeHomeScope", "homeScope", "codexHome", "vibeHome", "claudeHome", "agentHome",
       "vibeProfile", "gatewayProfile", "agentMode", "llmGatewayUrl", "llmGatewayModel", "llmGatewayThinking", "gatewayApiKey",
       "claudePath",
-      "mcpEndpoint", "workspaceRoot", "settingsTimeoutMs", "modelsTimeoutMs",
+      "mcpEndpoint", "workspaceRoot", "settingsTimeoutMs", "settingsCacheMaxAgeMs", "modelsTimeoutMs",
       "model", "reasoningEffort", "reasoningLevel", "serviceTier", "savePreferences",
       "checkUpdates", "refreshUpdateCheck", "refreshModelCatalog", "refreshProviderSettings", "updateCheckTimeoutMs", "updateCheckCacheMs", "runtimePresenceOnly",
       "codexRuntimeMode", "codexProtocol",
