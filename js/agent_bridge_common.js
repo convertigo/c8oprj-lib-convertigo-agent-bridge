@@ -5029,7 +5029,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       return [
         "# Convertigo No Code Agent Instructions",
         "You are embedded in C8Oforms, not Eclipse Studio. Follow skills/convertigo-nocode/SKILL.md before working, and read the drawer files it names, next to it, when it says: they are part of that skill.",
-        "Use only the no-code tools that skill allows: nocode-app-create, nocode-form-*, nocode-baserow-*, nocode-report-create when it is listed, and answer-page for the next pages of a long answer (partialAnswer). A No Code session has no log-view and no other Convertigo tool.",
+        "Use only the no-code tools that skill allows: nocode-app-create, nocode-form-*, nocode-baserow-*, nocode-attachment-read for the files the user attaches, nocode-report-create when it is listed, and answer-page for the next pages of a long answer (partialAnswer). A No Code session has no log-view and no other Convertigo tool.",
         "For a new application over business records (a list, an entry form, a detail, a dashboard), call nocode-app-create once with the business spec before anything else, then change its result with nocode-form-edit.",
         "Never fall back to requestable-execute, databaseobject-*, project tools, batch wrappers, shell, raw HTTP, or filesystem access to read or modify forms.",
         AGENT_TEMP_DIR_RULE.replace(/^- /, ""),

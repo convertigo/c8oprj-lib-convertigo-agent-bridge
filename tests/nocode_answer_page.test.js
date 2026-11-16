@@ -10,3 +10,10 @@ test('the No Code agent may read the next pages of a long answer with answer-pag
   const source = fs.readFileSync(path.join(__dirname, '..', 'js', 'agent_bridge_common.js'), 'utf8');
   assert.match(source, /nocode-report-create when it is listed, and answer-page for the next pages of a long answer \(partialAnswer\)\. A No Code session has no log-view and no other Convertigo tool\./);
 });
+
+// MCP 0.3.0-beta.33 added nocode-attachment-read, which reads the files the user attaches in the Tigo panel: the same
+// list must name it, or "no other Convertigo tool" forbids it.
+test('the No Code agent may read the files the user attaches with nocode-attachment-read', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'js', 'agent_bridge_common.js'), 'utf8');
+  assert.match(source, /nocode-baserow-\*, nocode-attachment-read for the files the user attaches, nocode-report-create when it is listed/);
+});
