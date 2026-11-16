@@ -458,6 +458,16 @@ The shell keeps the Studio's settings. Tests: `node --test tests/edit_profile.te
   Synchronize a NoCode-only `AGENTS.md` for both Codex and Vibe; never suggest
   fallback to generic requestable/project tools. Read existing forms through
   `nocode-form-get` before advice or edits; empty updates are never reads.
+- Vibe resolves its MCP servers when its session starts, and its core refuses to
+  reconfigure them during a turn: a session started while AgentStackInstall
+  replaced `lib_ConvertigoMCP` kept no Convertigo tool for its whole life
+  (test-nocode 16/11). `vibeStartSteps` notes the MCP generation a session starts
+  with (`mcpGenerationProbe`: version and identity of the loaded project, "" while
+  it is being replaced, "absent" without it), waits while it is being replaced
+  (`vibeMcpGenerationBeforeStart`), starts the session again once when it changed
+  while Vibe read its tools, else answers `mcp/unavailable`
+  (`vibeRestartIfMcpChanged`), and restarts a resident or prewarmed session on
+  the same session id when the MCP was installed since (`mcp_generation_changed`).
 - Vibe caches the MCP tool catalog on disk for 24 h, keyed on sha256 of the
   serialized server entry (`registry.py:_server_key`), and never reruns
   `tools/list` while that entry is fresh. Skills and `config.toml` are pushed by

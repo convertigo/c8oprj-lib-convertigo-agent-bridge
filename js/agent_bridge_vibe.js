@@ -393,6 +393,54 @@
     return entry.status !== "starting";
   }
 
+  // The generation of lib_ConvertigoMCP a new session starts with ("" for a settings probe, which reads models only),
+  // waiting while AgentStackInstall replaces it; null when it does not settle in time.
+  function vibeMcpGenerationBeforeStart(settingsProbe) {
+    if (settingsProbe === true) {
+      return "";
+    }
+    var generation = currentMcpGeneration();
+    if (generation.length) {
+      return generation;
+    }
+    generation = waitForStableMcpGeneration(MCP_GENERATION_WAIT_MS);
+    startupMark("mcp/wait");
+    return generation.length ? generation : null;
+  }
+
+  // null when the session kept the lib_ConvertigoMCP it started with. When the MCP changed while Vibe read its tools,
+  // the session may have none: it is replaced once, after the MCP settles, by startAgain (vibeStartSteps); a second
+  // change, or an MCP that does not settle, answers an error rather than a turn without the Convertigo tools.
+  function vibeRestartIfMcpChanged(entry, mcpBefore, options, startAgain) {
+    if (entry.settingsProbe === true) {
+      return null;
+    }
+    var mcpAfter = currentMcpGeneration();
+    if (mcpAfter === mcpBefore) {
+      return null;
+    }
+    pushEvent(entry, "warning", {
+      phase: "mcp/catalog",
+      reason: "mcp_changed_while_starting",
+      before: mcpBefore,
+      after: mcpAfter,
+      message: "The Convertigo MCP changed while Vibe started: Vibe starts again to read its tools."
+    });
+    stopEntry(entry, true);
+    if (boolValue(options.mcpGenerationRetry, false) || !waitForStableMcpGeneration(MCP_GENERATION_WAIT_MS).length) {
+      return { ok: false, status: "error", phase: "mcp/unavailable", handle: trim(entry.handle), error: VIBE_MCP_UPDATING_MESSAGE, timestamp: now() };
+    }
+    var again = {};
+    for (var optionName in options) {
+      if (Object.prototype.hasOwnProperty.call(options, optionName)) {
+        again[optionName] = options[optionName];
+      }
+    }
+    again.mcpGenerationRetry = true;
+    startupMark("mcp/restart");
+    return startAgain(again);
+  }
+
   function vibeStartSteps(options) {
     var noCodeRefusal = noCodeAgentRefusal(options);
     if (noCodeRefusal !== null) {
@@ -422,9 +470,10 @@
     } catch (_ignoreStartSweep) {}
     var existing = registry.get(handle);
     var timeoutMs = intValue(options.requestTimeoutMs, 60000, 1000, 600000);
-    // A prewarm never changes a process its conversation already has (a late prewarm call must not reset its model).
+    // A prewarm never changes a process its conversation already has (a late prewarm call must not reset its model),
+    // unless the Convertigo MCP was replaced since it started: it is started again now, not at the user's message.
     if (boolValue(options.prewarm, false) && existing !== null && typeof existing !== "undefined"
-        && (existing.status === "starting" || processAlive(existing.process))) {
+        && (existing.status === "starting" || (processAlive(existing.process) && !vibeMcpGenerationStale(existing)))) {
       return { ok: true, status: "already_running", handle: handle, state: statusOf(existing), timestamp: now() };
     }
     // The prewarm of this conversation may still be starting its process: wait for it rather than start a second one.
@@ -460,6 +509,9 @@
       // user's consent to send feedback). Vibe reads the tool list once, when its process starts.
       var requestedCatalogKey = trim(options.mcpCatalogKey);
       var catalogChanged = requestedCatalogKey.length > 0 && (trim(existing.mcpCatalogKey) || "feedback:off") !== requestedCatalogKey;
+      // lib_ConvertigoMCP was installed again (or reloaded) since this process started: its tools are those of the
+      // replaced MCP, or none when the replacement happened while it started (mcpGenerationProbe).
+      var mcpGenerationChanged = vibeMcpGenerationStale(existing);
       // A No Code process started before its config.toml removed the shell and file tools still has them; so does a
       // Studio process started before the Studio went read only, and one started read only lacks them after.
       var toolPolicyChanged = trim(existing.toolPolicy) !== vibeToolPolicy(options);
@@ -520,6 +572,20 @@
         });
         stopEntry(existing, true);
         existing = null;
+      } else if (mcpGenerationChanged) {
+        // The session goes on in a new process that reads the tools of the MCP loaded now.
+        if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
+          options.sessionId = trim(existing.sessionId);
+        }
+        pushEvent(existing, "warning", {
+          phase: "mcp/catalog",
+          reason: "mcp_generation_changed",
+          previous: trim(existing.mcpGeneration),
+          current: currentMcpGeneration(),
+          message: "Vibe restarts on this conversation to read the Convertigo MCP installed since it started."
+        });
+        stopEntry(existing, true);
+        existing = null;
       } else if (catalogChanged) {
         // The session goes on in a new process that reads the new tool list.
         if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
@@ -577,6 +643,13 @@
       };
     }
     startupMark("existing");
+    // The Convertigo MCP this session reads its tools from, never while AgentStackInstall replaces it: a session that
+    // starts then keeps no Convertigo tool. A settings probe reads models only.
+    var settingsProbe = boolValue(options.settingsProbe, false);
+    var mcpBefore = vibeMcpGenerationBeforeStart(settingsProbe);
+    if (mcpBefore === null) {
+      return { ok: false, status: "error", phase: "mcp/unavailable", handle: handle, error: VIBE_MCP_UPDATING_MESSAGE, timestamp: now() };
+    }
     var autoConfigure = boolValue(options.autoConfigure, !trim(options.vibeHome).length);
     var setup = C8O.agentBridge.vibeSetup({
       vibeProfile: resolveVibeProfile(options),
@@ -706,6 +779,8 @@
     entry.workspaceRoot = setup.setup.workspaceRoot;
     entry.convertigoRevealMode = revealModeEnabled(options, null);
     entry.mcpCatalogKey = trim(options.mcpCatalogKey);
+    entry.settingsProbe = settingsProbe;
+    entry.mcpGeneration = mcpBefore;
     entry.toolPolicy = vibeToolPolicy(options);
     entry.noCodePolicy = noCodeSandbox !== null ? noCodeSandbox.policy : noCodeToolPolicyName(options);
     entry.sandbox = agentSessionSandbox(options, "vibe", noCodeSandbox);
@@ -819,6 +894,12 @@
       startupMark("settings");
       configureVibeSession(entry, options, timeoutMs);
       startupMark("configure");
+      // lib_ConvertigoMCP changed while Vibe read its tools: this session may have none. It is replaced once, after
+      // the MCP settles; a second change answers an error rather than a turn without the Convertigo tools.
+      var mcpChanged = vibeRestartIfMcpChanged(entry, mcpBefore, options, vibeStartSteps);
+      if (mcpChanged !== null) {
+        return mcpChanged;
+      }
       entry.phase = "ready";
       entry.status = "running";
       pushEvent(entry, "acp/session", {

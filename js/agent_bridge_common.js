@@ -14118,6 +14118,78 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   var VIBE_MCP_LOST_CODES = { mcp_authorization_required: true, mcp_unknown_route: true };
   // The restart reasons vibeStart honours by replacing the process.
   var VIBE_MCP_LOST_RESTARTS = { core_rejected_input: true, convertigo_mcp_suspended: true };
+
+  // The Convertigo MCP a Vibe session reads its tools from: the lib_ConvertigoMCP the engine has loaded, by its version
+  // and the loaded project itself, so that a reinstall of the same version counts too. "absent" without the project,
+  // "" while the engine cannot give it (AgentStackInstall replacing it).
+  // test-nocode 16/11: a No Code conversation prewarmed while AgentStackInstall replaced lib_ConvertigoMCP had no
+  // Convertigo tool at all for its whole life ("Searchable connector groups" without mcp_Convertigo). Vibe resolves its
+  // MCP servers when its session starts, and its core refuses to reconfigure them during a turn: the tools it found
+  // later never reached the model. So vibeStart notes the generation a session started with, starts it again when the
+  // MCP changed while it started, and restarts a resident or prewarmed session whose MCP was replaced since.
+  // Tests replace mcpGenerationProbe and mcpGenerationSleep.
+  var VIBE_MCP_UPDATING_MESSAGE = "The Convertigo tools were being updated while Tigo started. Send your message again in a moment.";
+  var MCP_GENERATION_WAIT_MS = 90000;
+  var MCP_GENERATION_STABLE_MS = 3000;
+  var MCP_GENERATION_POLL_MS = 250;
+  var mcpGenerationProbe = function () {
+    var manager = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager;
+    try {
+      if (manager.existsProject(MCP_CATALOG_PROJECT) !== true) {
+        return "absent";
+      }
+    } catch (_ignoreExists) {}
+    try {
+      var project = manager.getOriginalProjectByName(MCP_CATALOG_PROJECT);
+      if (project === null || typeof project === "undefined") {
+        return "";
+      }
+      return trim(project.getVersion()) + "@" + Packages.java.lang.System.identityHashCode(project);
+    } catch (_ignoreNotLoaded) {
+      return "";
+    }
+  };
+  var mcpGenerationSleep = function (ms) {
+    Thread.sleep(ms);
+  };
+
+  function currentMcpGeneration() {
+    try {
+      return trim(mcpGenerationProbe());
+    } catch (_ignoreProbe) {
+      return "";
+    }
+  }
+
+  // The generation once lib_ConvertigoMCP is loaded and has not changed for MCP_GENERATION_STABLE_MS (an install
+  // replaces it in several steps), or "" past maxMs.
+  function waitForStableMcpGeneration(maxMs) {
+    var deadline = now() + maxMs;
+    var last = currentMcpGeneration();
+    var since = now();
+    while (true) {
+      if (last.length && now() - since >= MCP_GENERATION_STABLE_MS) {
+        return last;
+      }
+      if (now() >= deadline) {
+        return "";
+      }
+      mcpGenerationSleep(MCP_GENERATION_POLL_MS);
+      var next = currentMcpGeneration();
+      if (next !== last) {
+        last = next;
+        since = now();
+      }
+    }
+  }
+
+  // A session started with another generation than the one loaded now: its tools are those of a replaced MCP, or none.
+  function vibeMcpGenerationStale(entry) {
+    if (!entry || entry.settingsProbe === true) {
+      return false;
+    }
+    return trim(entry.mcpGeneration) !== currentMcpGeneration();
+  }
   // Vibe ends a turn on any assistant message without a tool call. mistral-large-4 ended 3 of its 4 early turns on a
   // message that was only the name of a tool ("run_typescript", no call), and one on an announcement of its next step;
   // the user saw "run_typescript" as the answer and had to write "continue" (usage tests 30/10). The Bridge sends one
