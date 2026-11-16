@@ -999,7 +999,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       lines.push(
         "This conversation runs in the `yaml` edit profile: you change Convertigo projects by editing their YAML files, not through the MCP edit tools. It overrides, in this conversation only, every rule above or in the skill that sends a change through `databaseobject-tree-apply`, the generators or `project-save`, or that forbids editing project YAML.",
         "",
-        "- Read `" + EDIT_PROFILE_YAML_GUIDE + "` before any change (`tigo-resources` reads it), then the YAML files you change.",
+        "- Read `" + EDIT_PROFILE_YAML_GUIDE + "` before any change (`requestable-execute` with `requestable:\"lib_ConvertigoMCP.mcp_resources_read\"` and `variables:{uri:\"" + EDIT_PROFILE_YAML_GUIDE + "\"}`), then the YAML files you change.",
         "- The MCP tools that change a project are not offered here: `databaseobject-tree-apply`, `-delete`, `-move`, `-rename`, the generators (`ngx-page-create`, `business-sequence-create`, `sql-transaction-create`, `upsert-crud`...), `project-js-set`, `project-save`. They are refused through `batch-call`, `requestable-execute` and `subagent-run` too: do not look for a way round.",
         "- Your file tools (`write_file`, `edit`) write only `c8oProject.yaml`, `_c8oProject/**` and `js/**` of the project (" + where + ") and your temporary folder; any other path is refused. Never write `_private/`, `DisplayObjects/` or other generated files, with any tool.",
         "- Keep the trailing space of every line that ends with `: ` (a bean line `↓Name [type-priority]: ` or an empty `key: `): the engine cannot read the file without it.",
@@ -1010,7 +1010,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       lines.push(
         "This conversation runs in the `html` edit profile: visual changes of existing NGX pages and shared components are made in their generated files, then imported back into the Convertigo objects. It overrides, for these files only, every rule above or in the skill that forbids editing `_private/ionic`.",
         "",
-        "- Read `" + EDIT_PROFILE_HTML_GUIDE + "` before any visual change (`tigo-resources` reads it).",
+        "- Read `" + EDIT_PROFILE_HTML_GUIDE + "` before any visual change (`requestable-execute` with `requestable:\"lib_ConvertigoMCP.mcp_resources_read\"` and `variables:{uri:\"" + EDIT_PROFILE_HTML_GUIDE + "\"}`).",
         "- `mobile-builder-open` lists `ionicFiles` (the html of each page and shared component; the scss and ts lie next to it). Edit them with your file tools, which write only under `_private/ionic/src/app` of the project (" + where + ") and your temporary folder.",
         "- Import with `project-reload(project, fromIonic:true, ionicTarget:<edited file or folder>)` and read its `ionicReport` (`skipped`, `warnings`) before going on; import before any tree change of the same page.",
         "- Data, sequences, actions and bindings stay on the MCP tree tools.",

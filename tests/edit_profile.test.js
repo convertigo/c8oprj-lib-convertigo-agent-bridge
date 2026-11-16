@@ -144,6 +144,8 @@ test('the instructions of a profile are a section of AGENTS.md, before the compa
   assert.match(yamlSection, /convertigo:\/\/resources\/convertigo-yaml-editing/);
   assert.match(yamlSection, /\/ws\/projects\/SalesPipeline/);
   assert.match(yamlSection, /trailing space/);
+  assert.match(yamlSection, /requestable:"lib_ConvertigoMCP\.mcp_resources_read"/, 'Vibe reads a guide through requestable-execute');
+  assert.doesNotMatch(yamlSection + vibeEditProfileSection('html', projects), /tigo-resources/);
   assert.match(vibeEditProfileSection('html', projects), /convertigo:\/\/resources\/convertigo-ngx-html-roundtrip/);
   assert.match(vibeEditProfileSection('html', projects), /fromIonic:true/);
   const withYaml = mergeVibeEditProfileAgents(agents, yamlSection);
