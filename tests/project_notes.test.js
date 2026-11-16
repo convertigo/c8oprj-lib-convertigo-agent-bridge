@@ -36,7 +36,7 @@ test('a section once per process while the notes do not change, masked and bound
   const read = (name) => notes[name] || '';
   const first = projectNotesSection(prompt('Restyle the KPI cards of SalesPipeline'), '', PROJECTS, seen, read);
   assert.match(first, /^Project notes kept by Tigo/);
-  assert.match(first, /### SalesPipeline \(docs\/generated\/PROGRESS\.md\)/);
+  assert.match(first, /### SalesPipeline \(_private\/docs\/PROGRESS\.md\)/, 'a plain text read names the private path');
   assert.match(first, /AppLayout holds the app-\* classes/);
   assert.match(first, /password given at hand-off/, 'words after password are not a value');
   assert.doesNotMatch(first, /Hunter2|abcdefghijklmnop12345/, 'secrets are masked');
@@ -48,6 +48,34 @@ test('a section once per process while the notes do not change, masked and bound
   assert.ok(long.length < 4600, 'bounded');
   assert.match(long, /project-brief returns the whole notes/);
   assert.equal(projectNotesSection(prompt('Look at PipelineCrm'), '', PROJECTS, {}, read), '', 'a project without notes adds nothing');
+});
+
+test('the private notes file first, the old served one as a fallback, and the header names the one read', () => {
+  const dirs = { SalesPipeline: '/ws/SalesPipeline', PipelineCrm3: '/ws/PipelineCrm3' };
+  const files = {
+    '/ws/SalesPipeline/_private/docs/PROGRESS.md': '- Styles live in AppLayout (private notes).',
+    '/ws/SalesPipeline/docs/generated/PROGRESS.md': '- stale served notes',
+    '/ws/PipelineCrm3/docs/generated/PROGRESS.md': '- Notes written by an earlier MCP.'
+  };
+  class FakeFile {
+    constructor(parent, child) { this.p = child === undefined ? String(parent && parent.p ? parent.p : parent) : path.join(String(parent && parent.p ? parent.p : parent), String(child)); }
+    isFile() { return Object.prototype.hasOwnProperty.call(files, this.p); }
+  }
+  const fakes = { File: FakeFile, projectDirectoryByName: (n) => dirs[n] || null, filePath: (d) => String(d), readTextFile: (f) => files[f.p] };
+  const saved = {};
+  for (const [name, value] of Object.entries(fakes)) { saved[name] = global[name]; global[name] = value; }
+  try {
+    const priv = readProjectNotes('SalesPipeline');
+    assert.deepEqual({ ...priv }, { text: '- Styles live in AppLayout (private notes).', path: '_private/docs/PROGRESS.md' });
+    assert.deepEqual({ ...readProjectNotes('PipelineCrm3') }, { text: '- Notes written by an earlier MCP.', path: 'docs/generated/PROGRESS.md' });
+    assert.equal(readProjectNotes('MiniCrm'), '', 'no project folder, no notes');
+    const section = projectNotesSection(prompt('Compare SalesPipeline and PipelineCrm3'), '', PROJECTS, {}, readProjectNotes);
+    assert.match(section, /### SalesPipeline \(_private\/docs\/PROGRESS\.md\)\n- Styles live in AppLayout \(private notes\)\./);
+    assert.doesNotMatch(section, /stale served notes/, 'the private file wins');
+    assert.match(section, /### PipelineCrm3 \(docs\/generated\/PROGRESS\.md\)\n- Notes written by an earlier MCP\./);
+  } finally {
+    Object.assign(global, saved);
+  }
 });
 
 test('no notes for a slash command, in No Code, or twice in one prompt', () => {

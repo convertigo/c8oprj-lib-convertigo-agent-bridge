@@ -4697,14 +4697,16 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     ].join("\n");
   }
 
-  // Project notes: <project>/docs/generated/PROGRESS.md, written by the agent with project-notes-write of
+  // Project notes: <project>/_private/docs/PROGRESS.md (the engine answers 403 under _private and leaves it out of the
+  // CAR; docs/ is served, and notes were read on the web), else <project>/docs/generated/PROGRESS.md where earlier MCP
+  // versions wrote them, written by the agent with project-notes-write of
   // lib_ConvertigoMCP (the conventions and decisions of the app, its object inventory, its demo accounts by name). A
   // Studio turn about a project starts with them, so the agent does not rediscover the project: in the SalesPipeline
   // runs of 16/11 an agent read for 6 to 8 minutes before its first edit, looking for where a style was defined. The
   // projects of a turn are the one selected in the panel and the workspace projects its user message names. A notes file
   // is given once per agent process while it does not change (the history keeps it), again when it changes or after a
   // restart. Secrets are masked, though project-notes-write refuses them. Never in No Code, never for a slash command.
-  var PROJECT_NOTES_PATH = "docs/generated/PROGRESS.md";
+  var PROJECT_NOTES_PATHS = ["_private/docs/PROGRESS.md", "docs/generated/PROGRESS.md"];
   var PROJECT_NOTES_TURN_MARKER = "Project notes kept by Tigo";
   var PROJECT_NOTES_MAX_CHARS = 4000;
   var PROJECT_NOTES_MAX_PROJECTS = 2;
@@ -4773,14 +4775,21 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       trim(entry.nocodeMcpTokenHandle).length > 0 || trim(entry.noCodeMcpTokenHandle).length > 0;
   }
 
-  // readNotes(name) -> the notes text of that project or "" (injected by the tests).
+  // readNotes(name) -> {text, path} of that project's notes, or "" without notes (injected by the tests).
   function projectNotesSection(promptText, selectedProject, projectNames, seen, readNotes) {
     var projects = projectsOfTurn(promptText, selectedProject, projectNames);
     var parts = [];
     for (var i = 0; i < projects.length; i++) {
       var raw = "";
+      var notesPath = PROJECT_NOTES_PATHS[0];
       try {
-        raw = String(readNotes(projects[i]) || "");
+        var read = readNotes(projects[i]);
+        if (read && typeof read === "object") {
+          raw = String(read.text || "");
+          notesPath = String(read.path || notesPath);
+        } else {
+          raw = String(read || "");
+        }
       } catch (_unreadableNotes) {
         raw = "";
       }
@@ -4798,7 +4807,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       if (notes.length > PROJECT_NOTES_MAX_CHARS) {
         notes = notes.substring(0, PROJECT_NOTES_MAX_CHARS) + "\n[… the rest: project-brief returns the whole notes]";
       }
-      parts.push("### " + projects[i] + " (" + PROJECT_NOTES_PATH + ")\n" + trim(notes));
+      parts.push("### " + projects[i] + " (" + notesPath + ")\n" + trim(notes));
     }
     if (!parts.length) {
       return "";
@@ -4818,13 +4827,19 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return names;
   }
 
+  // The first notes file of the project that exists: the private one, else the old served one.
   function readProjectNotes(projectName) {
     var dir = projectDirectoryByName(projectName);
     if (dir === null) {
       return "";
     }
-    var file = new File(new File(filePath(dir)), PROJECT_NOTES_PATH);
-    return file.isFile() ? readTextFile(file) : "";
+    for (var i = 0; i < PROJECT_NOTES_PATHS.length; i++) {
+      var file = new File(new File(filePath(dir)), PROJECT_NOTES_PATHS[i]);
+      if (file.isFile()) {
+        return { text: readTextFile(file), path: PROJECT_NOTES_PATHS[i] };
+      }
+    }
+    return "";
   }
 
   function withProjectNotesPrompt(promptText, options, entry) {
