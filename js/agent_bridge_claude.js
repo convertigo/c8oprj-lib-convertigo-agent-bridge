@@ -2622,6 +2622,7 @@
     } else {
       promptText = withAgentTempDirPrompt(promptText, entry.agentTempDir);
       promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
+      promptText = withProjectNotesPrompt(promptText, options, entry);
     }
     var cursor = entry.nextIndex;
     var requestId = entry.nextRequestId++;

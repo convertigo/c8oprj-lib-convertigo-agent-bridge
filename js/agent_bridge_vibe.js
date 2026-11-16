@@ -1123,6 +1123,7 @@
     if (!trim(promptText).length) {
       return { ok: false, status: "error", handle: handle, error: "prompt is required", timestamp: now() };
     }
+    promptText = withProjectNotesPrompt(promptText, options, entry);
     promptText = withAgentTempDirPrompt(promptText, entry.agentTempDir);
     promptText = withRevealModePrompt(promptText, entry.convertigoRevealMode === true);
     promptText = withStudioAgentBrowserPrompt(promptText, entry.playwrightMcpEnabled === true ? entry.playwrightCdpEndpoint : "");

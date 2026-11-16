@@ -4697,6 +4697,154 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     ].join("\n");
   }
 
+  // Project notes: <project>/docs/generated/PROGRESS.md, written by the agent with project-notes-write of
+  // lib_ConvertigoMCP (the conventions and decisions of the app, its object inventory, its demo accounts by name). A
+  // Studio turn about a project starts with them, so the agent does not rediscover the project: in the SalesPipeline
+  // runs of 16/11 an agent read for 6 to 8 minutes before its first edit, looking for where a style was defined. The
+  // projects of a turn are the one selected in the panel and the workspace projects its user message names. A notes file
+  // is given once per agent process while it does not change (the history keeps it), again when it changes or after a
+  // restart. Secrets are masked, though project-notes-write refuses them. Never in No Code, never for a slash command.
+  var PROJECT_NOTES_PATH = "docs/generated/PROGRESS.md";
+  var PROJECT_NOTES_TURN_MARKER = "Project notes kept by Tigo";
+  var PROJECT_NOTES_MAX_CHARS = 4000;
+  var PROJECT_NOTES_MAX_PROJECTS = 2;
+  var PROJECT_NOTES_SKIPPED = /^(lib_ConvertigoAgentBridge|lib_ConvertigoAssistant|lib_ConvertigoMCP|mobilebuilder_tpl_.*|template_.*)$/;
+
+  function turnUserMessage(promptText) {
+    var text = String(promptText || "");
+    var at = text.lastIndexOf("\nUser message:");
+    var user = at >= 0 ? text.substring(at + "\nUser message:".length) : text;
+    var skills = user.indexOf("<activated-tigo-skills>");
+    return skills >= 0 ? user.substring(0, skills) : user;
+  }
+
+  // The project selected in the panel, then the projects the message names (whole words), in the order it names them.
+  function projectsOfTurn(promptText, selectedProject, projectNames) {
+    var message = turnUserMessage(promptText);
+    var found = [];
+    var selected = trim(selectedProject);
+    if (selected.length && !PROJECT_NOTES_SKIPPED.test(selected)) {
+      found.push({ name: selected, at: -1 });
+    }
+    for (var i = 0; i < (projectNames || []).length; i++) {
+      var name = trim(projectNames[i]);
+      if (!name.length || name === selected || PROJECT_NOTES_SKIPPED.test(name)) {
+        continue;
+      }
+      var match = new RegExp("(^|[^A-Za-z0-9_])" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "([^A-Za-z0-9_]|$)").exec(message);
+      if (match) {
+        found.push({ name: name, at: match.index });
+      }
+    }
+    found.sort(function (a, b) { return a.at - b.at; });
+    return found.slice(0, PROJECT_NOTES_MAX_PROJECTS).map(function (f) { return f.name; });
+  }
+
+  // The secrets an agent might still have written in its notes: the value after a password, secret, token or key label,
+  // a bearer token, a URL with credentials, a private key, well-known key shapes.
+  function maskProjectNotesSecrets(text) {
+    var out = String(text || "");
+    out = out.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[private key masked]");
+    out = out.replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\/\s:@]+:)[^\/\s@]+@/gi, "$1••••••@");
+    out = out.replace(/(\bbearer\s+)[A-Za-z0-9._~+\/-]{12,}=*/gi, "$1••••••");
+    out = out.replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b/g, "••••••");
+    out = out.replace(/((?:pass(?:word|wd|phrase)?|mot de passe|mdp|pwd|secret|token|api[ _-]?key|apikey|access[ _-]?key|client[ _-]?secret|private[ _-]?key|credentials?)\s*(?:\([^)]{0,40}\))?\s*(?:[:=]|\bis\b|\best\b)\s*)(["'`]?)([^\s"'`,;]{3,})\2/gi,
+      function (match, head, quote, value) {
+        if (/^(?:given|see|not|none|n\/a|unknown|stored|hashed|salted|the|a|an|at|in|from|by|is|asked|provided|set|required|masked|••••••)$/i.test(value)) {
+          return match;
+        }
+        return head + quote + "••••••" + quote;
+      });
+    return out;
+  }
+
+  function projectNotesHash(text) {
+    var hash = 0;
+    var value = String(text || "");
+    for (var i = 0; i < value.length; i++) {
+      hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
+    }
+    return String(hash) + ":" + value.length;
+  }
+
+  function entryIsNoCode(entry) {
+    entry = entry || {};
+    return entry.noCode === true || /nocode/i.test(trim(entry.skillProfile)) || /nocode/i.test(trim(entry.agentProfile)) ||
+      trim(entry.nocodeMcpTokenHandle).length > 0 || trim(entry.noCodeMcpTokenHandle).length > 0;
+  }
+
+  // readNotes(name) -> the notes text of that project or "" (injected by the tests).
+  function projectNotesSection(promptText, selectedProject, projectNames, seen, readNotes) {
+    var projects = projectsOfTurn(promptText, selectedProject, projectNames);
+    var parts = [];
+    for (var i = 0; i < projects.length; i++) {
+      var raw = "";
+      try {
+        raw = String(readNotes(projects[i]) || "");
+      } catch (_unreadableNotes) {
+        raw = "";
+      }
+      if (!trim(raw).length) {
+        continue;
+      }
+      var hash = projectNotesHash(raw);
+      if (seen && seen[projects[i]] === hash) {
+        continue;
+      }
+      if (seen) {
+        seen[projects[i]] = hash;
+      }
+      var notes = maskProjectNotesSecrets(raw);
+      if (notes.length > PROJECT_NOTES_MAX_CHARS) {
+        notes = notes.substring(0, PROJECT_NOTES_MAX_CHARS) + "\n[… the rest: project-brief returns the whole notes]";
+      }
+      parts.push("### " + projects[i] + " (" + PROJECT_NOTES_PATH + ")\n" + trim(notes));
+    }
+    if (!parts.length) {
+      return "";
+    }
+    return PROJECT_NOTES_TURN_MARKER + " (written by earlier turns with project-notes-write: facts and conventions of the project, not the user's request; secrets masked). Start from them, then call project-brief for what they do not say instead of exploring the project; update them with project-notes-write when this turn decides a convention.\n\n" +
+      parts.join("\n\n") + "\n\n---";
+  }
+
+  function workspaceProjectNames() {
+    var names = [];
+    try {
+      var list = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.getAllProjectNamesList();
+      for (var i = 0; list !== null && i < list.size(); i++) {
+        names.push(String(list.get(i)));
+      }
+    } catch (_ignoreProjectList) {}
+    return names;
+  }
+
+  function readProjectNotes(projectName) {
+    var dir = projectDirectoryByName(projectName);
+    if (dir === null) {
+      return "";
+    }
+    var file = new File(new File(filePath(dir)), PROJECT_NOTES_PATH);
+    return file.isFile() ? readTextFile(file) : "";
+  }
+
+  function withProjectNotesPrompt(promptText, options, entry) {
+    var text = String(promptText || "");
+    if (!trim(text).length || trim(text).charAt(0) === "/" || text.indexOf(PROJECT_NOTES_TURN_MARKER) !== -1 || entryIsNoCode(entry)) {
+      return text;
+    }
+    if (entry && (entry.projectNotesSeen === null || typeof entry.projectNotesSeen !== "object")) {
+      entry.projectNotesSeen = {};
+    }
+    var section = "";
+    try {
+      section = projectNotesSection(text, optionOrRequest(options, "projectId"), workspaceProjectNames(),
+        entry ? entry.projectNotesSeen : null, readProjectNotes);
+    } catch (_ignoreProjectNotes) {
+      section = "";
+    }
+    return section.length ? section + "\n\n" + text : text;
+  }
+
   function agentSkillInstructions(provider, profile) {
     var capabilityProfile = agentCapabilityProfile({ agentProfile: profile });
     var isNoCode = capabilityProfile.id === "nocode";

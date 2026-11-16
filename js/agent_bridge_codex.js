@@ -2584,6 +2584,7 @@
         skillBundle: entry.managedSkillBundle
       });
     }
+    promptText = withProjectNotesPrompt(promptText, options, entry);
     var managedPreflight = {
       setupStatus: managedPreflightCurrent ? "current" : "unverified",
       guidanceVersion: mcpProjectGuidanceVersion(),
