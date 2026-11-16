@@ -313,6 +313,22 @@ same context.
   Homes outside read only keep the intent they were written with.
 - Run `node --test tests/studio_read_only_tools.test.js`.
 
+## Edit profile of a Studio conversation (A/B)
+
+`editProfile` (`yaml`, `html`, or empty for the default MCP tools) is passed by lib_ConvertigoAssistant at each Vibe
+start of a conversation the user switched with `/profil` (see lib_ConvertigoAssistant `docs/edit-profiles.md`). It
+applies to a Studio (generalist) Vibe conversation with a home of its own only (`conversationEditProfile`):
+- the Convertigo MCP server of the conversation gets `X-Convertigo-Edit-Profile` (config.toml and the ACP session server
+  of `buildMcpServers`); lib_ConvertigoMCP `js/edit_profile.js` narrows the tools (`yaml`) or adds the Ionic import
+  (`html`);
+- `syncVibeEditProfile`, after `_setupVibe` and the Flow pack, gives `write_file` and `edit` `permission = "never"` and
+  an allowlist of Vibe path grants (`yaml`: `c8oProject.yaml`, `_c8oProject/`, `js/` of the project; `html`:
+  `_private/ionic/src/app/`; both: `<workspace>/.agent-tmp/`), and writes the "Conversation edit profile (A/B)" section of
+  AGENTS.md; without a profile it puts back the Studio tables and removes the section;
+- the profile and its projects are part of `vibeToolPolicy` (and `editProfile` of the config intent), so a change writes
+  the config again and restarts the process on its session. Read only wins over a profile.
+The shell keeps the Studio's settings. Tests: `node --test tests/edit_profile.test.js`.
+
 ## Vibe image attachments
 
 - `agent_vibe_prompt` accepts `images` (JSON array of local paths). `vibePrompt`

@@ -802,10 +802,287 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return studioReadOnlyProfile(normalizeSkillProfile(options || {}));
   }
 
+  // The edit profile of a Studio conversation, for the A/B of the surfaces an agent changes a project with. The Tigo
+  // panel switches it per conversation ("/profil yaml|html|mcp", lib_ConvertigoAssistant keeps it in the
+  // conversation.json) and passes it at each start as `editProfile`. "" is the default (the MCP edit tools) and changes
+  // nothing. A Vibe conversation with a home of its own only (a leased viewer port), as the profile is written in that
+  // home:
+  // - "yaml": the MCP leaves out the tools that change a project (lib_ConvertigoMCP js/edit_profile.js, header
+  //   X-Convertigo-Edit-Profile); the agent edits c8oProject.yaml, _c8oProject/** and js/** of the project with its
+  //   file tools, which write nowhere else, then calls project-reload;
+  // - "html": the MCP tools stay, project-reload imports the edited generated files of the NGX pages (fromIonic), and
+  //   the file tools write in _private/ionic/src/app of the project only.
+  // The header goes into config.toml and the ACP session server (buildMcpServers), the file tools get permission
+  // tables in config.toml and the agent a section of the home's AGENTS.md (syncVibeEditProfile); a change of profile is
+  // a change of tool policy (vibeToolPolicy): the config is written again and the process restarts on its session.
+  // The shell keeps the Studio's settings: only the instructions keep it from writing elsewhere.
+  var EDIT_PROFILES = { yaml: true, html: true };
+  var EDIT_PROFILE_HEADER = "X-Convertigo-Edit-Profile";
+  var VIBE_EDIT_PROFILE_POLICY_REVISION = "v1";
+  var VIBE_EDIT_PROFILE_HEADING = "## Conversation edit profile (A/B)";
+  var VIBE_EDIT_PROFILE_FILE_TOOLS = ["write_file", "edit"];
+  var EDIT_PROFILE_YAML_GUIDE = "convertigo://resources/convertigo-yaml-editing";
+  var EDIT_PROFILE_HTML_GUIDE = "convertigo://resources/convertigo-ngx-html-roundtrip";
+
+  function conversationEditProfile(options) {
+    options = options || {};
+    var value = trim(optionOrRequest(options, "editProfile")).toLowerCase();
+    if (EDIT_PROFILES[value] !== true) {
+      return "";
+    }
+    var userId = requestedUserId(options);
+    if (userId.length && userId.toLowerCase() !== "studio") {
+      return "";
+    }
+    if (normalizeSkillProfile(options) !== "generalist") {
+      return "";
+    }
+    var ownHome = intValue(options.viewerDebugPort, 0, 0, 65535) >= 1024
+      || trim(options.vibeHomeScope || options.homeScope).toLowerCase() === "conversation";
+    return ownHome ? value : "";
+  }
+
+  // The projects whose files the profile lets the file tools write: the conversation's project, or every loaded project
+  // but the Tigo libraries when the conversation has none. [{name, dir}]
+  function editProfileProjects(options) {
+    var named = resolveProjectIdOption(options || {});
+    var names = [];
+    if (named.length) {
+      names.push(named);
+    } else {
+      try {
+        var list = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.getAllProjectNamesList();
+        for (var i = 0; list !== null && i < list.size(); i++) {
+          var name = String(list.get(i));
+          if (!/^(lib_ConvertigoAgentBridge|lib_ConvertigoAssistant|lib_ConvertigoMCP)$/.test(name)) {
+            names.push(name);
+          }
+        }
+      } catch (_ignoreProjectList) {}
+    }
+    var projects = [];
+    for (var j = 0; j < names.length; j++) {
+      var dir = projectDirectoryByName(names[j]);
+      if (dir !== null) {
+        projects.push({ name: names[j], dir: filePath(dir) });
+      }
+    }
+    return projects;
+  }
+
+  function vibePathGrant(scope, path) {
+    return "vibe-path:" + scope + ":" + String(path).replace(/[\\/]+$/, "");
+  }
+
+  // What write_file and edit may write in this profile (Vibe path grants, every other path refused), [] for none.
+  function vibeEditProfileGrants(options, profile) {
+    var grants = [];
+    var projects = editProfileProjects(options);
+    for (var i = 0; i < projects.length; i++) {
+      var dir = projects[i].dir;
+      if (profile === "yaml") {
+        grants.push(vibePathGrant("exact", childPath(dir, "c8oProject.yaml")));
+        grants.push(vibePathGrant("directory_recursive", childPath(dir, "_c8oProject")));
+        grants.push(vibePathGrant("directory_recursive", childPath(dir, "js")));
+      } else if (profile === "html") {
+        grants.push(vibePathGrant("directory_recursive", childPath(childPath(childPath(childPath(dir, "_private"), "ionic"), "src"), "app")));
+      }
+    }
+    var workspaceRoot = trim(resolveWorkspaceRoot(options || {}));
+    if (workspaceRoot.length) {
+      grants.push(vibePathGrant("directory_recursive", childPath(workspaceRoot, AGENT_TEMP_DIR_NAME)));
+    }
+    return grants;
+  }
+
+  function vibeEditProfileProjectKey(options) {
+    var projects = editProfileProjects(options);
+    var names = [];
+    for (var i = 0; i < projects.length; i++) {
+      names.push(projects[i].name);
+    }
+    return names.length ? names.join(",") : "-";
+  }
+
+  // The tables of write_file and edit in a profile's home: refused unless their path is one of the grants.
+  function vibeEditProfileTables(grants) {
+    var lines = [];
+    for (var i = 0; i < VIBE_EDIT_PROFILE_FILE_TOOLS.length; i++) {
+      lines.push("[tools." + VIBE_EDIT_PROFILE_FILE_TOOLS[i] + "]", 'permission = "never"', "allowlist = " + tomlArray(grants), "");
+    }
+    return lines;
+  }
+
+  // The [tools.write_file] and [tools.edit] tables of config.toml: {permission, allowlist[]} per tool, read in both the
+  // forms the Bridge and Vibe write (inline or multi-line arrays).
+  function vibeFileToolTables(text) {
+    var lines = String(text == null ? "" : text).replace(/\r\n?/g, "\n").split("\n");
+    var tables = {};
+    var current = null;
+    for (var i = 0; i < lines.length; i++) {
+      // a table ends at the next table header ([x] or [[x]])
+      if (/^\s*\[/.test(lines[i])) {
+        if (current !== null) {
+          tables[current].end = i;
+        }
+        var header = /^\s*\[\s*tools\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\s*\]\s*$/.exec(lines[i]);
+        var name = header === null ? "" : String(header[1] || header[2] || "");
+        current = VIBE_EDIT_PROFILE_FILE_TOOLS.indexOf(name) >= 0 && !tables[name] ? name : null;
+        if (current !== null) {
+          tables[current] = { start: i, end: lines.length, body: "" };
+        }
+        continue;
+      }
+      if (current !== null) {
+        tables[current].body += lines[i] + "\n";
+      }
+    }
+    for (var tool in tables) {
+      if (Object.prototype.hasOwnProperty.call(tables, tool)) {
+        var body = tables[tool].body;
+        var permission = /^\s*permission\s*=\s*["']([^"']*)["']/m.exec(body);
+        var allowlist = /^\s*allowlist\s*=\s*\[([\s\S]*?)\]/m.exec(body);
+        tables[tool].permission = permission === null ? "" : trim(permission[1]).toLowerCase();
+        tables[tool].allowlist = allowlist === null ? [] : tomlStringArrayValues(allowlist[1]);
+      }
+    }
+    return { lines: lines, tables: tables };
+  }
+
+  // config.toml with the file tool tables of the profile, or, without a profile, with the tables a profile wrote put back
+  // to the Studio's ("always", as lib_ConvertigoMCP._setupVibe writes them). A home that never had a profile is left as
+  // it is.
+  function mergeVibeEditProfileConfig(text, profile, grants) {
+    var source = String(text == null ? "" : text).replace(/\r\n?/g, "\n");
+    var parsed = vibeFileToolTables(source);
+    var wanted = profile.length;
+    var same = true;
+    var touched = false;
+    for (var i = 0; i < VIBE_EDIT_PROFILE_FILE_TOOLS.length; i++) {
+      var table = parsed.tables[VIBE_EDIT_PROFILE_FILE_TOOLS[i]];
+      var ours = table && table.permission === "never" && table.allowlist.some(function (grant) { return grant.indexOf("vibe-path:") === 0; });
+      touched = touched || !!ours;
+      if (!table || table.permission !== "never" || table.allowlist.join("\n") !== grants.join("\n")) {
+        same = false;
+      }
+    }
+    if ((wanted && same) || (!wanted && !touched)) {
+      return source;
+    }
+    var drop = {};
+    for (var tool in parsed.tables) {
+      if (Object.prototype.hasOwnProperty.call(parsed.tables, tool)) {
+        for (var line = parsed.tables[tool].start; line < parsed.tables[tool].end; line++) {
+          drop[line] = true;
+        }
+      }
+    }
+    var kept = [];
+    for (var k = 0; k < parsed.lines.length; k++) {
+      if (drop[k] !== true) {
+        kept.push(parsed.lines[k]);
+      }
+    }
+    var added = wanted ? vibeEditProfileTables(grants)
+      : ["[tools.write_file]", 'permission = "always"', "", "[tools.edit]", 'permission = "always"', ""];
+    return kept.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n*$/, "\n\n") + added.join("\n").replace(/\n*$/, "\n");
+  }
+
+  function vibeEditProfileSection(profile, projects) {
+    var folders = [];
+    for (var i = 0; i < projects.length; i++) {
+      folders.push("`" + projects[i].name + "`: `" + projects[i].dir + "`");
+    }
+    var where = folders.length ? folders.join("; ") : "none loaded";
+    var lines = [VIBE_EDIT_PROFILE_HEADING, ""];
+    if (profile === "yaml") {
+      lines.push(
+        "This conversation runs in the `yaml` edit profile: you change Convertigo projects by editing their YAML files, not through the MCP edit tools. It overrides, in this conversation only, every rule above or in the skill that sends a change through `databaseobject-tree-apply`, the generators or `project-save`, or that forbids editing project YAML.",
+        "",
+        "- Read `" + EDIT_PROFILE_YAML_GUIDE + "` before any change (`tigo-resources` reads it), then the YAML files you change.",
+        "- The MCP tools that change a project are not offered here: `databaseobject-tree-apply`, `-delete`, `-move`, `-rename`, the generators (`ngx-page-create`, `business-sequence-create`, `sql-transaction-create`, `upsert-crud`...), `project-js-set`, `project-save`. They are refused through `batch-call`, `requestable-execute` and `subagent-run` too: do not look for a way round.",
+        "- Your file tools (`write_file`, `edit`) write only `c8oProject.yaml`, `_c8oProject/**` and `js/**` of the project (" + where + ") and your temporary folder; any other path is refused. Never write `_private/`, `DisplayObjects/` or other generated files, with any tool.",
+        "- Keep the trailing space of every line that ends with `: ` (a bean line `↓Name [type-priority]: ` or an empty `key: `): the engine cannot read the file without it.",
+        "- After a change: `project-reload(project)` and read its `errors`; then check with `project-lint`, `requestable-execute`, `mobile-builder-build` or `mobile-builder-open`, and `browser-verify` as the task needs.",
+        ""
+      );
+    } else if (profile === "html") {
+      lines.push(
+        "This conversation runs in the `html` edit profile: visual changes of existing NGX pages and shared components are made in their generated files, then imported back into the Convertigo objects. It overrides, for these files only, every rule above or in the skill that forbids editing `_private/ionic`.",
+        "",
+        "- Read `" + EDIT_PROFILE_HTML_GUIDE + "` before any visual change (`tigo-resources` reads it).",
+        "- `mobile-builder-open` lists `ionicFiles` (the html of each page and shared component; the scss and ts lie next to it). Edit them with your file tools, which write only under `_private/ionic/src/app` of the project (" + where + ") and your temporary folder.",
+        "- Import with `project-reload(project, fromIonic:true, ionicTarget:<edited file or folder>)` and read its `ionicReport` (`skipped`, `warnings`) before going on; import before any tree change of the same page.",
+        "- Data, sequences, actions and bindings stay on the MCP tree tools.",
+        ""
+      );
+    }
+    return lines.join("\n");
+  }
+
+  // AGENTS.md with the profile section placed before the compaction rules (or at the end), or without it.
+  function mergeVibeEditProfileAgents(text, section) {
+    var source = String(text == null ? "" : text).replace(/\r\n?/g, "\n");
+    var start = source.indexOf(VIBE_EDIT_PROFILE_HEADING);
+    var without = source;
+    if (start >= 0) {
+      var end = source.indexOf("\n## ", start + VIBE_EDIT_PROFILE_HEADING.length);
+      without = (source.substring(0, start).replace(/\s+$/, "") + (end >= 0 ? "\n\n" + source.substring(end + 1) : "")).replace(/\s+$/, "") + "\n";
+    }
+    if (!trim(section).length) {
+      return start >= 0 ? without : source;
+    }
+    var at = without.indexOf(VIBE_COMPACTION_RULES_HEADING);
+    return at >= 0
+      ? without.substring(0, at).replace(/\s+$/, "") + "\n\n" + section.replace(/\s+$/, "") + "\n\n" + without.substring(at)
+      : without.replace(/\s+$/, "") + "\n\n" + section.replace(/\s+$/, "") + "\n";
+  }
+
+  // Writes the profile of a Studio home (or takes a former one away) after lib_ConvertigoMCP._setupVibe and the Flow pack.
+  function syncVibeEditProfile(options, vibeHome, report) {
+    if (report.ok !== true || boolValue(options && options.dryRun, false)) {
+      return report;
+    }
+    var profile = conversationEditProfile(options);
+    try {
+      var configFile = new File(vibeHome, "config.toml");
+      if (configFile.isFile()) {
+        var config = String(readTextFile(configFile));
+        var merged = mergeVibeEditProfileConfig(config, profile, profile.length ? vibeEditProfileGrants(options, profile) : []);
+        if (merged !== config.replace(/\r\n?/g, "\n")) {
+          writeTextFile(configFile, merged);
+          report.generated.push("config.toml (edit profile " + (profile || "mcp") + ")");
+        }
+      }
+      var agentsFile = new File(vibeHome, "AGENTS.md");
+      if (agentsFile.isFile()) {
+        var agents = String(readTextFile(agentsFile));
+        var mergedAgents = mergeVibeEditProfileAgents(agents, profile.length ? vibeEditProfileSection(profile, editProfileProjects(options)) : "");
+        if (mergedAgents !== agents.replace(/\r\n?/g, "\n")) {
+          writeTextFile(agentsFile, mergedAgents);
+          report.generated.push("AGENTS.md (edit profile " + (profile || "mcp") + ")");
+        }
+      }
+      report.editProfile = profile || "mcp";
+    } catch (e) {
+      report.ok = false;
+      report.error = String(e);
+      report.message = "Unable to write the edit profile of the Vibe home";
+    }
+    return report;
+  }
+
   // what a resident process was started with: a change of policy or of confinement restarts it
   function vibeToolPolicy(options) {
     if (normalizeSkillProfile(options || {}) !== "nocode") {
-      return studioReadOnly(options) ? VIBE_STUDIO_READ_ONLY_POLICY : "";
+      if (studioReadOnly(options)) {
+        return VIBE_STUDIO_READ_ONLY_POLICY;
+      }
+      // the edit profile of the conversation (conversationEditProfile) and the projects its file tools write
+      var editProfile = conversationEditProfile(options);
+      return editProfile.length
+        ? "studio-edit-" + editProfile + "-" + VIBE_EDIT_PROFILE_POLICY_REVISION + ":" + vibeEditProfileProjectKey(options)
+        : "";
     }
     var info = engineNoCodeToolInfo();
     var confined = info.policy !== "full" && info.landlockAbi > 0;
@@ -2110,7 +2387,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     [
       "provider", "agent", "agentProvider", "targetProject", "projectName", "projectId", "primaryProject",
       "conversationId", "threadid", "handle",
-      "userId", "agentProfile", "skillProfile", "assistantContext", "assistantSurface", "profile",
+      "userId", "agentProfile", "skillProfile", "assistantContext", "assistantSurface", "profile", "editProfile",
       "currentUrl", "currentRoute", "currentPath", "currentFormId", "currentFormUrl",
       "nocodeCurrentUrl", "nocodeCurrentRoute", "nocodeCurrentFormId", "nocodeCurrentFormUrl",
       "formId", "pageId", "applicationId", "currentPage", "currentApplicationId",
@@ -2462,6 +2739,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     }
     if (mcpNoLogEnabled(options)) {
       lines.push('"X-Convertigo-No-Log" = "true"');
+    }
+    if (conversationEditProfile(options).length) {
+      lines.push('"' + EDIT_PROFILE_HEADER + '" = "' + conversationEditProfile(options) + '"');
     }
     return lines;
   }
@@ -6049,7 +6329,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         return setupVibeFlowFacadeHome(options, new File(home), studioMcpEndpoint);
       }
       var studioReport = setupVibeFromMcpProject(options, new File(home), vibeLegacyMcpEndpoint(studioMcpEndpoint));
-      return syncVibeFlowPack(options, new File(home), studioMcpEndpoint, studioReport);
+      studioReport = syncVibeFlowPack(options, new File(home), studioMcpEndpoint, studioReport);
+      // the conversation's edit profile, after both: it narrows what they allow
+      return syncVibeEditProfile(options, new File(home), studioReport);
     }
     report.attempted = true;
     try {
@@ -9180,7 +9462,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     playwrightEndpoint: true,
     revealMode: true,
     viewerDebugPort: true,
-    conversationId: true
+    conversationId: true,
+    editProfile: true
   };
 
   function vibeConfigIntentFile(vibeHome) {
@@ -14302,6 +14585,13 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         headers.push({
           name: "X-Convertigo-No-Log",
           value: "true"
+        });
+      }
+      // the conversation's edit profile (conversationEditProfile): the tools the MCP offers and how project-reload imports
+      if (conversationEditProfile(options).length) {
+        headers.push({
+          name: EDIT_PROFILE_HEADER,
+          value: conversationEditProfile(options)
         });
       }
     }

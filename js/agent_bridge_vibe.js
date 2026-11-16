@@ -113,6 +113,11 @@
         if (expectedToolPolicy.length) {
           intentFields.toolPolicy = expectedToolPolicy;
         }
+        // Only a home of a conversation with an edit profile records it (conversationEditProfile): it changes the header
+        // of the Convertigo server; other homes keep the intent they were written with.
+        if (conversationEditProfile(options).length) {
+          intentFields.editProfile = conversationEditProfile(options);
+        }
         // Only a home with the Flow pack records it, so homes without Flow keep the intent they were written with.
         if (expectedFlowEndpoint.length) {
           intentFields.flowEndpoint = expectedFlowEndpoint;
@@ -602,6 +607,7 @@
       agentProfile: options.agentProfile,
       skillProfile: options.skillProfile,
       assistantContext: options.assistantContext,
+      editProfile: options.editProfile,
       viewerDebugPort: options.viewerDebugPort,
       browserDebugUrl: options.browserDebugUrl,
       browserDevToolsJsonUrl: options.browserDevToolsJsonUrl,

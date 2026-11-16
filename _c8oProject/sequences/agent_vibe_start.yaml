@@ -14,6 +14,7 @@ comment: Start a long-running vibe-acp process and create an ACP session.
       agentProfile: typeof agentProfile === "undefined" ? "" : agentProfile,
       skillProfile: typeof skillProfile === "undefined" ? "" : skillProfile,
       assistantContext: typeof assistantContext === "undefined" ? "" : assistantContext,
+      editProfile: typeof editProfile === "undefined" ? "" : editProfile,
       mcpBearerTokenHandle: typeof mcpBearerTokenHandle === "undefined" ? "" : mcpBearerTokenHandle,
       nocodeMcpTokenHandle: typeof nocodeMcpTokenHandle === "undefined" ? "" : nocodeMcpTokenHandle,
       vibeHome: typeof vibeHome === "undefined" ? "" : vibeHome,
@@ -169,6 +170,9 @@ comment: Start a long-running vibe-acp process and create an ACP session.
 ↓assistantContext [variables.RequestableVariable-1788358991008]: 
   comment: Assistant surface context used to select the MCP authorization scope.
   description: Assistant surface context used to select the MCP authorization scope.
+↓editProfile [variables.RequestableVariable-1816000000101]: 
+  comment: 'The edit profile of a Studio conversation (yaml or html, empty for the default MCP tools): the MCP header, the file tool permissions and the instructions of its Vibe home.'
+  description: 'The edit profile of a Studio conversation (yaml or html, empty for the default MCP tools): the MCP header, the file tool permissions and the instructions of its Vibe home.'
 ↓mcpBearerTokenHandle [variables.RequestableVariable-1788358991031]: 
   comment: Opaque server-memory handle for the managed Convertigo MCP bearer token.
   description: Opaque server-memory handle for the managed Convertigo MCP bearer token.
