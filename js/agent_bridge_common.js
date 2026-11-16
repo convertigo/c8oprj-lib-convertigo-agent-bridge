@@ -824,10 +824,44 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   var EDIT_PROFILE_YAML_GUIDE = "convertigo://resources/convertigo-yaml-editing";
   var EDIT_PROFILE_HTML_GUIDE = "convertigo://resources/convertigo-ngx-html-roundtrip";
 
+  // html exists on an engine of 8.5.0 or more whose NgxIonicRoundTripConverter has the static
+  // importIntoLoadedProject(String, String), looked up by reflection (an 8.4 Studio patched in September has the class
+  // without it), as lib_ConvertigoMCP js/edit_profile.js decides; elsewhere an html conversation runs as the default.
+  var EDIT_PROFILE_HTML_MINIMUM_VERSION = "8.5.0";
+  var ionicRoundTripAvailableCache = null;
+
+  function ionicRoundTripMethodPresent() {
+    try {
+      var loader = Thread.currentThread().getContextClassLoader();
+      var name = "com.twinsoft.convertigo.engine.util.NgxIonicRoundTripConverter";
+      var type = loader != null ? loader.loadClass(name) : Packages.java.lang.Class.forName(name);
+      var methods = type.getMethods();
+      for (var i = 0; i < methods.length; i++) {
+        var parameters = methods[i].getParameterTypes();
+        if (String(methods[i].getName()) === "importIntoLoadedProject" && parameters.length === 2
+            && String(parameters[0].getName()) === "java.lang.String" && String(parameters[1].getName()) === "java.lang.String"
+            && Packages.java.lang.reflect.Modifier.isStatic(methods[i].getModifiers())) {
+          return true;
+        }
+      }
+    } catch (_noRoundTrip) {}
+    return false;
+  }
+
+  function ionicRoundTripAvailable() {
+    if (ionicRoundTripAvailableCache === null) {
+      ionicRoundTripAvailableCache = versionAtLeast(engineProductVersion(), EDIT_PROFILE_HTML_MINIMUM_VERSION) && ionicRoundTripMethodPresent();
+    }
+    return ionicRoundTripAvailableCache;
+  }
+
   function conversationEditProfile(options) {
     options = options || {};
     var value = trim(optionOrRequest(options, "editProfile")).toLowerCase();
     if (EDIT_PROFILES[value] !== true) {
+      return "";
+    }
+    if (value === "html" && !ionicRoundTripAvailable()) {
       return "";
     }
     var userId = requestedUserId(options);

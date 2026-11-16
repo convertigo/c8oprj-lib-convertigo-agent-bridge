@@ -317,7 +317,9 @@ same context.
 
 `editProfile` (`yaml`, `html`, or empty for the default MCP tools) is passed by lib_ConvertigoAssistant at each Vibe
 start of a conversation the user switched with `/profil` (see lib_ConvertigoAssistant `docs/edit-profiles.md`). It
-applies to a Studio (generalist) Vibe conversation with a home of its own only (`conversationEditProfile`):
+applies to a Studio (generalist) Vibe conversation with a home of its own only (`conversationEditProfile`), and `html`
+only on an engine of 8.5.0 or more whose `NgxIonicRoundTripConverter` has `importIntoLoadedProject(String, String)`
+(`ionicRoundTripAvailable`, by reflection; elsewhere an html conversation runs as the default):
 - the Convertigo MCP server of the conversation gets `X-Convertigo-Edit-Profile` (config.toml and the ACP session server
   of `buildMcpServers`); lib_ConvertigoMCP `js/edit_profile.js` narrows the tools (`yaml`) or adds the Ionic import
   (`html`);

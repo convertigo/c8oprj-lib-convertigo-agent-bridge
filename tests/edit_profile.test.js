@@ -21,6 +21,8 @@ projectDirectoryByName = (name) => (name === 'SalesPipeline' || name === 'Other'
 filePath = (file) => (file && file.path ? file.path : String(file || ''));
 childPath = (parent, name) => String(parent).replace(/\/+$/, '') + '/' + name;
 resolveWorkspaceRoot = () => '/ws';
+// an 8.5 engine with the Ionic round-trip import, unless a test says otherwise
+ionicRoundTripAvailable = () => true;
 
 const studio = (extra) => Object.assign({ userId: 'studio', conversationId: 'agent-1', viewerDebugPort: 45991, projectId: 'SalesPipeline' }, extra || {});
 const named = (headers, name) => headers.filter((h) => h.name === name).map((h) => h.value);
@@ -170,4 +172,23 @@ test('the Studio home is set up with the profile after _setupVibe and the Flow p
     assert.match(yaml, /editProfile: typeof editProfile === "undefined" \? "" : editProfile,/, sequence);
     assert.match(yaml, /↓editProfile \[variables\.RequestableVariable-\d+\]: \n/, sequence);
   }
+});
+
+test('html is the default where the engine does not offer the round-trip (8.4, or 8.5 without the method)', () => {
+  ionicRoundTripAvailable = () => false;
+  try {
+    const options = studio({ editProfile: 'html' });
+    assert.equal(conversationEditProfile(options), '');
+    assert.deepEqual(named(sessionHeaders(options), 'X-Convertigo-Edit-Profile'), []);
+    assert.ok(!vibeConfigMcpHeaderLines(options).some((line) => /Edit-Profile/.test(line)));
+    assert.equal(vibeToolPolicy(options), '', 'the home is the default one: no file permission, no section');
+    // yaml does not depend on the engine
+    assert.equal(conversationEditProfile(studio({ editProfile: 'yaml' })), 'yaml');
+  } finally {
+    ionicRoundTripAvailable = () => true;
+  }
+  // the version and the method, as the MCP decides
+  assert.equal(versionAtLeast('8.4.7', EDIT_PROFILE_HTML_MINIMUM_VERSION), false);
+  assert.equal(versionAtLeast('8.5.0', EDIT_PROFILE_HTML_MINIMUM_VERSION), true);
+  assert.match(fs.readFileSync(path.join(root, 'js/agent_bridge_common.js'), 'utf8'), /String\(methods\[i\]\.getName\(\)\) === "importIntoLoadedProject" && parameters\.length === 2/);
 });
