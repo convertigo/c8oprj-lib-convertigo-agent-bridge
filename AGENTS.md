@@ -794,6 +794,15 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - Mistral Large 4 (`mistral/mistral-large-4` and its ACP alias) accepts images.
   Declare `supports_images = true` in its managed config and transmit ACP image
   blocks; GLM remains text-only. Do not apply GLM capabilities to every model.
+- Mistral Large 4 starts on the thinking level `medium` when nobody chose one
+  (`VIBE_MODEL_DEFAULT_THINKING`, measured on a CRM build: faster than high, same
+  score). Its settings offer used to take the level of the catalog session's active
+  model (GLM 5.3's `high`), and the Assistant sends `defaultReasoning` as
+  `reasoningEffort` when the user saved nothing. `applyGatewayOfferToProvider` (every
+  settings read, cached ones included) and `vibeGatewayModelSpecs` (config.toml)
+  apply it, clamped to what the gateway accepts (high where medium is refused). A
+  saved level and an explicit `llmGatewayThinking` still win. Run
+  `node --test tests/ml4_default_thinking.test.js`.
 - Configuration intent revision `gateway-vision-v2` refreshes existing managed
   configs without requiring runtime reinstallation. If an attachment is skipped
   for an unknown capability, explain that it was not transmitted rather than

@@ -71,6 +71,32 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return VIBE_DEFAULT_PRICES;
   }
 
+  // The thinking level a gateway model starts on when nobody chose one, keyed by the gateway model name (its alias
+  // matches too). A level the user or an admin saved still wins: the Assistant sends it as reasoningEffort. Without an
+  // entry a model keeps the profile's preference (CONVERTIGO_LLM_GATEWAY_THINKING), or in the settings offer the level of
+  // the catalog session. mistral/mistral-large-4: medium, measured on a CRM build (faster than high, same score); before,
+  // its offer took the level of the session's active model, GLM 5.3's high. The gateway takes low, medium and high for it
+  // (probed); where it refuses medium, the clamp (vibeThinkingFor, gatewayEffortFor) moves it up to high.
+  var VIBE_MODEL_DEFAULT_THINKING = {
+    "mistral/mistral-large-4": "medium"
+  };
+
+  function vibeModelDefaultThinking(model) {
+    var key = trim(model);
+    if (!key.length) {
+      return "";
+    }
+    if (Object.prototype.hasOwnProperty.call(VIBE_MODEL_DEFAULT_THINKING, key)) {
+      return VIBE_MODEL_DEFAULT_THINKING[key];
+    }
+    for (var name in VIBE_MODEL_DEFAULT_THINKING) {
+      if (Object.prototype.hasOwnProperty.call(VIBE_MODEL_DEFAULT_THINKING, name) && gatewayModelAlias(name) === gatewayModelAlias(key)) {
+        return VIBE_MODEL_DEFAULT_THINKING[name];
+      }
+    }
+    return "";
+  }
+
   // Compaction prompt installed in every Vibe home (VIBE_HOME/prompts/<id>.md, selected by compaction_prompt_id).
   var VIBE_COMPACTION_PROMPT_ID = "convertigo_compact";
   var FALLBACK_FLOW_MCP_PATH = "/api/flow-mcp";
@@ -1451,6 +1477,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     var names = convertigoGatewayModelNames(options, vibeHome);
     var active = convertigoGatewayDefaultAlias(options, names);
     var thinking = convertigoGatewayThinking(options);
+    // llmGatewayThinking set by the caller applies to every model; otherwise a model's own default comes first.
+    var explicitThinking = trim(options && (options.llmGatewayThinking || options.gatewayThinking)).length > 0;
     var specs = [], seenAlias = {};
     for (var i = 0; i < names.length; i++) {
       var alias = gatewayModelAlias(names[i]);
@@ -1463,7 +1491,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         alias: alias,
         provider: "convertigo",
         efforts: modelEfforts,
-        thinking: gatewayEffortFor(thinking, modelEfforts),
+        thinking: gatewayEffortFor(explicitThinking ? thinking : (vibeModelDefaultThinking(names[i]) || thinking), modelEfforts),
         temperature: "1.0",
         inputPrice: vibeModelPricesFor(names[i]).inputPrice,
         outputPrice: vibeModelPricesFor(names[i]).outputPrice,
@@ -8096,7 +8124,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
             description: "Accepted by this gateway model" });
         }
         model.reasoningLevels = offeredLevels;
-        model.defaultReasoning = vibeDefaultThinkingFor(usableLevels, model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING);
+        // A model with a default of its own (VIBE_MODEL_DEFAULT_THINKING) never takes the level the catalog session
+        // sat on, which is its active model's: Mistral Large 4 was offered GLM 5.3's high.
+        model.defaultReasoning = vibeDefaultThinkingFor(usableLevels, vibeModelDefaultThinking(alias) || model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING);
       }
       // A model the gateway declares no efforts for keeps the levels of the cached catalog:
       // sweep `off` out of those too, and off the default.
@@ -8104,7 +8134,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       if (model.reasoningLevels.length) {
         model.defaultReasoning = vibeDefaultThinkingFor(
           reasoningLevelIds(model.reasoningLevels),
-          model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING
+          vibeModelDefaultThinking(alias) || model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING
         );
       }
       model.provider = "convertigo";
