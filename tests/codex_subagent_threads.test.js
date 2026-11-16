@@ -202,3 +202,22 @@ test("the Convertigo MCP subagent-run is a tool of the main thread: its running 
   assert.deepEqual(entry._events.map((event) => [event.type, event.data.title]), [["tool/start", "Convertigo.subagent-run"], ["tool/update", "Convertigo.subagent-run"]]);
   assert.equal(entry.codexTurnEnded, false);
 });
+
+test("Stop interrupts the main turn and the turns of the sub-agents still running", () => {
+  const entry = fakeEntry({ sessionId: "main-1", codexThreadId: "main-1", activeTurnId: "turn-main", nextRequestId: 10 });
+  const send = (method, params) => sandbox.handleCodexAppServerLine(entry, JSON.stringify({ method, params }), "stdout");
+  const interrupts = () => entry._written.map((text) => JSON.parse(text)).filter((message) => message.method === "turn/interrupt").map((message) => message.params);
+  send("item/completed", { threadId: "main-1", turnId: "turn-main", item: { type: "subAgentActivity", id: "call_a", kind: "started", agentThreadId: "child-a", agentPath: "/root/backend" } });
+  send("turn/started", { threadId: "child-a", turn: { id: "turn-a", items: [], status: "inProgress" } });
+  send("item/completed", { threadId: "main-1", turnId: "turn-main", item: { type: "subAgentActivity", id: "call_b", kind: "started", agentThreadId: "child-b", agentPath: "/root/ui" } });
+  send("turn/started", { threadId: "child-b", turn: { id: "turn-b", items: [], status: "inProgress" } });
+  send("turn/completed", { threadId: "child-b", turn: { id: "turn-b", items: [], status: "completed" } });
+  assert.equal(sandbox.TURN_INTERRUPT_ADAPTERS["codex-app-server"](entry), true);
+  // the main turn first, then the one sub-agent still running (ui has finished)
+  assert.deepEqual(interrupts(), [{ threadId: "main-1", turnId: "turn-main" }, { threadId: "child-a", turnId: "turn-a" }]);
+  assert.deepEqual([...entry._events.find((event) => event.type === "codex/subagent" && event.data.event === "turn/interrupt").data.subagents], ["backend"]);
+  send("turn/completed", { threadId: "child-a", turn: { id: "turn-a", items: [], status: "interrupted" } });
+  entry._written.length = 0;
+  sandbox.TURN_INTERRUPT_ADAPTERS["codex-app-server"](entry);
+  assert.deepEqual(interrupts(), [{ threadId: "main-1", turnId: "turn-main" }], "an interrupted sub-agent is not interrupted again");
+});

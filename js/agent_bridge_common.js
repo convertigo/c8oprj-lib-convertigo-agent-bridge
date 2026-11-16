@@ -15152,6 +15152,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       if (!trim(entry.codexThreadId).length || !trim(entry.activeTurnId).length) { return false; }
       var id = entry.nextRequestId++;
       writeJson(entry, { jsonrpc: "2.0", id: id, method: "turn/interrupt", params: { threadId: entry.codexThreadId, turnId: entry.activeTurnId } });
+      // Codex does not stop the sub-agents of an interrupted turn: they went on working (and spending) in the background.
+      if (typeof codexInterruptSubagents === "function") {
+        codexInterruptSubagents(entry);
+      }
       return true;
     },
     "claude-stream-json": function (entry) {

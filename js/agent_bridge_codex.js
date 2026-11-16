@@ -1590,6 +1590,29 @@
     return true;
   }
 
+  // Stop: Codex 0.153.4 interrupts the main thread's turn and leaves its sub-agents running (a `sleep 240` and its model
+  // calls went on after the Tigo turn had ended). Each child turn still running is interrupted too.
+  function codexInterruptSubagents(entry) {
+    var interrupted = [];
+    var subagents = entry && entry.codexSubagents ? entry.codexSubagents : {};
+    for (var threadId in subagents) {
+      if (!Object.prototype.hasOwnProperty.call(subagents, threadId)) {
+        continue;
+      }
+      var sub = subagents[threadId];
+      if (!sub || sub.status !== "running" || !trim(sub.turnId).length) {
+        continue;
+      }
+      var id = entry.nextRequestId++;
+      writeJson(entry, { jsonrpc: "2.0", id: id, method: "turn/interrupt", params: { threadId: sub.threadId, turnId: sub.turnId } });
+      interrupted.push(codexSubagentLabel(sub));
+    }
+    if (interrupted.length) {
+      pushEvent(entry, "codex/subagent", { event: "turn/interrupt", subagents: interrupted, provider: "codex" });
+    }
+    return interrupted.length;
+  }
+
   function codexCollabToolStatus(item) {
     var status = trim(item && item.status).toLowerCase();
     return status === "failed" ? "failed" : "completed";

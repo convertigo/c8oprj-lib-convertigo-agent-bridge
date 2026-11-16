@@ -526,7 +526,12 @@ The shell keeps the Studio's settings. Tests: `node --test tests/edit_profile.te
   path, role, status}); the main thread's `subAgentActivity` gives one
   `codex-subagent:<threadId>` tool card (running, then completed with the
   report) and its `collabAgentToolCall` items (`wait`, `spawnAgent`...) tool
-  events. The fixtures are real Codex 0.153.4 transcripts. Run
+  events. The fixtures are real Codex 0.153.4 transcripts. Stop: Codex
+  interrupts only the main thread's turn and its sub-agents went on working and
+  spending; the `codex-app-server` interrupt adapter also sends `turn/interrupt`
+  for each child turn still running (`codexInterruptSubagents`). A shell command
+  a child had started (`sleep 240`) still survives as a child of the app-server
+  until the conversation closes: Codex behaviour, not the Bridge's. Run
   `node --test tests/codex_subagent_threads.test.js`.
 
 ## Current 1.2.0 Roadmap
