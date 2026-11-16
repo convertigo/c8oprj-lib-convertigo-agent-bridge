@@ -827,8 +827,13 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - `refreshModelCatalog` bypasses the five-minute gateway model cache and the
   provider metadata cache. Runtime presence checks stay offline, and a failed
   refresh retains the last known offer. Parse each flag before combining it.
-- Empty cached effort lists are retried at catalog expiry; explicit refresh
-  rechecks all efforts. An unrelated HTTP 400 is an unknown probe result, not
+- Empty cached effort lists are retried at catalog expiry; an explicit refresh
+  rechecks the efforts probed more than 24 h ago (`GATEWAY_EFFORTS_REPROBE_MS`,
+  per model in `effortsAt` of `gateway-models.json`; a cache without it is
+  rechecked once). New models are always probed. Rechecking every model on each
+  refresh cost 3 models x 4 efforts, twice per settings read (provider, then the
+  settings Vibe config): 29 s of an administrator's 62 s on test-nocode (16/11).
+  An unrelated HTTP 400 is an unknown probe result, not
   evidence that reasoning is unsupported. After applying a gateway offer,
   recompute `supports.reasoning` and `reasoningMode` from the offered levels,
   including when restoring an old provider cache. Cover this with

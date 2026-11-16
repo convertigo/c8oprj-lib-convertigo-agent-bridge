@@ -279,7 +279,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       var cached = JSON.parse(readTextFile(file));
       if (trim(cached.url) !== convertigoGatewayUrl(options)) { return null; }
       var names = normalizeGatewayModelIds(cached.models);
-      return names.length ? { models: names, at: Number(cached.at) || 0, efforts: cached.efforts && typeof cached.efforts === "object" ? cached.efforts : {} } : null;
+      return names.length ? { models: names, at: Number(cached.at) || 0, efforts: cached.efforts && typeof cached.efforts === "object" ? cached.efforts : {},
+        effortsAt: cached.effortsAt && typeof cached.effortsAt === "object" ? cached.effortsAt : {} } : null;
     } catch (_ignoreGatewayCacheRead) {
       return null;
     }
@@ -323,8 +324,12 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
 
   // Accepted reasoning_effort values differ per model (GLM 5.2 takes medium, GLM 5.3 does not)
   // and the gateway does not publish them, so new models are probed with one-token requests.
-  // Empty results are retried after cache expiry; an explicit refresh rechecks every model.
+  // Empty results are retried after cache expiry; an explicit refresh rechecks the models whose efforts were probed more
+  // than GATEWAY_EFFORTS_REPROBE_MS ago (effortsAt in gateway-models.json). Rechecking every model on each refresh took
+  // 3 models x 4 efforts one-token requests, twice per settings read (the provider, then the config of the settings
+  // Vibe): 29 s of the 62 s an administrator waited on test-nocode (16/11).
   var GATEWAY_REASONING_EFFORTS = ["low", "medium", "high", "max"];
+  var GATEWAY_EFFORTS_REPROBE_MS = 24 * 60 * 60 * 1000;
 
   // One JSON POST to the gateway's chat completions through the engine's HTTP client and its proxy settings, as the
   // model list (fetchConvertigoGatewayModelIds): {status, text}, or null when it could not be sent or read.
@@ -1406,21 +1411,27 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       if (fetched.length) {
         try {
           var knownEfforts = cached !== null ? cached.efforts : {};
+          var knownEffortsAt = cached !== null && cached.effortsAt && typeof cached.effortsAt === "object" ? cached.effortsAt : {};
           var efforts = {};
+          var effortsAt = {};
           for (var effortIndex = 0; effortIndex < fetched.length; effortIndex++) {
             var modelName = fetched[effortIndex];
             var levels = Object.prototype.hasOwnProperty.call(knownEfforts, modelName) ? normalizeGatewayEfforts(knownEfforts[modelName]) : null;
-            if (options.gatewayBudgetRefused !== true && (levels === null || !levels.length || gatewayModelCatalogRefreshRequested(options))) {
+            var probedAt = Number(knownEffortsAt[modelName]) || 0;
+            // an explicit refresh rechecks efforts probed long ago (or before effortsAt existed), not those of the last day
+            var recheck = gatewayModelCatalogRefreshRequested(options) && (probedAt <= 0 || now() - probedAt > GATEWAY_EFFORTS_REPROBE_MS);
+            if (options.gatewayBudgetRefused !== true && (levels === null || !levels.length || recheck)) {
               var probedLevels = probeGatewayModelEfforts(options, apiKey, modelName);
               // A timeout, quota or access error is not evidence that reasoning is unsupported.
-              if (probedLevels !== null) { levels = probedLevels; }
+              if (probedLevels !== null) { levels = probedLevels; probedAt = now(); }
             }
             if (levels !== null) { efforts[modelName] = levels; }
+            if (levels !== null && probedAt > 0) { effortsAt[modelName] = probedAt; }
           }
           var cacheFile = convertigoGatewayModelsCacheFile(options);
           if (cacheFile !== null) {
             ensureDirectory(cacheFile.getParentFile());
-            writeTextFile(cacheFile, JSON.stringify({ url: convertigoGatewayUrl(options), at: now(), models: fetched, efforts: efforts }));
+            writeTextFile(cacheFile, JSON.stringify({ url: convertigoGatewayUrl(options), at: now(), models: fetched, efforts: efforts, effortsAt: effortsAt }));
           }
         } catch (_ignoreGatewayCacheWrite) {}
         return fetched;

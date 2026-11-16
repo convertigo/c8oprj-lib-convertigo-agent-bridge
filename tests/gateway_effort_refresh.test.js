@@ -41,15 +41,41 @@ test('empty efforts are retried after catalog expiry, with no probe during offli
   assert.equal(f.probes.length, 1);
 });
 
-test('ordinary catalog renewal keeps positive efforts; an explicit refresh rechecks them', () => {
+test('ordinary catalog renewal keeps positive efforts; an explicit refresh rechecks them once they are old', () => {
   const f = fixture(['high']);
   f.s.now = () => 100 + f.s.CONVERTIGO_LLM_GATEWAY_MODELS_CACHE_MS + 1;
   f.s.convertigoGatewayModelNames({}, '');
   assert.equal(f.probes.length, 0);
   f.s.probeGatewayModelEfforts = () => { f.probes.push(f.model); return null; };
+  // a cache written before effortsAt: rechecked once
   f.s.convertigoGatewayModelNames({ refreshModelCatalog: 'true' }, '');
   assert.equal(f.probes.length, 1);
   assert.deepEqual(f.cache().efforts[f.model], ['high'], 'a transient failure retains the previous capability');
+});
+
+test('an explicit refresh does not probe again the efforts of the last day; a new model is probed (test-nocode 16/11)', () => {
+  const f = fixture([]);
+  const day = 24 * 60 * 60 * 1000;
+  let clock = 1000;
+  f.s.now = () => clock;
+  f.s.convertigoGatewayModelNames({ refreshModelCatalog: 'true' }, '');
+  assert.equal(f.probes.length, 1, 'never probed: probed');
+  assert.equal(f.cache().effortsAt[f.model], 1000);
+  // the same read asks again (the settings Vibe config after the provider): no second probe
+  clock += 30000;
+  f.s.convertigoGatewayModelNames({ refreshModelCatalog: 'true' }, '');
+  assert.equal(f.probes.length, 1);
+  assert.equal(f.cache().effortsAt[f.model], 1000, 'the probe time is kept');
+  // a model the gateway adds is probed at once
+  const added = 'test/new-model';
+  f.s.fetchConvertigoGatewayModelIds = () => [f.model, added];
+  f.s.probeGatewayModelEfforts = (_options, _key, name) => { f.probes.push(name); return ['high']; };
+  f.s.convertigoGatewayModelNames({ refreshModelCatalog: 'true' }, '');
+  assert.deepEqual(f.probes, [f.model, added]);
+  // a day later, an explicit refresh rechecks both
+  clock += day + 1;
+  f.s.convertigoGatewayModelNames({ refreshModelCatalog: 'true' }, '');
+  assert.deepEqual(f.probes, [f.model, added, f.model, added]);
 });
 
 test('an unrelated unsupported parameter is not a negative effort capability', () => {
