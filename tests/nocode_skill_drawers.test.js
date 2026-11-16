@@ -237,7 +237,7 @@ test("the MCP catalog revision of a Vibe url follows a change of a drawer too", 
   });
 });
 
-test("a No Code Vibe reads the skill folder under every confining policy, and only that under mcp-only", () => {
+test("a No Code Vibe reads the skill folder under every confining policy, and only that and the saved tool results under mcp-only", () => {
   const saved = noCodeToolPolicyName;
   try {
     for (const policy of ["mcp-only", "files", "sandboxed-shell"]) {

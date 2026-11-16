@@ -69,7 +69,7 @@ still has it. `auto`, nothing or an unknown value is `files`:
 
 | Policy | The NoCode agent gets |
 | --- | --- |
-| `mcp-only` | the Convertigo MCP tools only |
+| `mcp-only` | the Convertigo MCP tools only, and `read_file` on the tool results Vibe saved and the NoCode skill folder |
 | `files` (`auto`, the default) | `read_file`, `write_file` and `edit` in the session's own folder (`scratch/<conversation>` beside the user's `VIBE_HOME`, its cwd and `TMPDIR`) and the tool results Vibe saved; no shell, `grep`, web or subagent |
 | `sandboxed-shell` | files and the shell; the engine gives `files` where it cannot confine |
 | `full` | what a Studio session gets |

@@ -542,7 +542,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // What a No Code session may do besides the Convertigo MCP: agents.tool_policy (agentSandbox() below), files when
   // nothing sets it. Vibe's own shell, file and web tools ran in the engine container with the engine's
   // rights, its cwd the whole workspace (test-nocode, Mistral run: `bash: jq ...` approved by choosePermissionOption).
-  // - mcp-only: none of them, but read_file on the files of the No Code skill (its SKILL.md names drawers next to it);
+  // - mcp-only: none of them, but read_file on the tool results Vibe saved in the user's VIBE_HOME and on the files of
+  //   the No Code skill (its SKILL.md names drawers next to it);
   // - files: read_file, write_file and edit in the session's own folder (its cwd), read_file on the tool results Vibe
   //   saved in the user's VIBE_HOME and on the No Code skill, no shell, grep, web or subagent;
   // - sandboxed-shell: files and the shell;
@@ -555,7 +556,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // files the Bridge also refuses any permission asked for another tool than a Convertigo MCP one. The Studio's own
   // session (user studio) is never limited by these policies (only by its own "Lecture seule", below). Bumped when a
   // policy changes: No Code homes rewrite config.toml, resident No Code sessions restart.
-  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v6";
+  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v7";
   var VIBE_NOCODE_POLICIES = ["mcp-only", "files", "sandboxed-shell", "full"];
   var VIBE_NOCODE_SHELL_TOOLS = ["bash*", "git_bash*", "powershell*"];
   var VIBE_NOCODE_OTHER_TOOLS = ["grep", "web_fetch", "web_search", "task"];
@@ -1170,7 +1171,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       disabled = VIBE_NOCODE_SHELL_TOOLS.concat(disabled);
     }
     if (policy === "mcp-only") {
-      // read_file stays, refused everywhere but the skill folder (vibeToolPolicyTables)
+      // read_file stays, refused everywhere but the saved tool results and the skill folder (vibeToolPolicyTables)
       disabled = disabled.concat(["write_file", "edit"]);
     }
     return [
@@ -1185,25 +1186,34 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   }
 
   // Its tables: writes in the session's folder need no permission; outside it Vibe asks, and the Bridge refuses.
-  // A tool result Vibe saved to a file (over 16,000 characters) lies in VIBE_HOME, outside that folder: read_file
-  // reads it back without asking (test-nocode: without it the read was refused and the agent saw an excerpt only).
+  // A tool result Vibe saved to a file lies in VIBE_HOME, outside that folder: read_file reads it back without asking
+  // (test-nocode: without it the read was refused and the agent saw an excerpt only). Vibe 3 (3.0.1 on test-nocode)
+  // saves there, in the session's own records (<VIBE_HOME>/logs/session/unified/<session>/tool-results/<tool>-<id>.json),
+  // both a tool answer over 16,000 characters and a run_typescript return too large for the model: its core asks the
+  // host to write either under tool-results and nowhere else (mistralai_vibe_local_harness/vibe/_local_actions.py
+  // _write_file). The glob takes one session folder and one file in its tool-results (Vibe matches an absolute
+  // allowlist glob with PurePath.match, whose `*` never crosses a `/`, on the resolved path): neither the session's
+  // journal, chunks, attachments or scratchpad (which its own unified_harness_scratchpad tool reads), nor config.toml
+  // or anything else of the home. Another session of the same user stays readable: config.toml is the home's, written
+  // before Vibe names a session, and that home is the user's own (Landlock already lets the process read all of it).
   // The No Code skill too: Vibe's skill tool gives SKILL.md and its folder, the agent reads the drawers SKILL.md names
-  // there. Under mcp-only read_file is `never` but on that folder: Vibe lets an allowlist excuse a `never` read_file,
-  // and refuses everything else, the session's folder included (only its scratch .tmp stays readable, as for any tool).
+  // there. Under mcp-only read_file is `never` but on those two: Vibe lets an allowlist excuse a `never` read_file, and
+  // refuses everything else, the session's folder included (only its scratch .tmp stays readable, as for any tool).
   function vibeToolPolicyTables(options, vibeHome) {
     var policy = noCodeToolPolicyName(options);
-    var skillFiles = trim(vibeHome).length ? trim(vibeHome) + "/skills/convertigo-nocode/*" : "";
+    var home = trim(vibeHome);
+    var readable = home.length
+      ? "allowlist = " + tomlArray([home + "/logs/session/unified/*/tool-results/*", home + "/skills/convertigo-nocode/*"])
+      : "";
     if (policy === "mcp-only") {
-      return skillFiles.length
-        ? ["[tools.read_file]", 'permission = "never"', 'outside_workdir = "deny"', "allowlist = " + tomlArray([skillFiles]), ""]
-        : [];
+      return readable.length ? ["[tools.read_file]", 'permission = "never"', 'outside_workdir = "deny"', readable, ""] : [];
     }
     if (policy !== "files" && policy !== "sandboxed-shell") {
       return [];
     }
     var tables = ["[tools.write_file]", 'permission = "always"', "", "[tools.edit]", 'permission = "always"', ""];
-    if (trim(vibeHome).length) {
-      tables.push("[tools.read_file]", 'outside_workdir = "deny"', "allowlist = " + tomlArray([trim(vibeHome) + "/logs/session/unified/*/tool-results/*", skillFiles]), "");
+    if (readable.length) {
+      tables.push("[tools.read_file]", 'outside_workdir = "deny"', readable, "");
     }
     return tables;
   }

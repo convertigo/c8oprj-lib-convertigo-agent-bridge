@@ -66,8 +66,8 @@ test('a No Code session takes the effective policy of its engine, mcp-only on an
   assert.equal(withEngine(undefined, () => noCodeToolPolicyName(noCode)), 'mcp-only');
   for (const policy of ['mcp-only', 'files', 'sandboxed-shell', 'full']) {
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(noCode)), policy);
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v6');
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + (['files', 'sandboxed-shell'].includes(policy) ? 'mcp-only' : policy) + '-v6', 'an engine that cannot confine');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v7');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + (['files', 'sandboxed-shell'].includes(policy) ? 'mcp-only' : policy) + '-v7', 'an engine that cannot confine');
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(studio)), '', 'the Studio session is never limited');
     assert.equal(withEngine(policy, () => vibeToolPolicy(studio)), '');
   }
@@ -79,8 +79,9 @@ test('each policy writes what its config.toml leaves out, before the first table
   const mcpOnly = topLevel(mcpOnlyText);
   assert.ok(mcpOnly.includes('disabled_tools = ["bash*", "git_bash*", "powershell*", "grep", "web_fetch", "web_search", "task", "write_file", "edit"]'), mcpOnly.join('\n'));
   assert.ok(mcpOnly.includes('enable_background_processes = false') && mcpOnly.includes('enable_subagents = false'));
-  // read_file reads the No Code skill folder only: SKILL.md names drawers next to it (Vibe lets an allowlist excuse a never)
-  assert.match(mcpOnlyText, /\n\[tools\.read_file\]\npermission = "never"\noutside_workdir = "deny"\nallowlist = \["\/tmp\/vibe-home\/skills\/convertigo-nocode\/\*"\]\n/);
+  // read_file reads the tool results Vibe saved to a file and the No Code skill folder only: SKILL.md names drawers
+  // next to it (Vibe lets an allowlist excuse a never)
+  assert.match(mcpOnlyText, /\n\[tools\.read_file\]\npermission = "never"\noutside_workdir = "deny"\nallowlist = \["\/tmp\/vibe-home\/logs\/session\/unified\/\*\/tool-results\/\*", "\/tmp\/vibe-home\/skills\/convertigo-nocode\/\*"\]\n/);
   assert.doesNotMatch(mcpOnlyText, /\[tools\.(write_file|edit)\]/);
 
   const filesText = withEngine('files', () => writtenConfig(noCode));
@@ -102,6 +103,45 @@ test('each policy writes what its config.toml leaves out, before the first table
     const text = withEngine(policy, () => writtenConfig(options));
     assert.doesNotMatch(text, /disabled_tools|enable_background_processes|enable_subagents|\[tools\./, policy + ' ' + options.userId);
   }
+});
+
+// Vibe matches an absolute read_file allowlist glob on the resolved path with PurePosixPath.match: as many parts as
+// the glob, each part matched alone, so `*` never crosses a `/` (vibe/permissions.py path_pattern_matches, 3.0.1 and
+// 3.1.0). Symlinks are resolved first: checked with Vibe's own resolver, not here.
+function vibeAllows(allowlist, file) {
+  const parts = path.posix.resolve(file).split('/');
+  return allowlist.some(glob => {
+    const globParts = glob.split('/');
+    return globParts.length === parts.length && globParts.every((part, i) =>
+      new RegExp('^' + part.replace(/[.+^${}()|[\]\\?]/g, '\\$&').replace(/\*/g, '.*') + '$').test(parts[i]));
+  });
+}
+
+test('under mcp-only read_file reaches the tool results Vibe set aside and the skill, nothing else of the home', () => {
+  const home = '/workspace/agents/vibe/homes-convertigo/users/ann/.vibe-home';
+  const tables = withEngine('mcp-only', () => vibeToolPolicyTables(noCode, home)).join('\n');
+  assert.match(tables, /^\[tools\.read_file\]\npermission = "never"\n/);
+  const allowlist = JSON.parse(/\nallowlist = (\[.*\])\n/.exec(tables)[1]);
+  const session = home + '/logs/session/unified/0831b366-45bb-fcb7-bf0e-4982fe70a048';
+  // Vibe 3 saves a tool answer over 16,000 characters and a run_typescript return too large for the model in the
+  // session's tool-results, under the tool's name and the call id (test-nocode homes)
+  for (const file of [session + '/tool-results/run_typescript-chatcmpl-tool-8da9831d8934535c.json',
+    session + '/tool-results/Convertigo_nocode-form-contract-get-KEW4X5Ldw.json',
+    session + '/tool-results/../tool-results/run_typescript-luXTcJhrl.json',
+    home + '/skills/convertigo-nocode/SKILL.md']) {
+    assert.equal(vibeAllows(allowlist, file), true, file);
+  }
+  for (const file of [home + '/config.toml', session + '/tool-results/../../../../../config.toml', '/proc/self/environ',
+    session + '/journal/000001.ndjson', session + '/CURRENT', session + '/scratchpad/notes.md',
+    session + '/scratchpad/tool-results/notes.json', session + '/attachments/image.png', session + '/tool-results',
+    '/workspace/agents/vibe/homes-convertigo/users/bob/.vibe-home/logs/session/unified/s/tool-results/r.json',
+    '/workspace/agents/vibe/homes-convertigo/users/ann/scratch/conversation-agent-1/notes.md',
+    home + '/skills/convertigo-generalist/SKILL.md']) {
+    assert.equal(vibeAllows(allowlist, file), false, file);
+  }
+  // no new path for the kernel: the confined process already reads and writes the whole home
+  const sandbox = withEngine('mcp-only', () => noCodeSessionSandbox(noCode, { installDir: '/workspace/agents/vibe' }, home));
+  assert.deepEqual(sandbox.readWrite, [home, '/workspace/agents/vibe/homes-convertigo/users/ann/scratch/conversation-agent-1']);
 });
 
 test('a No Code session works in its own folder; where the engine confines, vibe-acp runs confined to its runtime, its home and that folder', () => {

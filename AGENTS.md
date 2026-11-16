@@ -887,6 +887,17 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
 - Restricted managed configurations select `accept-edits`, disable blanket
   approval, and deny file access outside the working directory. These settings
   supplement kernel confinement; they do not replace it.
+- Vibe 3 sets a tool answer over 16,000 characters, or a `run_typescript` return
+  too large for the model, aside in the session's records
+  (`VIBE_HOME/logs/session/unified/<session>/tool-results/<tool>-<call>.json`)
+  and shows the model an excerpt and that path. Every confining policy lets
+  `read_file` read it back (`vibeToolPolicyTables`, allowlist
+  `VIBE_HOME/logs/session/unified/*/tool-results/*`), `mcp-only` included
+  (policy v7): without it an `mcp-only` agent saw the excerpt only. Vibe matches
+  the glob on the resolved path, one part per `*`, so the session's journal,
+  scratchpad and attachments, `config.toml`, `/proc` and other homes stay
+  refused; another session of the same user does not (the `config.toml` is the
+  home's). Landlock is unchanged: it already allows the whole `VIBE_HOME`.
 - Run `node --test tests/nocode_tool_policy.test.js` and the full test suite.
 
 
