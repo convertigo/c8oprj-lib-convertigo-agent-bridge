@@ -510,6 +510,24 @@ The shell keeps the Studio's settings. Tests: `node --test tests/edit_profile.te
   `<workspaceRoot>/agents/codex/app-server-pids/<handle>.json`. Keep this file
   in sync with close/sweep behavior so project reloads do not leave invisible
   orphan processes.
+- Codex runs its own sub-agents (`spawn_agent`, feature `multi_agent`, on by
+  default) as child threads of the same app-server process: their
+  `turn/started`, items, deltas, `error` and `turn/completed` reach the Bridge
+  with the child's `threadId` (Codex 0.153.4 sends no `thread/started` for a
+  child; the main thread names it in `subAgentActivity` items). Only the
+  conversation's thread (`entry.codexThreadId`) ends the turn, streams the
+  answer, updates the plan and sets `activeTurnId` (what Stop interrupts); a
+  child's `turn/completed` used to end the Tigo turn with the sub-agent's report
+  as the answer while the main agent was still waiting for it. A child's tool
+  calls become tool events titled `[<sub-agent>] <tool>` (without `item`, which
+  the panel would use to retitle a shell call), its messages `progress/message`
+  lines `[<sub-agent>] <text>`; its deltas, reasoning and plan are dropped; its
+  failure is a `warning`. Every such event carries `subagent` ({threadId, name,
+  path, role, status}); the main thread's `subAgentActivity` gives one
+  `codex-subagent:<threadId>` tool card (running, then completed with the
+  report) and its `collabAgentToolCall` items (`wait`, `spawnAgent`...) tool
+  events. The fixtures are real Codex 0.153.4 transcripts. Run
+  `node --test tests/codex_subagent_threads.test.js`.
 
 ## Current 1.2.0 Roadmap
 

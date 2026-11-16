@@ -1357,6 +1357,9 @@
       }
       return true;
     }
+    if (type === "subAgentActivity" || type === "collabAgentToolCall") {
+      return codexAppServerHandleAgentItem(entry, item, completed);
+    }
     if (type === "commandExecution" || type === "mcpToolCall" || type === "dynamicToolCall" || type === "fileChange" || type === "webSearch") {
       pushEvent(entry, completed ? "tool/update" : "tool/start", {
         title: codexAppServerItemTitle(item),
@@ -1400,6 +1403,263 @@
       return true;
     }
     sendJsonError(entry, message.id, -32601, "Unsupported Codex app-server request: " + method);
+    return true;
+  }
+
+  // Codex runs its own sub-agents (spawn_agent, the multi_agent feature, on by default) as child threads of the same
+  // app-server process: their turn/started, items, deltas, errors and turn/completed reach this connection with the
+  // child's threadId (Codex 0.153.4 announces a child by no thread/started: the main thread says it with its
+  // subAgentActivity items). Only the conversation's own thread (entry.codexThreadId) drives the turn: a child's
+  // turn/completed ended the Tigo turn while the main agent was still waiting for that report, and its final message
+  // became the answer. A child's work is shown as work, named after the sub-agent: its tool calls as tool events, its
+  // messages as progress lines, never as an answer, a plan, a turn end or the turn id that Stop interrupts.
+  var CODEX_SUBAGENT_TEXT_MAX = 1500;
+
+  function codexAppServerThreadIdOf(method, params) {
+    params = params || {};
+    var id = trim(params.threadId);
+    if (!id.length && method === "thread/started" && params.thread) {
+      id = trim(params.thread.id || params.thread.threadId);
+    }
+    return id;
+  }
+
+  function isCodexChildThreadNotification(entry, method, params, threadId) {
+    var mainThreadId = trim(entry.codexThreadId || entry.sessionId);
+    if (!threadId.length || threadId === mainThreadId) {
+      return false;
+    }
+    if (mainThreadId.length) {
+      return true;
+    }
+    // Before the main thread is known, only a thread that names its parent is a child.
+    var thread = method === "thread/started" ? (params && params.thread) || {} : {};
+    return trim(thread.parentThreadId).length > 0;
+  }
+
+  function codexSubagent(entry, threadId) {
+    if (!entry.codexSubagents) {
+      entry.codexSubagents = {};
+    }
+    var id = trim(threadId);
+    var sub = entry.codexSubagents[id];
+    if (!sub) {
+      sub = { threadId: id, name: "", path: "", role: "", status: "", turnId: "", report: "" };
+      entry.codexSubagents[id] = sub;
+    }
+    return sub;
+  }
+
+  function rememberCodexSubagentThread(entry, thread) {
+    thread = thread || {};
+    var sub = codexSubagent(entry, thread.id || thread.threadId);
+    var spawn = thread.source && thread.source.subAgent && thread.source.subAgent.thread_spawn;
+    if (trim(thread.agentNickname).length) {
+      sub.name = trim(thread.agentNickname);
+    }
+    if (trim(thread.agentRole).length) {
+      sub.role = trim(thread.agentRole);
+    }
+    if (spawn && trim(spawn.agent_path).length && !sub.path.length) {
+      sub.path = trim(spawn.agent_path);
+    }
+    return sub;
+  }
+
+  function codexSubagentLabel(sub) {
+    var name = trim(sub.name) || trim(sub.path).replace(/\/+$/, "").replace(/^.*\//, "") || trim(sub.role);
+    if (name.length) {
+      return name;
+    }
+    var id = String(sub.threadId || "");
+    return "sub-agent " + id.substring(Math.max(0, id.length - 6));
+  }
+
+  function codexSubagentInfo(sub) {
+    return { threadId: sub.threadId, name: codexSubagentLabel(sub), path: sub.path, role: sub.role, status: sub.status };
+  }
+
+  function codexSubagentText(text) {
+    text = trim(text);
+    return text.length > CODEX_SUBAGENT_TEXT_MAX ? text.substring(0, CODEX_SUBAGENT_TEXT_MAX - 1) + "…" : text;
+  }
+
+  // A child's item: its tools become tool events under its name, its messages progress lines under its name. Deltas,
+  // reasoning and plans of a child are not shown: they would read as the main agent's.
+  function codexAppServerHandleSubagentItem(entry, sub, item, completed) {
+    item = item || {};
+    var type = String(item.type || "");
+    if (!entry.codexAppServerCompletedItems) {
+      entry.codexAppServerCompletedItems = {};
+    }
+    if (item.id && completed && entry.codexAppServerCompletedItems[item.id] === true) {
+      return;
+    }
+    var label = codexSubagentLabel(sub);
+    if (type === "agentMessage") {
+      if (completed && trim(item.text).length) {
+        var phase = String(item.phase || "").toLowerCase();
+        if (phase === "final_answer") {
+          sub.report = trim(item.text);
+        }
+        pushEvent(entry, "progress/message", {
+          text: "[" + label + "] " + codexSubagentText(item.text),
+          phase: "commentary",
+          source: "app-server-subagent",
+          subagentPhase: phase,
+          subagent: codexSubagentInfo(sub),
+          provider: "codex"
+        });
+      }
+    } else if (type === "commandExecution" || type === "mcpToolCall" || type === "dynamicToolCall" || type === "fileChange" || type === "webSearch" || type === "collabAgentToolCall") {
+      var toolTitle = type === "collabAgentToolCall" ? String(item.tool || "agent") : codexAppServerItemTitle(item);
+      pushEvent(entry, completed ? "tool/update" : "tool/start", {
+        // No `item`: the Tigo panel would title a shell call from item.command and drop the sub-agent's name.
+        title: "[" + label + "] " + toolTitle,
+        toolName: "[" + label + "] " + String(item.tool || item.command || toolTitle),
+        status: type === "collabAgentToolCall" && completed ? codexCollabToolStatus(item) : codexAppServerToolStatus(item, completed),
+        callId: item.id || "",
+        itemType: type,
+        detail: codexAppServerToolDetail(item),
+        subagent: codexSubagentInfo(sub),
+        provider: "codex"
+      });
+    }
+    if (completed && item.id) {
+      entry.codexAppServerCompletedItems[item.id] = true;
+    }
+  }
+
+  // Returns true when the notification belonged to a child thread and was handled here.
+  function handleCodexSubagentNotification(entry, method, params, threadId) {
+    var sub = codexSubagent(entry, threadId);
+    if (method === "thread/started") {
+      rememberCodexSubagentThread(entry, params.thread);
+      pushEvent(entry, "codex/subagent", { event: "thread/started", subagent: codexSubagentInfo(sub), provider: "codex" });
+      return true;
+    }
+    if (method === "turn/started") {
+      sub.status = "running";
+      sub.turnId = trim(params.turn && params.turn.id);
+      pushEvent(entry, "codex/subagent", { event: "turn/started", turnId: sub.turnId, subagent: codexSubagentInfo(sub), provider: "codex" });
+      return true;
+    }
+    if (method === "turn/completed") {
+      var turn = params.turn || {};
+      var items = turn.items || [];
+      for (var i = 0; i < items.length; i++) {
+        codexAppServerHandleSubagentItem(entry, sub, items[i], true);
+      }
+      sub.status = trim(turn.status) || "completed";
+      pushEvent(entry, "codex/subagent", {
+        event: "turn/completed",
+        turnId: trim(turn.id) || sub.turnId,
+        status: sub.status,
+        error: turn.error || null,
+        subagent: codexSubagentInfo(sub),
+        provider: "codex"
+      });
+      return true;
+    }
+    if (method === "item/started" || method === "item/completed") {
+      codexAppServerHandleSubagentItem(entry, sub, params.item, method === "item/completed");
+      return true;
+    }
+    if (method === "error") {
+      // A sub-agent's failure is its own: the main agent reads it from its wait and goes on.
+      if (!(params && params.willRetry === true)) {
+        pushEvent(entry, "warning", {
+          phase: "codex/subagent",
+          message: "Sub-agent " + codexSubagentLabel(sub) + " failed: " + codexSubagentText(codexToolPreview(params.error || params)),
+          subagent: codexSubagentInfo(sub),
+          provider: "codex"
+        });
+      }
+      return true;
+    }
+    if (method.indexOf("item/") === 0 || method === "turn/plan/updated" || method === "turn/diff/updated") {
+      // deltas, reasoning, plans of the child: not the main agent's
+      return true;
+    }
+    pushEvent(entry, "codex/event", {
+      method: method,
+      params: params,
+      subagent: codexSubagentInfo(sub),
+      provider: "codex"
+    });
+    return true;
+  }
+
+  function codexCollabToolStatus(item) {
+    var status = trim(item && item.status).toLowerCase();
+    return status === "failed" ? "failed" : "completed";
+  }
+
+  function codexSubagentForActivity(entry, item) {
+    var sub = codexSubagent(entry, item.agentThreadId);
+    if (trim(item.agentPath).length) {
+      sub.path = trim(item.agentPath);
+    }
+    return sub;
+  }
+
+  // The main thread's own view of its sub-agents: subAgentActivity (started / interacted / interrupted / completed)
+  // and its collab tool calls (spawnAgent, wait, sendInput...). One tool event per sub-agent, running until it ends.
+  function codexAppServerHandleAgentItem(entry, item, completed) {
+    var type = String(item.type || "");
+    if (type === "subAgentActivity") {
+      if (!completed || !trim(item.agentThreadId).length) {
+        return true;
+      }
+      var sub = codexSubagentForActivity(entry, item);
+      var kind = String(item.kind || "").toLowerCase();
+      var ended = kind === "completed" || kind === "interrupted";
+      if (ended) {
+        sub.status = kind;
+      } else if (!sub.status.length || sub.status === "completed" || sub.status === "interrupted") {
+        sub.status = "running";
+      }
+      pushEvent(entry, ended ? "tool/update" : "tool/start", {
+        title: "[" + codexSubagentLabel(sub) + "] sub-agent",
+        toolName: "[" + codexSubagentLabel(sub) + "] sub-agent",
+        status: kind === "completed" ? "completed" : (kind === "interrupted" ? "failed" : "running"),
+        callId: "codex-subagent:" + sub.threadId,
+        itemType: type,
+        activity: kind,
+        detail: ended ? codexSubagentText(sub.report) : "",
+        subagent: codexSubagentInfo(sub),
+        provider: "codex"
+      });
+      if (item.id) {
+        entry.codexAppServerCompletedItems[item.id] = true;
+      }
+      return true;
+    }
+    // collabAgentToolCall
+    var receivers = item.receiverThreadIds || [];
+    var names = [];
+    for (var r = 0; r < receivers.length; r++) {
+      var receiver = codexSubagent(entry, receivers[r]);
+      var state = item.agentsStates && item.agentsStates[receivers[r]];
+      if (state && trim(state.status).length) {
+        receiver.status = trim(state.status);
+      }
+      names.push(codexSubagentLabel(receiver));
+    }
+    var tool = trim(item.tool) || "agent";
+    pushEvent(entry, completed ? "tool/update" : "tool/start", {
+      title: tool + (names.length ? " [" + names.join(", ") + "]" : ""),
+      toolName: tool,
+      status: completed ? codexCollabToolStatus(item) : "running",
+      callId: item.id || "",
+      itemType: type,
+      detail: codexSubagentText(item.prompt || ""),
+      subagents: names,
+      provider: "codex"
+    });
+    if (completed && item.id) {
+      entry.codexAppServerCompletedItems[item.id] = true;
+    }
     return true;
   }
 
@@ -1468,6 +1728,11 @@
     }
     if (method === "account/rateLimits/updated") {
       recordCodexQuota(entry, params); return;
+    }
+    var notificationThreadId = codexAppServerThreadIdOf(method, params);
+    if (method !== "mcpServer/startupStatus/updated" && isCodexChildThreadNotification(entry, method, params, notificationThreadId) &&
+        handleCodexSubagentNotification(entry, method, params, notificationThreadId)) {
+      return;
     }
     if (method === "thread/started") {
       var thread = params.thread || {};
