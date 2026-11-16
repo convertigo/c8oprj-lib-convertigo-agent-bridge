@@ -1764,12 +1764,11 @@
       var homeDir = new File(homePath);
       ensureDirectory(homeDir);
       if (profile === "nocode") {
-        var noCodeSkillFile = new File(new File(new File(homeDir, "skills"), "convertigo-nocode"), "SKILL.md");
+        // SKILL.md and its drawers (writeNoCodeSkillFolder)
         var noCodeSkill = managedSkillContent(options, profile, report.resolvedMcpUrl);
-        var noCodeWrite = writeManagedTextFile(noCodeSkillFile, noCodeSkill.content, dryRun);
+        var noCodeWrite = writeNoCodeSkillFolder(new File(new File(homeDir, "skills"), "convertigo-nocode"), noCodeSkill, dryRun, report);
         report.skillStatus = noCodeWrite.status;
-        report.skillPath = filePath(noCodeSkillFile);
-        (noCodeWrite.status === "unchanged" ? report.reused : (noCodeSkill.copied === true ? report.copied : report.generated)).push("skills/convertigo-nocode/SKILL.md");
+        report.skillPath = noCodeWrite.path;
         report.message = "Convertigo NoCode skill configured";
       } else if (claudeFlowFacade(options)) {
         installClaudeFlowSkills(options, homeDir, dryRun, report);

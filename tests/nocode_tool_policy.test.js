@@ -66,8 +66,8 @@ test('a No Code session takes the effective policy of its engine, mcp-only on an
   assert.equal(withEngine(undefined, () => noCodeToolPolicyName(noCode)), 'mcp-only');
   for (const policy of ['mcp-only', 'files', 'sandboxed-shell', 'full']) {
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(noCode)), policy);
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v5');
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + (['files', 'sandboxed-shell'].includes(policy) ? 'mcp-only' : policy) + '-v5', 'an engine that cannot confine');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v6');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + (['files', 'sandboxed-shell'].includes(policy) ? 'mcp-only' : policy) + '-v6', 'an engine that cannot confine');
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(studio)), '', 'the Studio session is never limited');
     assert.equal(withEngine(policy, () => vibeToolPolicy(studio)), '');
   }
@@ -75,9 +75,13 @@ test('a No Code session takes the effective policy of its engine, mcp-only on an
 });
 
 test('each policy writes what its config.toml leaves out, before the first table', () => {
-  const mcpOnly = withEngine('mcp-only', () => topLevel(writtenConfig(noCode)));
-  assert.ok(mcpOnly.includes('disabled_tools = ["bash*", "git_bash*", "powershell*", "grep", "web_fetch", "web_search", "task", "read_file", "write_file", "edit"]'), mcpOnly.join('\n'));
+  const mcpOnlyText = withEngine('mcp-only', () => writtenConfig(noCode));
+  const mcpOnly = topLevel(mcpOnlyText);
+  assert.ok(mcpOnly.includes('disabled_tools = ["bash*", "git_bash*", "powershell*", "grep", "web_fetch", "web_search", "task", "write_file", "edit"]'), mcpOnly.join('\n'));
   assert.ok(mcpOnly.includes('enable_background_processes = false') && mcpOnly.includes('enable_subagents = false'));
+  // read_file reads the No Code skill folder only: SKILL.md names drawers next to it (Vibe lets an allowlist excuse a never)
+  assert.match(mcpOnlyText, /\n\[tools\.read_file\]\npermission = "never"\noutside_workdir = "deny"\nallowlist = \["\/tmp\/vibe-home\/skills\/convertigo-nocode\/\*"\]\n/);
+  assert.doesNotMatch(mcpOnlyText, /\[tools\.(write_file|edit)\]/);
 
   const filesText = withEngine('files', () => writtenConfig(noCode));
   const files = topLevel(filesText);
@@ -86,7 +90,8 @@ test('each policy writes what its config.toml leaves out, before the first table
   // writes in the session's folder need no permission; outside it Vibe asks and the Bridge refuses
   assert.match(filesText, /\n\[tools\.write_file\]\npermission = "always"\n\n\[tools\.edit\]\npermission = "always"\n/);
   // a tool result Vibe saved to a file lies in VIBE_HOME, outside the session's folder: read_file reads it without asking
-  assert.match(filesText, /\n\[tools\.read_file\]\noutside_workdir = "deny"\nallowlist = \["\/tmp\/vibe-home\/logs\/session\/unified\/\*\/tool-results\/\*"\]\n/);
+  // and the files of the No Code skill, read as SKILL.md says
+  assert.match(filesText, /\n\[tools\.read_file\]\noutside_workdir = "deny"\nallowlist = \["\/tmp\/vibe-home\/logs\/session\/unified\/\*\/tool-results\/\*", "\/tmp\/vibe-home\/skills\/convertigo-nocode\/\*"\]\n/);
 
   const shell = withEngine('sandboxed-shell', () => topLevel(writtenConfig(noCode)));
   assert.ok(shell.includes('disabled_tools = ["grep", "web_fetch", "web_search", "task"]'), shell.join('\n'));

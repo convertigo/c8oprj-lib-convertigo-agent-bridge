@@ -89,7 +89,10 @@ test("T2: read_file of /proc/self/environ is refused under files and mcp-only", 
     const lines = sandbox.vibeToolPolicyLines(NOCODE).join("\n");
     assert.match(lines, /outside_workdir = "deny"/, policy);
     if (policy === "mcp-only") {
-      assert.match(lines, /disabled_tools = \[[^\]]*"read_file"/, "no file tool at all");
+      assert.match(lines, /disabled_tools = \[[^\]]*"write_file", "edit"\]/, "no file writer");
+      // read_file is never, but on the files of the No Code skill: nothing else of the home, /proc or the session folder
+      const tables = sandbox.vibeToolPolicyTables(NOCODE, "/srv/vibe-home").join("\n");
+      assert.equal(tables, '[tools.read_file]\npermission = "never"\noutside_workdir = "deny"\nallowlist = ["/srv/vibe-home/skills/convertigo-nocode/*"]\n');
     }
   }
 });

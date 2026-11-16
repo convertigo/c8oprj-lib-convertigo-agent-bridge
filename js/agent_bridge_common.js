@@ -542,9 +542,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // What a No Code session may do besides the Convertigo MCP: agents.tool_policy (agentSandbox() below), files when
   // nothing sets it. Vibe's own shell, file and web tools ran in the engine container with the engine's
   // rights, its cwd the whole workspace (test-nocode, Mistral run: `bash: jq ...` approved by choosePermissionOption).
-  // - mcp-only: none of them;
+  // - mcp-only: none of them, but read_file on the files of the No Code skill (its SKILL.md names drawers next to it);
   // - files: read_file, write_file and edit in the session's own folder (its cwd), read_file on the tool results Vibe
-  //   saved in the user's VIBE_HOME, no shell, grep, web or subagent;
+  //   saved in the user's VIBE_HOME and on the No Code skill, no shell, grep, web or subagent;
   // - sandboxed-shell: files and the shell;
   // - full: as a Studio session.
   // Wherever the kernel confines (Landlock), vibe-acp and every process it starts under mcp-only, files and
@@ -555,10 +555,9 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // files the Bridge also refuses any permission asked for another tool than a Convertigo MCP one. The Studio's own
   // session (user studio) is never limited by these policies (only by its own "Lecture seule", below). Bumped when a
   // policy changes: No Code homes rewrite config.toml, resident No Code sessions restart.
-  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v5";
+  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v6";
   var VIBE_NOCODE_POLICIES = ["mcp-only", "files", "sandboxed-shell", "full"];
   var VIBE_NOCODE_SHELL_TOOLS = ["bash*", "git_bash*", "powershell*"];
-  var VIBE_NOCODE_FILE_TOOLS = ["read_file", "write_file", "edit"];
   var VIBE_NOCODE_OTHER_TOOLS = ["grep", "web_fetch", "web_search", "task"];
 
   // "Lecture seule" of the Tigo panel in a Studio (lib_ConvertigoAssistant js/agent_write_confirm.js): the MCP refuses
@@ -1171,7 +1170,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       disabled = VIBE_NOCODE_SHELL_TOOLS.concat(disabled);
     }
     if (policy === "mcp-only") {
-      disabled = disabled.concat(VIBE_NOCODE_FILE_TOOLS);
+      // read_file stays, refused everywhere but the skill folder (vibeToolPolicyTables)
+      disabled = disabled.concat(["write_file", "edit"]);
     }
     return [
       'default_agent = "accept-edits"',
@@ -1187,14 +1187,23 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // Its tables: writes in the session's folder need no permission; outside it Vibe asks, and the Bridge refuses.
   // A tool result Vibe saved to a file (over 16,000 characters) lies in VIBE_HOME, outside that folder: read_file
   // reads it back without asking (test-nocode: without it the read was refused and the agent saw an excerpt only).
+  // The No Code skill too: Vibe's skill tool gives SKILL.md and its folder, the agent reads the drawers SKILL.md names
+  // there. Under mcp-only read_file is `never` but on that folder: Vibe lets an allowlist excuse a `never` read_file,
+  // and refuses everything else, the session's folder included (only its scratch .tmp stays readable, as for any tool).
   function vibeToolPolicyTables(options, vibeHome) {
     var policy = noCodeToolPolicyName(options);
+    var skillFiles = trim(vibeHome).length ? trim(vibeHome) + "/skills/convertigo-nocode/*" : "";
+    if (policy === "mcp-only") {
+      return skillFiles.length
+        ? ["[tools.read_file]", 'permission = "never"', 'outside_workdir = "deny"', "allowlist = " + tomlArray([skillFiles]), ""]
+        : [];
+    }
     if (policy !== "files" && policy !== "sandboxed-shell") {
       return [];
     }
     var tables = ["[tools.write_file]", 'permission = "always"', "", "[tools.edit]", 'permission = "always"', ""];
     if (trim(vibeHome).length) {
-      tables.push("[tools.read_file]", 'outside_workdir = "deny"', "allowlist = " + tomlArray([trim(vibeHome) + "/logs/session/unified/*/tool-results/*"]), "");
+      tables.push("[tools.read_file]", 'outside_workdir = "deny"', "allowlist = " + tomlArray([trim(vibeHome) + "/logs/session/unified/*/tool-results/*", skillFiles]), "");
     }
     return tables;
   }
@@ -2676,6 +2685,11 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       var skillSource = noCodeSkillSourceFile(options);
       if (skillSource !== null && skillSource.isFile()) {
         parts.push(sha256File(skillSource));
+        // and its drawers: a change of the skill text may now sit in one of them only
+        var drawers = noCodeSkillDrawers(skillSource, readTextFile(skillSource)).drawers;
+        for (var drawerIndex = 0; drawerIndex < drawers.length; drawerIndex++) {
+          parts.push(hashShort(drawers[drawerIndex].content));
+        }
       }
     } catch (_ignoreCatalogSkill) {}
     return parts.length ? hashShort(parts.join(":")) : "";
@@ -4477,6 +4491,102 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return text;
   }
 
+  // The No Code skill of lib_ConvertigoMCP is SKILL.md and the drawer files its `> Drawer` lines name, in the same
+  // folder (its AGENT.md, "The No Code skill"): Vibe shows the model 8,000 characters of a longer tool answer, and a No
+  // Code agent reads no MCP resource. The drawers are installed next to SKILL.md, and one stays only while the installed
+  // SKILL.md names it: an MCP of before the drawers ships SKILL.md alone, and its install removes what a newer one left.
+  var NOCODE_SKILL_DRAWER_LINE = "^> Drawer `([a-z0-9][a-z0-9-]*\\.md)` ";
+
+  function noCodeSkillDrawerNames(skillText) {
+    var pattern = new RegExp(NOCODE_SKILL_DRAWER_LINE, "gm");
+    var text = String(skillText == null ? "" : skillText);
+    var names = [];
+    var match;
+    while ((match = pattern.exec(text)) !== null) {
+      if (names.indexOf(match[1]) === -1) {
+        names.push(match[1]);
+      }
+    }
+    return names;
+  }
+
+  // The drawers SKILL.md names, read beside its source file; a missing one is listed, the others are still copied.
+  function noCodeSkillDrawers(skillFile, skillText) {
+    var result = { drawers: [], missing: [] };
+    var names = noCodeSkillDrawerNames(skillText);
+    var folder = skillFile === null ? null : skillFile.getParentFile();
+    for (var i = 0; i < names.length; i++) {
+      var file = folder === null ? null : new File(folder, names[i]);
+      if (file !== null && file.isFile()) {
+        result.drawers.push({ name: names[i], content: readTextFile(file), source: file });
+      } else {
+        result.missing.push(names[i]);
+      }
+    }
+    return result;
+  }
+
+  // Removes the Markdown files of a No Code skill folder that skillText, its SKILL.md, does not name; other files stay.
+  function pruneNoCodeSkillDrawers(skillDir, skillText, dryRun) {
+    var result = { removed: [], errors: [] };
+    var named = noCodeSkillDrawerNames(skillText);
+    var children = skillDir.isDirectory() ? skillDir.listFiles() : null;
+    for (var i = 0; children !== null && i < children.length; i++) {
+      var name = String(children[i].getName());
+      if (!children[i].isFile() || !/\.md$/i.test(name) || name === "SKILL.md" || named.indexOf(name) !== -1) {
+        continue;
+      }
+      try {
+        if (dryRun === true || children[i]["delete"]()) {
+          result.removed.push(name);
+        } else {
+          result.errors.push(name);
+        }
+      } catch (e) {
+        result.errors.push(name + ": " + e);
+      }
+    }
+    return result;
+  }
+
+  function reportNoCodeSkillPrune(prune, report) {
+    for (var i = 0; i < prune.removed.length; i++) {
+      (report.removed || (report.removed = [])).push("skills/convertigo-nocode/" + prune.removed[i]);
+    }
+    if (prune.errors.length) {
+      (report.warnings || (report.warnings = [])).push("Unable to remove stale No Code skill drawers: " + prune.errors.join(", "));
+    }
+  }
+
+  // Writes a No Code skill folder from managedSkillContent: SKILL.md, its drawers, then the stale drawers removed.
+  // The report gets each file under copied/generated/reused and the removed ones; the status covers the whole folder.
+  function writeNoCodeSkillFolder(skillDir, noCodeSkill, dryRun, report) {
+    var skillFile = new File(skillDir, "SKILL.md");
+    var write = writeManagedTextFile(skillFile, noCodeSkill.content, dryRun);
+    var statuses = [write.status];
+    (write.status === "unchanged" ? report.reused : (noCodeSkill.copied === true ? report.copied : report.generated))
+      .push("skills/convertigo-nocode/SKILL.md");
+    var drawers = noCodeSkill.drawers || [];
+    for (var i = 0; i < drawers.length; i++) {
+      var drawerWrite = writeManagedTextFile(new File(skillDir, drawers[i].name), drawers[i].content, dryRun);
+      statuses.push(drawerWrite.status);
+      (drawerWrite.status === "unchanged" ? report.reused : report.copied).push("skills/convertigo-nocode/" + drawers[i].name);
+    }
+    var missing = noCodeSkill.missingDrawers || [];
+    for (var j = 0; j < missing.length; j++) {
+      (report.warnings || (report.warnings = [])).push("No Code skill drawer not found beside " + noCodeSkill.source + ": " + missing[j]);
+    }
+    var prune = pruneNoCodeSkillDrawers(skillDir, noCodeSkill.content, dryRun);
+    reportNoCodeSkillPrune(prune, report);
+    if (prune.removed.length) {
+      statuses.push("updated");
+    }
+    return {
+      status: statuses.indexOf("created") !== -1 ? "created" : (statuses.indexOf("updated") !== -1 ? "updated" : "unchanged"),
+      path: filePath(skillFile)
+    };
+  }
+
   function managedSkillContent(options, profile, mcpEndpoint) {
     var capabilityProfile = agentCapabilityProfile({ agentProfile: profile });
     if (capabilityProfile.id === "flow") {
@@ -4498,14 +4608,21 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     if (capabilityProfile.id === "nocode") {
       var noCodeFile = noCodeSkillSourceFile(options);
       if (noCodeFile !== null) {
+        var noCodeText = readTextFile(noCodeFile);
+        // writeNoCodeSkillFolder installs them next to SKILL.md
+        var noCodeDrawers = noCodeSkillDrawers(noCodeFile, noCodeText);
         return {
-          content: normalizeNoCodeSkillContent(readTextFile(noCodeFile), mcpEndpoint),
+          content: normalizeNoCodeSkillContent(noCodeText, mcpEndpoint),
+          drawers: noCodeDrawers.drawers,
+          missingDrawers: noCodeDrawers.missing,
           source: filePath(noCodeFile),
           copied: true
         };
       }
       return {
         content: buildConvertigoNoCodeSkill(mcpEndpoint),
+        drawers: [],
+        missingDrawers: [],
         source: "generated fallback",
         copied: false
       };
@@ -4901,7 +5018,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     if (isNoCode) {
       return [
         "# Convertigo No Code Agent Instructions",
-        "You are embedded in C8Oforms, not Eclipse Studio. Follow skills/convertigo-nocode/SKILL.md before working.",
+        "You are embedded in C8Oforms, not Eclipse Studio. Follow skills/convertigo-nocode/SKILL.md before working, and read the drawer files it names, next to it, when it says: they are part of that skill.",
         "Use only the no-code tools that skill allows: nocode-app-create, nocode-form-*, nocode-baserow-*, and nocode-report-create when it is listed. A No Code session has no log-view and no other Convertigo tool.",
         "For a new application over business records (a list, an entry form, a detail, a dashboard), call nocode-app-create once with the business spec before anything else, then change its result with nocode-form-edit.",
         "Never fall back to requestable-execute, databaseobject-*, project tools, batch wrappers, shell, raw HTTP, or filesystem access to read or modify forms.",
@@ -6440,6 +6557,12 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
             report.generated.push("config.toml");
           }
           report.message = delegated.message;
+          if (profile === "nocode") {
+            // _setupCodex wrote SKILL.md and, since the drawers, the files it names; an older MCP wrote SKILL.md alone and
+            // leaves behind the drawers a newer one installed
+            var delegatedSkillDir = new File(new File(codexHome, "skills"), skillSlug);
+            reportNoCodeSkillPrune(pruneNoCodeSkillDrawers(delegatedSkillDir, readTextFile(new File(delegatedSkillDir, "SKILL.md")), report.dryRun), report);
+          }
           if (profile === "nocode" && report.dryRun !== true) {
             writeManagedTextFile(new File(codexHome, "AGENTS.md"), agentSkillInstructions("codex", profile), false);
           }
@@ -6459,7 +6582,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       if (skillSource.missing === true || !trim(skillSource.content).length) {
         throw new Error("Managed skill source not found for " + skillSlug);
       }
-      var skillWrite = writeManagedTextFile(skillFile, skillSource.content, report.dryRun);
+      // the No Code skill is a folder: SKILL.md and its drawers (writeNoCodeSkillFolder records them in the report)
+      var skillWrite = profile === "nocode"
+        ? writeNoCodeSkillFolder(skillFile.getParentFile(), skillSource, report.dryRun, report)
+        : writeManagedTextFile(skillFile, skillSource.content, report.dryRun);
       if (capabilityProfile.specialistSkillSlugs.length) {
         var specialistSlugs = capabilityProfile.specialistSkillSlugs;
         for (var specialistIndex = 0; specialistIndex < specialistSlugs.length; specialistIndex++) {
@@ -6496,12 +6622,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       report.target = report.resolvedCodexHome;
       report.skillPath = filePath(skillFile);
       report.source = skillSource.source || report.source;
-      if (skillWrite.status === "unchanged") {
-        report.reused.push("skills/" + skillSlug + "/SKILL.md");
-      } else if (skillSource.copied === true) {
-        report.copied.push("skills/" + skillSlug + "/SKILL.md");
-      } else {
-        report.generated.push("skills/" + skillSlug + "/SKILL.md");
+      // a No Code folder is already listed, drawers included, by writeNoCodeSkillFolder
+      if (profile !== "nocode") {
+        (skillWrite.status === "unchanged" ? report.reused : (skillSource.copied === true ? report.copied : report.generated))
+          .push("skills/" + skillSlug + "/SKILL.md");
       }
       if (patchedConfig.status === "unchanged") {
         report.reused.push("config.toml");
@@ -6652,16 +6776,11 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     try {
       var homeDir = new File(home);
       ensureDirectory(homeDir);
-      var noCodeSkillFile = new File(new File(new File(homeDir, "skills"), "convertigo-nocode"), "SKILL.md");
+      // SKILL.md and its drawers (writeNoCodeSkillFolder); vibeToolPolicyTables lets a confined read_file reach them
       var noCodeSkill = managedSkillContent(options, profile, resolveMcpEndpoint(options));
-      var noCodeWrite = writeManagedTextFile(noCodeSkillFile, noCodeSkill.content, false);
-      if (noCodeWrite.status === "unchanged") {
-        report.reused.push("skills/convertigo-nocode/SKILL.md");
-      } else if (noCodeSkill.copied === true) {
-        report.copied.push("skills/convertigo-nocode/SKILL.md");
-      } else {
-        report.generated.push("skills/convertigo-nocode/SKILL.md");
-      }
+      var noCodeWrite = writeNoCodeSkillFolder(new File(new File(homeDir, "skills"), "convertigo-nocode"), noCodeSkill, false, report);
+      report.skillStatus = noCodeWrite.status;
+      report.skillPath = noCodeWrite.path;
       writeTextFile(new File(homeDir, "AGENTS.md"), agentSkillInstructions(provider, profile));
       report.generated.push("AGENTS.md");
       report.message = "Convertigo NoCode skills synchronized";

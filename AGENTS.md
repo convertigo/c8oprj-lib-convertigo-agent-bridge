@@ -436,6 +436,15 @@ The shell keeps the Studio's settings. Tests: `node --test tests/edit_profile.te
   the managed `convertigo-nocode` skill instead of `convertigo-generalist`.
   C8Oforms should also pass the authenticated `userId` and `user` home scope so
   each user gets separate Codex/Vibe homes under the workspace agent runtime.
+- The `convertigo-nocode` skill is a folder: SKILL.md and the drawer files its
+  `> Drawer` lines name (lib_ConvertigoMCP AGENT.md, "The No Code skill"). Every
+  No Code install writes them together (`writeNoCodeSkillFolder`: Vibe, the provider
+  runtime, Codex without `_setupCodex`; `_setupCodex` writes them itself) and removes the
+  `.md` files the installed SKILL.md no longer names, so an MCP of before the
+  drawers (SKILL.md alone) leaves none behind. A No Code Vibe reads the folder
+  with `read_file` under every confining policy (`vibeToolPolicyTables`; under
+  mcp-only `read_file` is `never` but on that folder). Run
+  `node --test tests/nocode_skill_drawers.test.js`.
 - For NoCode Codex sessions, the Assistant creates the C8Oforms MCP token from
   the authenticated session and passes only an opaque server-memory handle to the
   bridge. The bridge resolves that handle, sets `C8O_NOCODE_MCP_TOKEN` only in
