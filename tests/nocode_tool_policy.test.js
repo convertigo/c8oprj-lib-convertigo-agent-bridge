@@ -66,8 +66,8 @@ test('a No Code session takes the effective policy of its engine, mcp-only on an
   assert.equal(withEngine(undefined, () => noCodeToolPolicyName(noCode)), 'mcp-only');
   for (const policy of ['mcp-only', 'files', 'sandboxed-shell', 'full']) {
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(noCode)), policy);
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v7');
-    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + (['files', 'sandboxed-shell'].includes(policy) ? 'mcp-only' : policy) + '-v7', 'an engine that cannot confine');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode)), 'nocode-' + policy + (policy === 'full' ? '' : '-landlock') + '-v8');
+    assert.equal(withEngine(policy, () => vibeToolPolicy(noCode), { abi: 0 }), 'nocode-' + (['files', 'sandboxed-shell'].includes(policy) ? 'mcp-only' : policy) + '-v8', 'an engine that cannot confine');
     assert.equal(withEngine(policy, () => noCodeToolPolicyName(studio)), '', 'the Studio session is never limited');
     assert.equal(withEngine(policy, () => vibeToolPolicy(studio)), '');
   }

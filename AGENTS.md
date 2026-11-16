@@ -939,6 +939,11 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
   scratchpad and attachments, `config.toml`, `/proc` and other homes stay
   refused; another session of the same user does not (the `config.toml` is the
   home's). Landlock is unchanged: it already allows the whole `VIBE_HOME`.
+- Web: Vibe 3 has no local web tool (`web_fetch`/`web_search` in `disabled_tools` are inert; its web tools are
+  Mistral's `web_search` connector, which needs a Mistral-backend provider and key, not relayed by the gateway).
+  Under `sandboxed-shell` only, the NoCode `AGENTS.md` names `sandbox/python/c8o_web_read.py` (`noCodeWebReadRule`):
+  public `http(s)` pages as text, 12,000 characters a call, `--offset` for the rest, private addresses refused.
+  Policy v8. Run `node --test tests/nocode_web_read.test.js`.
 - Run `node --test tests/nocode_tool_policy.test.js` and the full test suite.
 
 

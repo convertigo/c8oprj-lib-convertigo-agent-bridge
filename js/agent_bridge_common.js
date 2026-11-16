@@ -551,8 +551,14 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   //   the No Code skill (its SKILL.md names drawers next to it);
   // - files: read_file, write_file and edit in the session's own folder (its cwd), read_file on the tool results Vibe
   //   saved in the user's VIBE_HOME and on the No Code skill, no shell, grep, web or subagent;
-  // - sandboxed-shell: files and the shell;
+  // - sandboxed-shell: files and the shell, which reaches the web (Landlock holds the file system, not the network): its
+  //   instructions name the Bridge's page reader, sandbox/python/c8o_web_read.py (noCodeWebReadRule);
   // - full: as a Studio session.
+  // Vibe 3 (3.0.1 on test-nocode, 3.1.0 too) has no web tool of its own: `web_fetch` and `web_search` of disabled_tools
+  // name nothing its runtime offers (checked 16/11 on test-nocode: a vibe-acp 3.0.1 whose config.toml left them on gave
+  // the model no web tool, and run_typescript's `tools` held file_system, self and vibe only). Its web search and page
+  // reading (web_search, open_url) are Mistral's web_search connector, set up only with a provider of the Mistral
+  // backend and its key; the Convertigo gateway does not relay /v1/connectors/*. They stay listed for an older Vibe.
   // Wherever the kernel confines (Landlock), vibe-acp and every process it starts under mcp-only, files and
   // sandboxed-shell run through the helper, confined to the runtime (read only), the user's VIBE_HOME and the
   // session's folder.
@@ -561,7 +567,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
   // files the Bridge also refuses any permission asked for another tool than a Convertigo MCP one. The Studio's own
   // session (user studio) is never limited by these policies (only by its own "Lecture seule", below). Bumped when a
   // policy changes: No Code homes rewrite config.toml, resident No Code sessions restart.
-  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v7";
+  var VIBE_NOCODE_TOOL_POLICY_REVISION = "v8";
   var VIBE_NOCODE_POLICIES = ["mcp-only", "files", "sandboxed-shell", "full"];
   var VIBE_NOCODE_SHELL_TOOLS = ["bash*", "git_bash*", "powershell*"];
   var VIBE_NOCODE_OTHER_TOOLS = ["grep", "web_fetch", "web_search", "task"];
@@ -1274,6 +1280,28 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     var bridgeDir = projectDirectoryByName("lib_ConvertigoAgentBridge");
     var folder = bridgeDir === null ? null : new File(new File(bridgeDir, "sandbox"), "python");
     return folder !== null && new File(folder, "sitecustomize.py").isFile() ? filePath(folder) : "";
+  }
+
+  // The page reader of a No Code Vibe session under sandboxed-shell: its confined shell reaches the web, Vibe has no web
+  // tool (VIBE_NOCODE_POLICIES above), and sandbox/python, beside sitecustomize.py, is on the confined process's
+  // read-only folders (noCodeSessionSandbox) with the CPython behind Vibe's venv first on its PATH. It prints a public
+  // page as text, 12,000 characters a call (under Vibe's ~16,000-character set-aside), the rest by --offset. "" for any
+  // other session: the policy is the effective one, files where the server holds per-user keys (engineNoCodeToolInfo).
+  var NOCODE_WEB_READER = "c8o_web_read.py";
+
+  function noCodeWebReadRule(provider, options) {
+    if (normalizeProvider(provider) !== "vibe" || noCodeToolPolicyName(options) !== "sandboxed-shell") {
+      return "";
+    }
+    var folder = confinedPythonPath();
+    if (!folder.length || !new File(folder, NOCODE_WEB_READER).isFile()) {
+      return "";
+    }
+    var reader = childPath(folder, NOCODE_WEB_READER);
+    return "To read a public web page (documentation, an article, a public data file), run `python3 '" + reader +
+      "' '<address>'` in your shell: it prints the page as text, at most 12,000 characters a call. When it says more" +
+      " remains, run it again with the --offset it gives; add --links to see where the links go. You have no web" +
+      " search: when you need a page whose address you do not know, ask the user for it.";
   }
 
   // null for a Studio session or under full; else where the session works and whether its command runs through
@@ -5030,7 +5058,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     return section.length ? section + "\n\n" + text : text;
   }
 
-  function agentSkillInstructions(provider, profile) {
+  // options: the session's (No Code: its policy decides noCodeWebReadRule), none for a home written outside one
+  function agentSkillInstructions(provider, profile, options) {
     var capabilityProfile = agentCapabilityProfile({ agentProfile: profile });
     var isNoCode = capabilityProfile.id === "nocode";
     var isFlow = capabilityProfile.id === "flow";
@@ -5052,9 +5081,10 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
         "If the required no-code tool is unavailable, report the missing capability without bypassing it.",
         "Use semantic nocode-form-edit operations for authorized edits. Preserve unrelated fields, pages and sources.",
         "Pass reveal:true only to supported mutation tools when the host requests reveal. Never add it to a read.",
+        options ? noCodeWebReadRule(provider, options) : "",
         "Reply in the user's language, with short factual progress updates.",
         "Provider: " + providerLabel(provider)
-      ].join("\n");
+      ].filter(function(line) { return line !== ""; }).join("\n");
     }
     return [
       "# Convertigo Agent Instructions",
@@ -6802,7 +6832,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       var noCodeWrite = writeNoCodeSkillFolder(new File(new File(homeDir, "skills"), "convertigo-nocode"), noCodeSkill, false, report);
       report.skillStatus = noCodeWrite.status;
       report.skillPath = noCodeWrite.path;
-      writeTextFile(new File(homeDir, "AGENTS.md"), agentSkillInstructions(provider, profile));
+      writeTextFile(new File(homeDir, "AGENTS.md"), agentSkillInstructions(provider, profile, options));
       report.generated.push("AGENTS.md");
       report.message = "Convertigo NoCode skills synchronized";
     } catch (e) {

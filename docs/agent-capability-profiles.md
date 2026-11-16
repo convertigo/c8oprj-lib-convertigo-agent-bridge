@@ -71,7 +71,7 @@ still has it. `auto`, nothing or an unknown value is `files`:
 | --- | --- |
 | `mcp-only` | the Convertigo MCP tools only, and `read_file` on the tool results Vibe saved and the NoCode skill folder |
 | `files` (`auto`, the default) | `read_file`, `write_file` and `edit` in the session's own folder (`scratch/<conversation>` beside the user's `VIBE_HOME`, its cwd and `TMPDIR`) and the tool results Vibe saved; no shell, `grep`, web or subagent |
-| `sandboxed-shell` | files and the shell; the engine gives `files` where it cannot confine |
+| `sandboxed-shell` | files and the shell, which reads public web pages through the Bridge's page reader; the engine gives `files` where it cannot confine |
 | `full` | what a Studio session gets |
 
 Wherever the kernel confines (Landlock, through `c8o-agent-sandbox`),
@@ -92,6 +92,23 @@ allows those moves and the module changes nothing. Its `PATH` starts with the bi
 folder of the CPython behind Vibe's venv, read only like the rest of the runtime:
 the engine's container has no `python3` of its own, and a `sandboxed-shell` agent
 lost a step on `python3: command not found`.
+
+Landlock holds the file system, not the network: under `sandboxed-shell` the
+shell reaches the web. Vibe 3 (3.0.1, 3.1.0) has no web tool of its own: its
+web search and page reading (`web_search`, `open_url`) are Mistral's
+`web_search` connector, which Vibe sets up only with a provider of the Mistral
+backend and its key, and the Convertigo gateway does not relay
+`/v1/connectors/*`. So `web_fetch` and `web_search` in `disabled_tools` name
+nothing Vibe offers (a `vibe-acp` 3.0.1 whose `config.toml` left them on gave the
+model no web tool). Under `sandboxed-shell` the NoCode instructions (`AGENTS.md`
+of the home, `noCodeWebReadRule`) name the Bridge's page reader instead,
+`sandbox/python/c8o_web_read.py`, run by the confined shell with the CPython
+above: a public `http(s)` page as text (headings, paragraphs, lists, cells;
+`--links` adds where the links go), at most 12,000 characters a call so that
+Vibe never sets the answer aside, the rest with `--offset`. It refuses loopback,
+private and link-local addresses, redirects included: a guard against
+mistakes, not a boundary, since the shell reaches the same network. There is
+no web search without a Mistral key or a gateway relay.
 
 `read_file` reads back, without asking, the tool results Vibe saved to a file
 (`VIBE_HOME/logs/session/unified/*/tool-results/*`, through its allowlist).
