@@ -224,10 +224,15 @@
       return null;
     }
     var direct = playwrightMcpDirectLaunch(options, installDir);
+    // through the Playwright MCP guard (playwrightMcpGuardedLaunch): browser_wait_for in seconds, at most 30
+    var launch = playwrightMcpGuardedLaunch(options, direct !== null ? direct : {
+      command: codexPlaywrightMcpCommand(options, installDir),
+      args: ["--prefix", codexNpmPrefix(installDir), codexPlaywrightMcpBinaryName(options), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"].concat(playwrightViewerInitArgs(installDir))
+    });
     return {
       type: "stdio",
-      command: direct !== null ? direct.command : codexPlaywrightMcpCommand(options, installDir),
-      args: direct !== null ? direct.args : ["--prefix", codexNpmPrefix(installDir), codexPlaywrightMcpBinaryName(options), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"].concat(playwrightViewerInitArgs(installDir)),
+      command: launch.command,
+      args: launch.args,
       env: { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1" }
     };
   }

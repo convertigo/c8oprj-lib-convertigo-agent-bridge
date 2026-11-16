@@ -127,6 +127,11 @@
         if (expectedPlaywright !== null) {
           intentFields.playwrightDisabledTools = PLAYWRIGHT_MCP_EXCLUDED_TOOLS.join(",");
         }
+        // Only a home whose Playwright server runs through the guard records it: the command stays the same node, so a
+        // home written before the guard (or with another revision of it) is written again once.
+        if (expectedPlaywright !== null && expectedPlaywright.guarded === true) {
+          intentFields.playwrightGuard = PLAYWRIGHT_MCP_GUARD_REVISION;
+        }
         var expectedIntent = vibeConfigIntent(intentFields);
         var recordedIntent = readVibeConfigIntent(setup.vibeHome);
         // The file-derived checks stay: they catch a config.toml deleted or hand-edited behind

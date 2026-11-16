@@ -157,6 +157,20 @@ same context.
   (navigate, snapshot, fill_form, click, type, evaluate, take_screenshot) for
   Flow and without a verifier; `browser_evaluate` stays. Never recommend the
   excluded tool in an instruction text. Run `node --test tests/playwright_tool_exclusion.test.js`.
+- Every managed Playwright MCP server (Codex `config.toml`, Vibe `config.toml`,
+  the provider runtime's `convertigo-mcp.json`) starts through the Playwright MCP
+  guard: `node <agents>/guard/playwright-mcp-guard.cjs -- <the command as before>`
+  (`playwrightMcpGuardedLaunch`; the shipped source is `node/playwright_guard.cjs`,
+  copied when it differs). `browser_wait_for` takes `time` in seconds and stops at
+  30; Mistral Large 4 passed milliseconds and waited 30 s each time (71 waits, 35 min
+  of a 95-min run). The stdio proxy reads a numeric `time` above 30 and from 100 up
+  as milliseconds, caps it to 0..30, says so in the `tools/list` description of
+  `time`, and passes every other message, stderr, the exit code and signals through.
+  Without the shipped file or a node, for a `.cmd`/`.bat` launcher on Windows, or
+  with `agentbridge.playwright.guard=false`, the server starts as before. A Vibe home
+  records `playwrightGuard` (`PLAYWRIGHT_MCP_GUARD_REVISION`) in its intent; bump it
+  when the proxy changes. No Code homes have no Playwright server. Run
+  `node --test tests/playwright_wait_guard.test.js`.
 - Each conversation has a temporary folder for the agent's payloads, scripts and
   notes: `<cwd>/.agent-tmp/<conversation>` (`<session folder>/.agent-tmp` for a
   No Code Vibe session, inside what its sandbox writes). The start of each

@@ -32,3 +32,6 @@ settings.gradle
 
 # The agent sandbox: the helper's source, checks and binaries, the Python module of confined agents.
 /sandbox/**
+
+# The Playwright MCP guard, copied into the agents directory and run from there.
+/node/**

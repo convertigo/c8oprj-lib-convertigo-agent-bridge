@@ -5533,6 +5533,87 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     };
   }
 
+  // Playwright MCP guard. browser_wait_for takes `time` in seconds and stops at 30: Mistral Large 4 passed milliseconds
+  // ({time: 2500}) and so waited 30 s at each call (71 waits, 35 min of a 95-min run). The Playwright MCP server of
+  // every managed runtime (Codex, Vibe, the provider runtime) starts through node/playwright_guard.cjs, a stdio MCP
+  // proxy copied to <agents>/guard/: `node <guard> -- <the command as before>`. It reads a time from 100 up as
+  // milliseconds, caps it at 30 s, and its tools/list answer says seconds. Without the shipped script or a node
+  // runtime, for a .cmd/.bat command on Windows (Node spawns those only through a shell), or with the global symbol
+  // agentbridge.playwright.guard=false, the server starts as before. Bump the revision when the proxy changes what it
+  // does: a Vibe home records it in its config intent and is written again once.
+  var PLAYWRIGHT_MCP_GUARD_REVISION = "wait-for-seconds-v1";
+  var PLAYWRIGHT_MCP_GUARD_SCRIPT = "playwright-mcp-guard.cjs";
+
+  function playwrightMcpGuardEnabled(options) {
+    var explicit = trim(options && options.playwrightMcpGuard);
+    if (explicit.length) {
+      return boolValue(explicit, true);
+    }
+    try {
+      var symbol = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue("agentbridge.playwright.guard");
+      if (symbol !== null && typeof symbol !== "undefined" && trim(String(symbol)).length) {
+        return boolValue(String(symbol), true);
+      }
+    } catch (_ignoreGuardSymbol) {}
+    return true;
+  }
+
+  // The guard copied from this project to <agents>/guard/, rewritten when the shipped one differs; "" without it.
+  function playwrightMcpGuardScript(options) {
+    try {
+      var bridgeDir = projectDirectoryByName("lib_ConvertigoAgentBridge");
+      var source = bridgeDir === null ? null : new File(new File(bridgeDir, "node"), "playwright_guard.cjs");
+      if (source === null || !source.isFile()) {
+        return "";
+      }
+      var text = String(readTextFile(source));
+      if (!trim(text).length) {
+        return "";
+      }
+      var script = new File(new File(agentsDirectory(resolveWorkspaceRoot(options || {})), "guard"), PLAYWRIGHT_MCP_GUARD_SCRIPT);
+      writeFileIfChanged(script, text);
+      return filePath(script);
+    } catch (_ignoreGuardScript) {
+      return "";
+    }
+  }
+
+  // The node that runs the guard: the server's own when it runs on node, else the one beside its launcher (npx), else
+  // the detected runtime.
+  function playwrightMcpGuardNode(options, command) {
+    var name = String(new File(command).getName()).toLowerCase();
+    if (name === "node" || name === "node.exe") {
+      return command;
+    }
+    try {
+      var parent = parentPath(command);
+      var sibling = parent.length ? new File(parent, executableName("node")) : null;
+      if (sibling !== null && sibling.isFile()) {
+        return String(sibling.getAbsolutePath());
+      }
+    } catch (_ignoreSiblingNode) {}
+    var node = null;
+    try { node = detectNodeRuntime(options || {}); } catch (_ignoreGuardNode) {}
+    return node && node.found ? trim(node.path) : "";
+  }
+
+  // {command, args} of a Playwright MCP server, started through the guard when it can be ({..., guarded: true}).
+  function playwrightMcpGuardedLaunch(options, launch) {
+    if (!launch || !trim(launch.command).length || !playwrightMcpGuardEnabled(options)) {
+      return launch;
+    }
+    var command = trim(launch.command);
+    if (isWindows() && /\.(cmd|bat)$/i.test(command)) {
+      return launch;
+    }
+    var script = playwrightMcpGuardScript(options);
+    var node = script.length ? playwrightMcpGuardNode(options, command) : "";
+    if (!node.length) {
+      return launch;
+    }
+    return { command: node, args: [script, "--", command].concat(launch.args || []), guarded: true };
+  }
+
   // Playwright MCP runs this module on each page it drives (--init-page). Attached over CDP,
   // Playwright leaves downloads to the embedder (no download event: the setting below belongs to
   // this session, whose download events Playwright never receives, hence the instruction to read
@@ -5643,9 +5724,14 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       lines.push("# The Studio JxBrowser CDP endpoint is written here because this Codex home is viewer-scoped.");
       lines.push("# If a shared/user home is forced, Playwright MCP stays disabled to avoid opening an external browser.");
     }
+    var launch = { command: codexPlaywrightMcpCommand(options, installDir), args: codexPlaywrightMcpArgs(options, installDir) };
+    if (enabled) {
+      // through the Playwright MCP guard (playwrightMcpGuardedLaunch): browser_wait_for in seconds, at most 30
+      launch = playwrightMcpGuardedLaunch(options, launch);
+    }
     lines.push("[mcp_servers.playwright]");
-    lines.push('command = "' + tomlEscape(codexPlaywrightMcpCommand(options, installDir)) + '"');
-    lines.push("args = " + tomlArray(codexPlaywrightMcpArgs(options, installDir)));
+    lines.push('command = "' + tomlEscape(launch.command) + '"');
+    lines.push("args = " + tomlArray(launch.args));
     lines.push("startup_timeout_sec = 30");
     // the tools of the server Codex does not offer the model (PLAYWRIGHT_MCP_EXCLUDED_TOOLS)
     lines.push("disabled_tools = " + tomlArray(PLAYWRIGHT_MCP_EXCLUDED_TOOLS));
@@ -9661,6 +9747,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     playwrightCommand: true,
     playwrightDisabledTools: true,
     playwrightEndpoint: true,
+    playwrightGuard: true,
     revealMode: true,
     viewerDebugPort: true,
     conversationId: true,
@@ -10196,17 +10283,18 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     // Vibe spawns stdio MCP servers from its Python process, whose PATH does not
     // include the Studio Node runtime: run the npx launcher through the explicit
     // node binary instead of relying on its shebang.
+    // Each launch goes through the Playwright MCP guard (playwrightMcpGuardedLaunch): browser_wait_for in seconds.
     var direct = playwrightMcpDirectLaunch(options, installDir);
     if (direct !== null) {
-      return direct;
+      return playwrightMcpGuardedLaunch(options, direct);
     }
     var npx = codexPlaywrightMcpCommand(options, installDir);
     var args = ["--prefix", codexNpmPrefix(installDir), codexPlaywrightMcpBinaryName(options), "--cdp-endpoint", resolvePlaywrightMcpCdpEndpoint(options), "--shared-browser-context"].concat(playwrightViewerInitArgs(installDir));
     var node = detectNodeRuntime(options);
     if (node.found && /\.js$/i.test(npx)) {
-      return { command: node.path, args: [npx].concat(args) };
+      return playwrightMcpGuardedLaunch(options, { command: node.path, args: [npx].concat(args) });
     }
-    return { command: npx, args: args };
+    return playwrightMcpGuardedLaunch(options, { command: npx, args: args });
   }
 
   function ensureVibePlaywrightRuntime(options, installDir) {
