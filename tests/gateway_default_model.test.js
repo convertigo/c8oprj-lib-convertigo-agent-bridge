@@ -159,7 +159,16 @@ test("saving a preference: a model or an effort other than the default is a choi
     "back on the default values after a choice of GLM 5.3");
   assert.equal(chosen({ model: "glm-5-3", reasoning: "high" }, { provider: "convertigo", model: "glm-5-3", reasoning: "high" }), true,
     "GLM 5.3 shown and saved again is not the default any more");
-  assert.equal(s.requestedAgentPreferenceModelChosen({ provider: "missing", model: "x" }, null, providers), false);
+  // other providers: their default follows their last session, so whatever is saved stays a choice (as before)
+  assert.equal(s.requestedAgentPreferenceModelChosen({ provider: "codex", model: "gpt-current", reasoning: "medium" }, null, providers), true);
+  // an effort the model refuses becomes its default before the choice is read: the default is still none
+  const corrected = s.savedAgentPreferences({ confirmed: true, provider: "convertigo", model: "mistral-large-4", reasoning: "max" }, null, providers);
+  assert.deepEqual([corrected.model, corrected.reasoning, corrected.modelChosen], ["mistral-large-4", "medium", false]);
+  const glm = s.savedAgentPreferences({ confirmed: true, provider: "convertigo", model: "glm-5-3", reasoning: "high" }, null, providers);
+  assert.deepEqual([glm.model, glm.reasoning, glm.modelChosen], ["glm-5-3", "high", true]);
+  const again = s.savedAgentPreferences({ confirmed: true, provider: "convertigo", model: "glm-5-3", reasoning: "high" }, glm, providers);
+  assert.equal(again.modelChosen, true);
+  assert.equal(s.savedAgentPreferences({ confirmed: true, provider: "missing", model: "x" }, null, providers), null);
   // the saved record, then the next read
   const saved = s.validatedAgentPreferences({ confirmed: true, provider: "convertigo", model: "glm-5-3", reasoning: "high",
     modelChosen: chosen({ model: "glm-5-3", reasoning: "high" }) }, providers);
@@ -179,4 +188,71 @@ test("No Code: a server model saved by the administrators runs; with none saved 
   const none = s.vibeGatewayModelSpecs(options("", ""), "");
   assert.equal(none[0].activeModel, "mistral-large-4");
   assert.equal(none.find((spec) => spec.alias === "mistral-large-4").thinking, "medium");
+});
+
+test("the default effort of a gateway model never follows the level the catalog session sat on", () => {
+  const provider = convertigoProvider();
+  // a catalog written by a session that ran both models at low
+  const offer = s.applyGatewayOfferToProvider({ id: "convertigo", ready: true, supports: { reasoning: true }, defaultModel: "glm-5-3",
+    gateway: { models: ["glm-5-3", "mistral-large-4"], efforts: { "glm-5-3": ["low", "high", "max"], "mistral-large-4": ["low", "medium", "high"] } },
+    models: plain(provider.models).map((model) => Object.assign(model, { defaultReasoning: "low" })) });
+  assert.deepEqual(plain(offer.models.map((model) => [model.id, model.defaultReasoning])), [["glm-5-3", "high"], ["mistral-large-4", "medium"]]);
+});
+
+test("a Convertigo session started without any model asks for the default model at its default effort", () => {
+  const saved = { readPersistentAgentPreferences: s.readPersistentAgentPreferences, resolveWorkspaceRoot: s.resolveWorkspaceRoot,
+    convertigoGatewayModelNames: s.convertigoGatewayModelNames, readConvertigoGatewayModelsCache: s.readConvertigoGatewayModelsCache };
+  let stored = null, listed = [GLM, ML4];
+  s.readPersistentAgentPreferences = () => stored;
+  s.resolveWorkspaceRoot = () => "/workspace";
+  s.convertigoGatewayModelNames = (options) => { assert.equal(options.runtimePresenceOnly, "true", "the cached list, no gateway call"); return listed; };
+  s.readConvertigoGatewayModelsCache = () => ({ models: listed, at: 1, efforts: EFFORTS, effortsAt: {} });
+  const start = (options) => plain(s.withConvertigoSessionModel(Object.assign({ vibeProfile: "convertigo", userId: "studio" }, options)));
+  try {
+    // an existing home may keep active_model = glm-5-3: the session is asked for the default instead
+    assert.deepEqual([start({}).model, start({}).reasoningEffort], ["mistral-large-4", "medium"]);
+    // No Code with no model saved by the administrators (the Assistant passes model ""), and a user's own effort
+    assert.deepEqual([start({ userId: "alice@example.com" }).model, start({ userId: "alice@example.com" }).reasoningEffort], ["mistral-large-4", "medium"]);
+    assert.equal(start({ userId: "alice@example.com", reasoningEffort: "low" }).reasoningEffort, "low");
+    // the administrators' model, the user's saved choice and a model asked for are kept
+    assert.equal(start({ userId: "alice@example.com", model: "glm-5-3", reasoningEffort: "high" }).model, "glm-5-3");
+    stored = { confirmed: true, provider: "convertigo", model: "glm-5-3", reasoning: "high", modelChosen: true };
+    assert.deepEqual([start({}).model, start({}).reasoningEffort], ["glm-5-3", "high"]);
+    assert.equal(start({ userId: "alice@example.com" }).model, "mistral-large-4", "No Code ignores a user's own saved preference");
+    stored = null;
+    assert.equal(start({ settingsProbe: "true" }).model, undefined, "a settings probe reads the catalog only");
+    assert.equal(start({ vibeProfile: "mistral" }).model, undefined, "the Vibe profile is not concerned");
+    listed = [GLM];
+    assert.deepEqual([start({}).model, start({}).reasoningEffort], ["glm-5-3", "high"], "a gateway without Mistral Large 4");
+  } finally {
+    Object.assign(s, saved);
+  }
+});
+
+test("a Convertigo session started without a model runs the user's saved choice, else the default; never on No Code", () => {
+  const saved = { readPersistentAgentPreferences: s.readPersistentAgentPreferences, resolveWorkspaceRoot: s.resolveWorkspaceRoot };
+  let stored = null;
+  s.readPersistentAgentPreferences = () => stored;
+  s.resolveWorkspaceRoot = () => "/workspace";
+  const start = (options) => plain(s.withSavedConvertigoChoice(Object.assign({ vibeProfile: "convertigo", userId: "studio" }, options)));
+  try {
+    stored = { confirmed: true, provider: "convertigo", model: "glm-5-3", reasoning: "high", modelChosen: true };
+    assert.equal(start({}).model, "glm-5-3", "the saved choice");
+    assert.equal(start({}).reasoningEffort, "high");
+    assert.equal(start({ reasoningEffort: "max" }).reasoningEffort, "max", "an effort asked for stays");
+    assert.equal(start({ model: "mistral-large-4" }).model, "mistral-large-4", "a model asked for wins");
+    assert.equal(start({ userId: "alice@example.com" }).model, undefined, "No Code (any user but studio): the administrators decide");
+    assert.equal(start({ settingsProbe: "true" }).model, undefined, "a settings probe reads the catalog only");
+    assert.equal(start({ vibeProfile: "mistral" }).model, undefined, "the Vibe profile is not concerned");
+    stored = { confirmed: true, provider: "convertigo", model: "glm-5-3", reasoning: "high" };
+    assert.equal(start({}).model, undefined, "the old implicit default is no choice: the default runs");
+    stored = { confirmed: true, provider: "convertigo", model: "mistral-large-4", reasoning: "medium", modelChosen: false };
+    assert.equal(start({}).model, undefined);
+    stored = { confirmed: true, provider: "codex", model: "gpt-current", reasoning: "high", modelChosen: true };
+    assert.equal(start({}).model, undefined, "another provider's choice");
+    stored = null;
+    assert.equal(start({}).model, undefined, "nothing saved");
+  } finally {
+    Object.assign(s, saved);
+  }
 });

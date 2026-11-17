@@ -452,6 +452,7 @@
     if (gatewayKeyRefusal !== null) {
       return gatewayKeyRefusal;
     }
+    options = withConvertigoSessionModel(options);
     var requestedModel = trim(options.model || options.agentModel);
     var handle = trim(options.handle) || makeHandle("vibe");
     try {

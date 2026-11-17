@@ -865,13 +865,25 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   used before the gateway answers (`CONVERTIGO_LLM_GATEWAY_MODEL`) is the same
   model. A model asked for (`model`, a user's or a No Code administrator's) still
   runs when listed. GLM 5.3 stays offered.
-- Saved preferences carry `modelChosen`. Saving one counts as a choice when the
-  model or the effort is not the provider's default, or when the same values were
-  already a choice (`requestedAgentPreferenceModelChosen`); otherwise the
-  preference follows the provider's default model at its default effort
-  (`validatedAgentPreferences`). A preference saved without the flag is a choice
-  except the old implicit default the first "Continue" saved, Convertigo
-  `glm-5-3` at `high` (`LEGACY_IMPLICIT_AGENT_PREFERENCES`). Run
+- A gateway model's default effort is its own (`VIBE_MODEL_DEFAULT_THINKING`),
+  else the profile's (`CONVERTIGO_LLM_GATEWAY_THINKING`), clamped to what it
+  accepts: never the level the catalog session sat on.
+- A Convertigo session started without a model (`withConvertigoSessionModel`,
+  `vibeStartSteps`): the user's saved choice (Studio only), else the default model
+  at its default effort. An existing home keeps the `active_model` it was written
+  with or that Vibe wrote back after a model switch, so an empty model would run
+  that one. No Code passes its administrators' model, or none for the default,
+  and ignores the users' own saved preferences. Settings probes are left alone.
+- Saved preferences carry `modelChosen` (`savedAgentPreferences`). For the
+  Convertigo mode a save is a choice when the model or the effort the provider
+  really offers (an effort it refuses becomes the default first) is not the
+  default, or when the same values were already a choice; otherwise the
+  preference follows the default model at its default effort
+  (`validatedAgentPreferences`). Other providers' defaults follow their last
+  session, so whatever their users save stays a choice. A preference saved
+  without the flag is a choice except the old implicit default the first
+  "Continue" saved, Convertigo `glm-5-3` at `high`
+  (`LEGACY_IMPLICIT_AGENT_PREFERENCES`). Run
   `node --test tests/gateway_default_model.test.js`.
 - Configuration intent revision `gateway-vision-v2` refreshes existing managed
   configs without requiring runtime reinstallation. If an attachment is skipped

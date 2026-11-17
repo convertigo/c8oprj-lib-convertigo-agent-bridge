@@ -8231,9 +8231,14 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   // A preference being saved holds a chosen model when the model or the effort is not the provider's default (the
   // settings screen shows the default until the user picks another). Saving the same model and effort again keeps the
   // choice of the preference saved before; picking exactly the default model at its default effort follows the default.
+  // Only the Convertigo mode has a default that no session moves (convertigoGatewayPreferredAlias): the other providers'
+  // default follows their last session (config.toml, the cached catalog), so whatever their users save stays a choice.
   function requestedAgentPreferenceModelChosen(requested, stored, providers) {
     requested = requested || {};
     var providerId = normalizeProvider(requested.provider);
+    if (providerId !== "convertigo") {
+      return true;
+    }
     var provider = null;
     for (var i = 0; providers && i < providers.length; i++) {
       if (normalizeProvider(providers[i] && providers[i].id) === providerId) { provider = providers[i]; break; }
@@ -8256,6 +8261,76 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     var offered = providerModelSettings(provider, model);
     return reasoning.length > 0 && !!(provider.supports && provider.supports.reasoning === true)
       && reasoning !== trim(offered && offered.defaultReasoning);
+  }
+
+  // A Convertigo session started without a model (a message sent before the panel read its settings, a client that
+  // sends none) runs the model and effort the user chose and saved; nothing chosen leaves the default. The panel sends
+  // that choice itself once its settings are read. Never on No Code, whose administrators decide (the Assistant passes
+  // their model, or none for the default) and whose users' own saved preferences are ignored.
+  function withConvertigoSessionModel(options) {
+    options = withSavedConvertigoChoice(options);
+    if (trim(options.model || options.agentModel).length || !isConvertigoGatewayProfile(options) || boolValue(options.settingsProbe, false)) {
+      return options;
+    }
+    // Nobody named a model: ask for the default rather than run the active_model an existing home kept (the default of
+    // an older Bridge, or the last model a session switched to: Vibe writes it back to config.toml).
+    var cachedOnly = {};
+    for (var key in options) {
+      if (Object.prototype.hasOwnProperty.call(options, key)) { cachedOnly[key] = options[key]; }
+    }
+    cachedOnly.runtimePresenceOnly = "true";
+    var names = convertigoGatewayModelNames(cachedOnly, "");
+    var alias = convertigoGatewayPreferredAlias(names);
+    options.model = alias;
+    if (!trim(options.reasoningEffort || options.reasoningLevel || options.modelReasoningEffort).length) {
+      var name = alias;
+      for (var i = 0; i < names.length; i++) {
+        if (gatewayModelAlias(names[i]) === alias) { name = names[i]; break; }
+      }
+      var explicitThinking = trim(options.llmGatewayThinking || options.gatewayThinking).length > 0;
+      var thinking = gatewayEffortFor(explicitThinking ? convertigoGatewayThinking(options)
+        : (vibeModelDefaultThinking(name) || convertigoGatewayThinking(options)), convertigoGatewayModelEfforts(options, name));
+      if (thinking.length) { options.reasoningEffort = thinking; }
+    }
+    return options;
+  }
+
+  function withSavedConvertigoChoice(options) {
+    options = options || {};
+    // a settings probe reads the catalog only: no model switch for it
+    if (trim(options.model || options.agentModel).length || !isConvertigoGatewayProfile(options) || normalizeSkillProfile(options) === "nocode"
+        || boolValue(options.settingsProbe, false)) {
+      return options;
+    }
+    var saved = null;
+    try {
+      saved = readPersistentAgentPreferences(resolveWorkspaceRoot(options), options);
+    } catch (_ignoreSavedChoice) {}
+    if (!saved || saved.confirmed !== true || normalizeProvider(saved.provider) !== "convertigo" || !trim(saved.model).length
+        || !agentPreferenceModelChosen(saved)) {
+      return options;
+    }
+    options.model = trim(saved.model);
+    if (!trim(options.reasoningEffort || options.reasoningLevel || options.modelReasoningEffort).length && trim(saved.reasoning).length) {
+      options.reasoningEffort = trim(saved.reasoning);
+    }
+    return options;
+  }
+
+  // The preference a save records: whether it is a choice is read on the model and effort the provider really offers
+  // (an effort it refuses becomes the model's default), then a preference that is none follows the default.
+  function savedAgentPreferences(requested, stored, providers) {
+    var asked = {};
+    for (var key in (requested || {})) {
+      if (Object.prototype.hasOwnProperty.call(requested, key)) { asked[key] = requested[key]; }
+    }
+    asked.modelChosen = true;
+    var validated = validatedAgentPreferences(asked, providers);
+    if (validated === null) {
+      return null;
+    }
+    validated.modelChosen = requestedAgentPreferenceModelChosen(validated, stored, providers);
+    return validatedAgentPreferences(validated, providers);
   }
 
   // The preference the agent uses: a model the user chose is kept while the provider offers it; otherwise (nothing
@@ -8461,9 +8536,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
             description: "Accepted by this gateway model" });
         }
         model.reasoningLevels = offeredLevels;
-        // A model with a default of its own (VIBE_MODEL_DEFAULT_THINKING) never takes the level the catalog session
-        // sat on, which is its active model's: Mistral Large 4 was offered GLM 5.3's high.
-        model.defaultReasoning = vibeDefaultThinkingFor(usableLevels, vibeModelDefaultThinking(alias) || model.defaultReasoning || CONVERTIGO_LLM_GATEWAY_THINKING);
+        // A model never takes the level the catalog session sat on (its active model's, or the last level a session
+        // set): Mistral Large 4 was offered GLM 5.3's high, GLM 5.3 a session's low. Its own default
+        // (VIBE_MODEL_DEFAULT_THINKING), else the profile's, clamped to what it accepts: the default no session moves.
+        model.defaultReasoning = vibeDefaultThinkingFor(usableLevels, vibeModelDefaultThinking(alias) || CONVERTIGO_LLM_GATEWAY_THINKING);
       }
       // A model the gateway declares no efforts for keeps the levels of the cached catalog:
       // sweep `off` out of those too, and off the default.
@@ -12370,8 +12446,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
         serviceTier: options.serviceTier,
         updatedAt: now()
       };
-      requestedRaw.modelChosen = requestedAgentPreferenceModelChosen(requestedRaw, readPersistentAgentPreferences(settingsWorkspaceRoot, options), providers);
-      var requestedPreferences = validatedAgentPreferences(requestedRaw, providers);
+      var requestedPreferences = savedAgentPreferences(requestedRaw, readPersistentAgentPreferences(settingsWorkspaceRoot, options), providers);
       if (requestedPreferences !== null) {
         writePersistentAgentPreferences(settingsWorkspaceRoot, options, requestedPreferences);
       }
