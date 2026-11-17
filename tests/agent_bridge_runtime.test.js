@@ -843,11 +843,13 @@ const persistedPreferences = validatedAgentPreferences({
   }],
   supports: { reasoning: true }
 }]);
+// saved before modelChosen existed and not the old Convertigo default: a choice, kept
 assert.deepEqual(persistedPreferences, {
   confirmed: true,
   provider: "codex",
   model: "gpt-current",
   reasoning: "high",
+  modelChosen: true,
   serviceTier: "priority",
   updatedAt: 123
 });

@@ -205,9 +205,16 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   // "Convertigo" agent mode: Vibe talks to the Convertigo LiteLLM gateway with a
   // per-user virtual key instead of a personal Mistral account.
   var CONVERTIGO_LLM_GATEWAY_URL = "https://llm.convertigo.com/v1";
-  // Fallback only: the offer normally comes from the gateway (GET /models).
-  var CONVERTIGO_LLM_GATEWAY_MODEL = "mistral/zai-glm-5-3";
-  var CONVERTIGO_LLM_GATEWAY_ALIAS = "glm-5-3";
+  // Fallback only: the offer normally comes from the gateway (GET /models). It is the default model too, so a catalog
+  // read before the gateway answered never offers another model than the one conversations start on.
+  var CONVERTIGO_LLM_GATEWAY_MODEL = "mistral/mistral-large-4";
+  var CONVERTIGO_LLM_GATEWAY_ALIAS = "mistral-large-4";
+  // The model a Convertigo conversation starts on when nobody chose one (17/11/2026: Mistral Large 4, at the medium
+  // effort of VIBE_MODEL_DEFAULT_THINKING; it did the everyday tasks of an A/B against GLM 5.3 at about half the price
+  // and a third of the time per request). Explicit, never the order of the gateway list, which sorts glm-5-3 first.
+  // The global symbol agentbridge.gateway.default_model replaces it; a gateway that does not list it falls back on the
+  // first listed model.
+  var CONVERTIGO_LLM_GATEWAY_DEFAULT_ALIAS = "mistral-large-4";
   var CONVERTIGO_LLM_API_KEY_ENV = "CONVERTIGO_LLM_API_KEY";
   // The gateway lets reasoning_effort through for GLM 5.2 (allowed_openai_params on the
   // model); think by default, llmGatewayThinking or the ACP reasoning effort override it.
@@ -1535,18 +1542,41 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     return cached !== null ? cached.models : [CONVERTIGO_LLM_GATEWAY_MODEL];
   }
 
+  function configuredGatewayDefaultModel() {
+    try {
+      var symbol = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue(CONVERTIGO_LLM_GATEWAY_DEFAULT_MODEL_SYMBOL);
+      return symbol === null || typeof symbol === "undefined" ? "" : trim(String(symbol));
+    } catch (_ignoreGatewayDefaultSymbol) {
+      return "";
+    }
+  }
+
+  // The alias of `wanted` among the gateway names or aliases, "" when the gateway does not list it.
+  function listedGatewayAlias(names, wanted) {
+    wanted = trim(wanted);
+    for (var i = 0; wanted.length && names && i < names.length; i++) {
+      if (names[i] === wanted || gatewayModelAlias(names[i]) === wanted || gatewayModelAlias(names[i]) === gatewayModelAlias(wanted)) {
+        return gatewayModelAlias(names[i]);
+      }
+    }
+    return "";
+  }
+
+  // The model nobody chose, among the listed ones (names or aliases): the operator's symbol, else
+  // CONVERTIGO_LLM_GATEWAY_DEFAULT_ALIAS, else the first listed model.
+  function convertigoGatewayPreferredAlias(names) {
+    if (!names || !names.length) {
+      return CONVERTIGO_LLM_GATEWAY_DEFAULT_ALIAS;
+    }
+    return listedGatewayAlias(names, configuredGatewayDefaultModel())
+      || listedGatewayAlias(names, CONVERTIGO_LLM_GATEWAY_DEFAULT_ALIAS)
+      || gatewayModelAlias(names[0]);
+  }
+
+  // The model of a session: the one the caller asked for when listed, else the model nobody chose.
   function convertigoGatewayDefaultAlias(options, names) {
     var wanted = trim(options && (options.llmGatewayDefaultModel || options.model || options.agentModel));
-    if (!wanted.length) {
-      try {
-        var symbol = Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue(CONVERTIGO_LLM_GATEWAY_DEFAULT_MODEL_SYMBOL);
-        wanted = symbol === null || typeof symbol === "undefined" ? "" : trim(String(symbol));
-      } catch (_ignoreGatewayDefaultSymbol) {}
-    }
-    for (var i = 0; i < names.length; i++) {
-      if (wanted.length && (names[i] === wanted || gatewayModelAlias(names[i]) === wanted)) { return gatewayModelAlias(names[i]); }
-    }
-    return gatewayModelAlias(names[0]);
+    return listedGatewayAlias(names, wanted) || convertigoGatewayPreferredAlias(names);
   }
 
   function vibeContextWindowFor(model) {
@@ -8165,6 +8195,71 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     }
   }
 
+  // Saved before an explicit choice was recorded (modelChosen), the first "Continue" of the settings saved the model and
+  // effort the screen showed: then GLM 5.3 at high for the Convertigo mode. That pair is the old default, not a choice.
+  var LEGACY_IMPLICIT_AGENT_PREFERENCES = [{ provider: "convertigo", model: "glm-5-3", reasoning: ["", "high"] }];
+
+  function explicitBooleanValue(value) {
+    if (value === true || value === false) { return value; }
+    var text = trim(value).toLowerCase();
+    if (text === "true" || text === "1" || text === "yes") { return true; }
+    if (text === "false" || text === "0" || text === "no") { return false; }
+    return null;
+  }
+
+  // Whether a saved preference holds a model the user chose. Without the flag: anything but the old implicit default.
+  function agentPreferenceModelChosen(preferences) {
+    preferences = preferences || {};
+    var flag = explicitBooleanValue(preferences.modelChosen);
+    if (flag !== null) { return flag; }
+    var provider = normalizeProvider(preferences.provider), model = trim(preferences.model), reasoning = trim(preferences.reasoning).toLowerCase();
+    for (var i = 0; i < LEGACY_IMPLICIT_AGENT_PREFERENCES.length; i++) {
+      var legacy = LEGACY_IMPLICIT_AGENT_PREFERENCES[i];
+      if (provider === legacy.provider && model === legacy.model && legacy.reasoning.indexOf(reasoning) >= 0) { return false; }
+    }
+    return true;
+  }
+
+  function providerModelSettings(provider, id) {
+    var models = (provider && provider.models) || [];
+    for (var i = 0; i < models.length; i++) {
+      if (trim(models[i] && models[i].id) === trim(id)) { return models[i]; }
+    }
+    return null;
+  }
+
+  // A preference being saved holds a chosen model when the model or the effort is not the provider's default (the
+  // settings screen shows the default until the user picks another). Saving the same model and effort again keeps the
+  // choice of the preference saved before; picking exactly the default model at its default effort follows the default.
+  function requestedAgentPreferenceModelChosen(requested, stored, providers) {
+    requested = requested || {};
+    var providerId = normalizeProvider(requested.provider);
+    var provider = null;
+    for (var i = 0; providers && i < providers.length; i++) {
+      if (normalizeProvider(providers[i] && providers[i].id) === providerId) { provider = providers[i]; break; }
+    }
+    var model = trim(requested.model), reasoning = trim(requested.reasoning);
+    if (stored && normalizeProvider(stored.provider) === providerId && trim(stored.model) === model
+        && trim(stored.reasoning) === reasoning && agentPreferenceModelChosen(stored)) {
+      return true;
+    }
+    if (provider === null) {
+      return false;
+    }
+    var defaultModel = trim(provider.defaultModel);
+    if (!model.length || !defaultModel.length) {
+      return false;
+    }
+    if (model !== defaultModel) {
+      return true;
+    }
+    var offered = providerModelSettings(provider, model);
+    return reasoning.length > 0 && !!(provider.supports && provider.supports.reasoning === true)
+      && reasoning !== trim(offered && offered.defaultReasoning);
+  }
+
+  // The preference the agent uses: a model the user chose is kept while the provider offers it; otherwise (nothing
+  // chosen, or a model no longer offered) the provider's default model at its default effort.
   function validatedAgentPreferences(preferences, providers) {
     preferences = preferences || {};
     providers = providers || [];
@@ -8180,15 +8275,17 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       return null;
     }
     var models = provider.models || [];
-    var modelId = trim(preferences.model);
+    var modelChosen = agentPreferenceModelChosen(preferences);
+    var modelId = modelChosen ? trim(preferences.model) : "";
     var model = null;
-    for (var j = 0; j < models.length; j++) {
+    for (var j = 0; modelId.length && j < models.length; j++) {
       if (trim(models[j] && models[j].id) === modelId) {
         model = models[j];
         break;
       }
     }
     if (model === null) {
+      modelChosen = false;
       modelId = trim(provider.defaultModel);
       for (var k = 0; k < models.length; k++) {
         if (trim(models[k] && models[k].id) === modelId) {
@@ -8201,7 +8298,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       model = models[0];
       modelId = trim(model.id);
     }
-    var reasoning = trim(preferences.reasoning);
+    var reasoning = modelChosen ? trim(preferences.reasoning) : "";
+    if (!modelChosen) {
+      reasoning = trim(model && model.defaultReasoning);
+    }
     var reasoningLevels = model && model.reasoningLevels ? model.reasoningLevels : [];
     var reasoningValid = !reasoning.length;
     for (var r = 0; r < reasoningLevels.length; r++) {
@@ -8221,6 +8321,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       provider: providerId,
       model: modelId,
       reasoning: reasoning,
+      modelChosen: modelChosen,
       serviceTier: trim(preferences.serviceTier),
       updatedAt: Number(preferences.updatedAt || 0)
     };
@@ -8382,6 +8483,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     provider.supports.images = models.some(function (model) { return model.supportsImages === true; });
     provider.supports.reasoning = models.some(function (model) { return model.reasoningLevels.length > 0; });
     provider.reasoningMode = provider.supports.reasoning ? "runtime_selectable" : "model_bound";
+    // The default is the model nobody chose, never the one the cached or discovered catalog sat on: a session writes its
+    // own model there (updateVibeProviderSettings), so the default followed the last conversation's model.
+    provider.defaultModel = convertigoGatewayPreferredAlias(aliases);
     if (aliases.indexOf(trim(provider.defaultModel)) < 0) { provider.defaultModel = models[0].id; }
     return provider;
   }
@@ -11681,8 +11785,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       if (gatewaySpecs[aliasIndex].efforts) { gatewayEfforts[gatewaySpecs[aliasIndex].alias] = gatewaySpecs[aliasIndex].efforts; }
     }
     var configuredDefault = trim(config.activeModel);
-    if (gatewayProfile && gatewayAliases.indexOf(configuredDefault) < 0) {
-      configuredDefault = gatewaySpecs.length ? gatewaySpecs[0].activeModel : "";
+    // The Convertigo mode's default is the model nobody chose, not the active_model the last session wrote.
+    if (gatewayProfile) {
+      configuredDefault = gatewayAliases.length ? convertigoGatewayPreferredAlias(gatewayAliases) : "";
     }
     var defaultModel = configuredDefault || setup.model || (models.length ? models[0].id : "");
     var provider = {
@@ -12257,14 +12362,16 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       writePersistentProviderSettingsCache(settingsWorkspaceRoot, providers);
     }
     if (boolValue(options.savePreferences, false)) {
-      var requestedPreferences = validatedAgentPreferences({
+      var requestedRaw = {
         confirmed: true,
         provider: options.provider || options.agent || options.agentProvider,
         model: options.model,
         reasoning: options.reasoningEffort || options.reasoningLevel,
         serviceTier: options.serviceTier,
         updatedAt: now()
-      }, providers);
+      };
+      requestedRaw.modelChosen = requestedAgentPreferenceModelChosen(requestedRaw, readPersistentAgentPreferences(settingsWorkspaceRoot, options), providers);
+      var requestedPreferences = validatedAgentPreferences(requestedRaw, providers);
       if (requestedPreferences !== null) {
         writePersistentAgentPreferences(settingsWorkspaceRoot, options, requestedPreferences);
       }

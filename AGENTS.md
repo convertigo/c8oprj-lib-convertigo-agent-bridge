@@ -853,6 +853,26 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   apply it, clamped to what the gateway accepts (high where medium is refused). A
   saved level and an explicit `llmGatewayThinking` still win. Run
   `node --test tests/ml4_default_thinking.test.js`.
+- The Convertigo mode starts on Mistral Large 4 when nobody chose a model
+  (`CONVERTIGO_LLM_GATEWAY_DEFAULT_ALIAS`, 17/11/2026: the everyday tasks of an A/B
+  at about half GLM 5.3's price and a third of its time per request). The default
+  is explicit (`convertigoGatewayPreferredAlias`): the global symbol
+  `agentbridge.gateway.default_model` when listed, else Mistral Large 4 when
+  listed, else the first listed model. Never the order of the gateway list (it
+  sorts glm-5-3 first), nor the model a session last wrote in the cached catalog
+  or in `config.toml` (`active_model`): `applyGatewayOfferToProvider` and
+  `vibeSettings` reset the provider's `defaultModel` to it. The built-in offer
+  used before the gateway answers (`CONVERTIGO_LLM_GATEWAY_MODEL`) is the same
+  model. A model asked for (`model`, a user's or a No Code administrator's) still
+  runs when listed. GLM 5.3 stays offered.
+- Saved preferences carry `modelChosen`. Saving one counts as a choice when the
+  model or the effort is not the provider's default, or when the same values were
+  already a choice (`requestedAgentPreferenceModelChosen`); otherwise the
+  preference follows the provider's default model at its default effort
+  (`validatedAgentPreferences`). A preference saved without the flag is a choice
+  except the old implicit default the first "Continue" saved, Convertigo
+  `glm-5-3` at `high` (`LEGACY_IMPLICIT_AGENT_PREFERENCES`). Run
+  `node --test tests/gateway_default_model.test.js`.
 - Configuration intent revision `gateway-vision-v2` refreshes existing managed
   configs without requiring runtime reinstallation. If an attachment is skipped
   for an unknown capability, explain that it was not transmitted rather than
