@@ -18,6 +18,72 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
 }
 // End shared storage contract.
 
+// Shared sub-agent stop contract across Tigo projects (lib_ConvertigoMCP starts the runs, lib_ConvertigoAgentBridge stops
+// the runs of a conversation it interrupts or closes). Keep this block identical in both. Resolved only on the engine.
+// A run lives in <user workspace>/subagents/<runId>/run.json {conversationId, pid, lockFile}; the runner process started
+// by the Studio is no child of the agent, so stopping the agent's turn or process left it building, and its project lock
+// refused every other write (measured run, 17/11). tigoConversationSubagentRuns lists the live runs of a conversation (a
+// quick read); tigoStopConversationSubagents stops them: stop.json written in the run folder (the runner reports why),
+// SIGTERM to the runner (it stops its own agent and removes its lock), then a hard stop of what is left after 3 s and of
+// the lock it still names. It returns the runIds stopped.
+if (typeof C8O.tigoStopConversationSubagents !== "function") {
+  C8O.tigoConversationSubagentRuns = function (conversationId) {
+    var runs = [];
+    var id = String(conversationId == null ? "" : conversationId).replace(/^\s+|\s+$/g, "");
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(id)) { return runs; }
+    var File = Packages.java.io.File;
+    var Files = Packages.java.nio.file.Files;
+    var root = new File(new File(String(Packages.com.twinsoft.convertigo.engine.Engine.USER_WORKSPACE_PATH)).getCanonicalFile(), "subagents");
+    var dirs = root.isDirectory() ? root.listFiles() : null;
+    for (var i = 0; dirs !== null && i < dirs.length; i++) {
+      try {
+        var runId = String(dirs[i].getName());
+        var runFile = new File(dirs[i], "run.json");
+        if (!/^(verify|build|sa)-\d{8}-\d{6}-[0-9a-f]{8}$/.test(runId) || !runFile.isFile()) { continue; }
+        var meta = JSON.parse(String(new Packages.java.lang.String(Files.readAllBytes(runFile.toPath()), "UTF-8")));
+        if (String(meta.conversationId || "") !== id) { continue; }
+        var found = Packages.java.lang.ProcessHandle.of(Number(meta.pid || 0));
+        if (found.isPresent() && found.get().isAlive()) {
+          runs.push({ runId: runId, dir: dirs[i], root: root, lockFile: String(meta.lockFile || ""), process: found.get() });
+        }
+      } catch (_ignoreRun) {}
+    }
+    return runs;
+  };
+  C8O.tigoStopConversationSubagents = function (conversationId, reason) {
+    var stopped = [];
+    var Files = Packages.java.nio.file.Files;
+    var System = Packages.java.lang.System;
+    var runs = C8O.tigoConversationSubagentRuns(conversationId);
+    for (var i = 0; i < runs.length; i++) {
+      try {
+        var run = runs[i];
+        Files.write(new Packages.java.io.File(run.dir, "stop.json").toPath(), new Packages.java.lang.String(JSON.stringify({
+          reason: String(reason || "its conversation was stopped"), at: Number(System.currentTimeMillis())
+        })).getBytes("UTF-8"));
+        var children = run.process.descendants().toArray();
+        run.process.destroy();
+        for (var deadline = System.currentTimeMillis() + 3000; run.process.isAlive() && System.currentTimeMillis() < deadline;) {
+          Packages.java.lang.Thread.sleep(100);
+        }
+        for (var c = 0; c < children.length; c++) {
+          if (children[c].isAlive()) { children[c].destroyForcibly(); }
+        }
+        if (run.process.isAlive()) { run.process.destroyForcibly(); }
+        var lock = new Packages.java.io.File(run.lockFile);
+        if (run.lockFile.length && lock.isFile() && String(lock.getCanonicalFile().getParent()) === String(run.root.getPath())) {
+          var holder = {};
+          try { holder = JSON.parse(String(new Packages.java.lang.String(Files.readAllBytes(lock.toPath()), "UTF-8"))); } catch (_badLock) {}
+          if (String(holder.runId || "") === run.runId) { lock["delete"](); }
+        }
+        stopped.push(run.runId);
+      } catch (_ignoreStop) {}
+    }
+    return stopped;
+  };
+}
+// End shared sub-agent stop contract.
+
 // Common runtime, process registry, event buffer and shared helpers.
 // Loaded by vibe_agent_bridge.js inside one Rhino scope.
   function agentsDirectory(workspaceRoot) { return C8O.tigoAgentsDirectory(workspaceRoot, File); }
@@ -11897,6 +11963,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     var registry = getRegistry();
     var entry = handle.length ? registry.get(handle) : null;
     if (entry !== null && typeof entry !== "undefined") {
+      stopConversationSubagents(entry, "its conversation was deleted");
       stopEntry(entry, true);
     }
 
@@ -14676,6 +14743,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
       TURN_INTERRUPT_ADAPTERS.acp(entry);
       pushEvent(entry, "turn/interrupt_requested", { protocol: "acp", reason: "mcp_lost" });
     } catch (_ignoreMcpLostCancel) {}
+    stopConversationSubagents(entry, "its conversation's turn was stopped (the agent lost the Convertigo MCP)");
     var watchdog = new Thread(new Runnable({
       run: function () {
         try {
@@ -15281,6 +15349,28 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     }
   };
 
+  // The Convertigo MCP sub-agents a conversation started (subagent-run, browser-verify) run in processes the Studio started,
+  // not under the agent: a stopped turn or a closed agent left them building, their project lock refusing every other write
+  // (measured run, 17/11). They stop with the turn or the process, on a thread of their own: a runner gets 3 s to end.
+  function stopConversationSubagents(entry, reason) {
+    if (typeof C8O.tigoStopConversationSubagents !== "function") { return; }
+    var id = mcpConversationId({ conversationId: entry.mcpConversationId || entry.conversationId, handle: entry.handle });
+    // A quick read of the run folders first: no thread when the conversation runs no sub-agent.
+    if (!id.length || !C8O.tigoConversationSubagentRuns(id).length) { return; }
+    var worker = new Thread(new Runnable({
+      run: function () {
+        try {
+          var stopped = C8O.tigoStopConversationSubagents(id, reason);
+          if (stopped.length) {
+            pushEvent(entry, "subagents/stopped", { runIds: stopped, reason: reason });
+          }
+        } catch (_ignoreSubagentStop) {}
+      }
+    }), "lib_ConvertigoAgentBridge-subagents-stop-" + id);
+    worker.setDaemon(true);
+    worker.start();
+  }
+
   C8O.agentBridge.interrupt = function (options) {
     options = options || {};
     var handle = resolveHandle(options.handle);
@@ -15291,6 +15381,8 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     if (entry === null || typeof entry === "undefined") {
       return { ok: false, status: "not_found", handle: handle, timestamp: now() };
     }
+    // A stop stops the conversation's sub-agents too, its turn already over or its process gone.
+    stopConversationSubagents(entry, "its conversation was stopped");
     if (!processAlive(entry.process)) {
       return { ok: false, status: "exited", handle: handle, timestamp: now() };
     }
@@ -15560,6 +15652,7 @@ if (typeof C8O.tigoAgentsDirectory !== "function") {
     try {
       state = statusOf(entry);
     } catch (_ignoreSweptState) {}
+    stopConversationSubagents(entry, "its conversation's agent ended (" + reason + ")");
     try {
       stopEntry(entry, false);
     } catch (_ignoreSweptStop) {}

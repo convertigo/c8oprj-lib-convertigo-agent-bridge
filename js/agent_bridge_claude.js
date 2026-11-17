@@ -2694,6 +2694,7 @@
       return { ok: true, status: "not_found", handle: handle, timestamp: now() };
     }
     var stateBeforeRemove = statusOf(entry);
+    stopConversationSubagents(entry, "its conversation was closed");
     stopEntry(entry, true);
     return { ok: true, status: "closed", handle: handle, state: stateBeforeRemove, timestamp: now() };
   };

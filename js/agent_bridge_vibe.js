@@ -1334,6 +1334,7 @@
     // An explicit close is the fallback when session/cancel did not finish the turn.
     // Do not wait on another protocol write (session/close) to the same blocked pipe.
     var stateBeforeRemove = statusOf(entry);
+    stopConversationSubagents(entry, "its conversation was closed");
     stopEntry(entry, true);
     return {
       ok: true,

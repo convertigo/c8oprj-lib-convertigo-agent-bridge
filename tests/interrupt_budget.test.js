@@ -39,7 +39,7 @@ test('a responsive provider keeps the existing cancel protocol',()=>{
 });
 test('the explicit close fallback sends no second blocking protocol request',()=>{
   const source=fs.readFileSync(require('node:path').join(__dirname,'../js/agent_bridge_vibe.js'),'utf8');
-  const s={C8O:{agentBridge:{}},resolveHandle:v=>v,getRegistry:()=>({get:()=>({})}),forgetSessionHandle(){},statusOf:()=>({}),stopEntry:()=>{s.closed=true;},now:()=>0,acpRequest:()=>{throw new Error('close must not write to the stalled pipe');}};
+  const s={C8O:{agentBridge:{}},resolveHandle:v=>v,getRegistry:()=>({get:()=>({})}),forgetSessionHandle(){},statusOf:()=>({}),stopConversationSubagents:()=>{s.subagentsStopped=true;},stopEntry:()=>{s.closed=true;},now:()=>0,acpRequest:()=>{throw new Error('close must not write to the stalled pipe');}};
   vm.createContext(s);vm.runInContext(source.slice(source.indexOf('  C8O.agentBridge.vibeClose ='),source.indexOf('  // Browser login')),s);
-  assert.equal(s.C8O.agentBridge.vibeClose({handle:'fixture'}).ok,true);assert.equal(s.closed,true);
+  assert.equal(s.C8O.agentBridge.vibeClose({handle:'fixture'}).ok,true);assert.equal(s.closed,true);assert.equal(s.subagentsStopped,true);
 });
