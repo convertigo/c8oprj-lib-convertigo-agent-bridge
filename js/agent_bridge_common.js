@@ -3082,10 +3082,15 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
 
   function engineProcessProxyAvailable() {
     try {
-      // NativeJavaClass does not expose the Java source spelling `.class` in Rhino.
-      // Inspect the callable method, without starting a relay or invoking it during discovery.
-      var method = ProcessUtils.configureProxyEnvironment;
-      return typeof method === "function" && /\bconfigureProxyEnvironment\s*\(/.test(String(method));
+      // NativeJavaClass does not expose Java's `.class` spelling in Rhino.
+      var methods = Packages.java.lang.Class.forName("com.twinsoft.convertigo.engine.util.ProcessUtils").getMethods();
+      for (var i = 0; i < methods.length; i++) {
+        var method = methods[i];
+        var parameters = method.getParameterTypes();
+        if (String(method.getName()) === "configureProxyEnvironment" && parameters.length === 1 &&
+            String(parameters[0].getName()) === "java.util.Map") { return true; }
+      }
+      return false;
     } catch (_olderEngineProxyApi) {
       return false;
     }

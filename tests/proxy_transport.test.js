@@ -65,10 +65,16 @@ test('the engine relay environment replaces inherited installer proxies and keep
 
 test('the optional engine proxy API is detected by its exact public method', () => {
   const s = scope();
-  s.ProcessUtils = {configureProxyEnvironment() {assert.fail('discovery must not invoke the method');}};
-  assert.equal(s.engineProcessProxyAvailable(),true);
-  s.ProcessUtils = {};
-  assert.equal(s.engineProcessProxyAvailable(),false);
+  let methods = [{getName: () => 'configureProxyEnvironment', getParameterTypes: () => [{getName: () => 'java.util.Map'}]}];
+  s.Packages = {java:{lang:{Class:{forName(name) {
+    assert.equal(name, 'com.twinsoft.convertigo.engine.util.ProcessUtils');
+    return {getMethods: () => methods};
+  }}}}};
+  assert.equal(s.engineProcessProxyAvailable(), true);
+  methods = [{getName: () => 'configureProxyEnvironment', getParameterTypes: () => []}];
+  assert.equal(s.engineProcessProxyAvailable(), false);
+  methods = [];
+  assert.equal(s.engineProcessProxyAvailable(), false);
 });
 
 test('modern HTTP requests let the engine select and authenticate the proxy in every mode', () => {
