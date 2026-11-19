@@ -3080,6 +3080,17 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     };
   }
 
+  function engineProcessProxyAvailable() {
+    try {
+      // NativeJavaClass does not expose the Java source spelling `.class` in Rhino.
+      // Inspect the callable method, without starting a relay or invoking it during discovery.
+      var method = ProcessUtils.configureProxyEnvironment;
+      return typeof method === "function" && /\bconfigureProxyEnvironment\s*\(/.test(String(method));
+    } catch (_olderEngineProxyApi) {
+      return false;
+    }
+  }
+
   function engineProxySettings(targetUrl) {
     var settings = {
       enabled: false,
@@ -3100,6 +3111,17 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       }
       settings.mode = trim(manager.proxyMode).toLowerCase();
       settings.method = trim(manager.proxyMethod).toLowerCase();
+      if (engineProcessProxyAvailable()) {
+        settings.localProxyUrl = String(Packages.com.twinsoft.convertigo.engine.proxy.ntlm.NtlmConnectProxyBridge.getLocalProxyUrl());
+        var relay = new Packages.java.net.URI(settings.localProxyUrl);
+        settings.host = String(relay.getHost());
+        settings.port = Number(relay.getPort());
+        settings.enabled = true;
+        return settings;
+      }
+      if (settings.mode === "auto") {
+        throw new Error("PAC proxy support for agents requires an updated Convertigo engine.");
+      }
       settings.user = String(manager.getProxyUser() || "");
       settings.password = String(manager.getProxyPassword() || "");
       var bypass = manager.getBypassDomains();
@@ -3114,45 +3136,53 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       if (settings.mode === "manual") {
         settings.host = String(manager.getProxyServer() || "");
         settings.port = Number(manager.getProxyPort() || 0);
-      } else if (settings.mode === "auto") {
-        var target = trim(targetUrl);
-        if (!target.length) {
-          return settings;
-        }
-        var uri = new Packages.java.net.URI(target);
-        var pac = manager.getPacInfos(target, String(uri.getHost()));
-        if (pac === null) {
-          settings.direct = true;
-          return settings;
-        }
-        settings.host = String(pac.getServer() || "");
-        settings.port = Number(pac.getPort() || 0);
       }
       settings.enabled = settings.host.length > 0 && settings.port > 0;
       if (settings.enabled && settings.method === "ntlm" && settings.mode === "manual") {
         settings.localProxyUrl = String(Packages.com.twinsoft.convertigo.engine.proxy.ntlm.NtlmConnectProxyBridge.getLocalProxyUrl());
       }
     } catch (_engineProxySettingsError) {
+      if (settings.mode === "auto" && !engineProcessProxyAvailable()) {
+        throw new Error("PAC proxy support for agents requires an updated Convertigo engine. Update the engine before installing or starting the runtime.");
+      }
       throw new Error("Unable to resolve the Convertigo engine proxy settings (" + settings.mode + "). Check the proxy configuration and PAC script before starting the agent.");
     }
     return settings;
   }
 
   function applyEngineProxyEnvironment(pbEnv, targetUrl) {
+    if (engineProcessProxyAvailable()) {
+      // The engine owns one relay and evaluates the PAC for each destination reached by this process.
+      // Apply after the caller's environment, never export upstream proxy credentials to a child.
+      ProcessUtils.configureProxyEnvironment(pbEnv);
+      var bypass = trim(pbEnv.get("NO_PROXY") || pbEnv.get("no_proxy"));
+      var local = proxyEnvironmentFromSettings({ noProxy: bypass });
+      pbEnv.put("NO_PROXY", local.NO_PROXY);
+      pbEnv.put("no_proxy", local.no_proxy);
+      var manager = Engine.theApp && Engine.theApp.proxyManager;
+      if (manager && manager.isEnabled()) {
+        var relayUrl = trim(pbEnv.get("HTTPS_PROXY") || pbEnv.get("HTTP_PROXY"));
+        if (!relayUrl.length) { throw new Error("The engine proxy relay did not provide a subprocess proxy URL."); }
+        ["npm_config_proxy", "npm_config_https_proxy", "NPM_CONFIG_PROXY", "NPM_CONFIG_HTTPS_PROXY", "PIP_PROXY"].forEach(function (key) { pbEnv.put(key, relayUrl); });
+      }
+      return { enabled: !!(manager && manager.isEnabled()), mode: "engine" };
+    }
     var settings = engineProxySettings(targetUrl);
     envObjectToMap(pbEnv, proxyEnvironmentFromSettings(settings));
     return settings;
   }
 
   function configureHttpRequestProxy(request, configBuilder, targetUrl) {
+    if (engineProcessProxyAvailable()) {
+      // Engine.theApp.httpClient4 is the engine HttpUtils client: it owns routing and authentication,
+      // including redirects and CONNECT. Do not impose a child-process relay or an authorization header.
+      return { enabled: true, mode: "engine" };
+    }
     var settings = engineProxySettings(targetUrl);
     var proxyEnv = proxyEnvironmentFromSettings(settings);
     var proxyUrl = trim(proxyEnv.HTTPS_PROXY);
     if (!proxyUrl.length) {
       return settings;
-    }
-    if (settings.method === "ntlm" && !trim(settings.localProxyUrl).length) {
-      throw new Error("The PAC-selected NTLM proxy cannot be exposed to this HTTP request");
     }
     var proxyUri = new Packages.java.net.URI(proxyUrl);
     configBuilder.setProxy(new Packages.org.apache.http.HttpHost(String(proxyUri.getHost()), Number(proxyUri.getPort())));
@@ -7403,8 +7433,8 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     try {
       errFile = File.createTempFile("c8o-codex-auth-probe-", ".log");
       var pb = new ProcessBuilder(toJavaList([trim(commandPath), "app-server", "--listen", "stdio://"]));
-      applyEngineProxyEnvironment(pb.environment(), "https://chatgpt.com");
       envObjectToMap(pb.environment(), codexRuntimeEnv(options || {}, codexHome));
+      applyEngineProxyEnvironment(pb.environment(), "https://chatgpt.com");
       pb.redirectError(errFile);
       process = pb.start();
       writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
@@ -8773,13 +8803,13 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     var errFile = null;
     try {
       var pb = new ProcessBuilder(toJavaList(args));
-      applyEngineProxyEnvironment(pb.environment(), options && options.proxyTargetUrl);
       if (options && options.cwd) {
         pb.directory(new File(String(options.cwd)));
       }
       if (options && options.env) {
         envObjectToMap(pb.environment(), options.env);
       }
+      applyEngineProxyEnvironment(pb.environment(), options && options.proxyTargetUrl);
       outFile = File.createTempFile("c8o-agent-bridge-out-", ".log");
       errFile = File.createTempFile("c8o-agent-bridge-err-", ".log");
       pb.redirectOutput(outFile);
@@ -8826,13 +8856,13 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       outFile = File.createTempFile("c8o-agent-bridge-out-", ".log");
       errFile = File.createTempFile("c8o-agent-bridge-err-", ".log");
       var pb = new ProcessBuilder(toJavaList(args));
-      applyEngineProxyEnvironment(pb.environment(), options && options.proxyTargetUrl);
       if (options && options.cwd) {
         pb.directory(new File(String(options.cwd)));
       }
       if (options && options.env) {
         envObjectToMap(pb.environment(), options.env);
       }
+      applyEngineProxyEnvironment(pb.environment(), options && options.proxyTargetUrl);
       pb.redirectOutput(outFile);
       pb.redirectError(errFile);
       var process = pb.start();
@@ -8916,13 +8946,13 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     var outFile = null;
     var errFile = null;
     try {
-      applyEngineProxyEnvironment(pb.environment(), options && options.proxyTargetUrl);
       if (options && options.cwd) {
         pb.directory(new File(String(options.cwd)));
       }
       if (options && options.env) {
         envObjectToMap(pb.environment(), options.env);
       }
+      applyEngineProxyEnvironment(pb.environment(), options && options.proxyTargetUrl);
       outFile = File.createTempFile("c8o-agent-bridge-out-", ".log");
       errFile = File.createTempFile("c8o-agent-bridge-err-", ".log");
       pb.redirectOutput(outFile);
@@ -12730,8 +12760,8 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
         : [command.path,"app-server","--listen","stdio://"];
       var pb = new ProcessBuilder(toJavaList(args));
       pb.directory(new File(setup.workspaceRoot));
-      applyEngineProxyEnvironment(pb.environment(), agentProxyTargetUrl(provider, {}));
       envObjectToMap(pb.environment(), provider === "claude" ? claudeRuntimeEnv(options,home) : codexRuntimeEnv(options,home));
+      applyEngineProxyEnvironment(pb.environment(), agentProxyTargetUrl(provider, {}));
       pb.redirectError(Packages.java.lang.ProcessBuilder.Redirect.DISCARD);
       process = pb.start();
       writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
@@ -15480,9 +15510,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     entry.guarded = guard.guarded === true;
     var pb = new ProcessBuilder(toJavaList(guard.command));
     pb.directory(new File(entry.cwd));
-    applyEngineProxyEnvironment(pb.environment(), agentProxyTargetUrl(entry.provider, env));
     (entry.unsetEnv || []).forEach(function (name) { pb.environment().remove(String(name)); });
     envObjectToMap(pb.environment(), env);
+    applyEngineProxyEnvironment(pb.environment(), agentProxyTargetUrl(entry.provider, env));
     entry.process = pb.start();
     startupMark("process/spawn");
     entry.writer = new BufferedWriter(new OutputStreamWriter(entry.process.getOutputStream(), StandardCharsets.UTF_8));

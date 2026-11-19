@@ -1665,8 +1665,8 @@
       env.PATH = nodePath + String(File.pathSeparator) + String(System.getenv("PATH") || "");
     }
     var pb = new ProcessBuilder(toJavaList([runtime.python.path, script]));
-    applyEngineProxyEnvironment(pb.environment(), "https://console.mistral.ai");
     envObjectToMap(pb.environment(), env);
+    applyEngineProxyEnvironment(pb.environment(), "https://console.mistral.ai");
     pb.directory(new File(setup.workspaceRoot));
     pb.redirectOutput(stdoutFile);
     pb.redirectError(stderrFile);

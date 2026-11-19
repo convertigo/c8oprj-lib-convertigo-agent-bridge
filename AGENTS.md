@@ -72,6 +72,15 @@ same context.
   Codex, and Vibe, must receive proxy variables derived from the engine
   `ProxyManager`, including bypass domains and the local NTLM bridge when
   applicable. Never log proxy URLs containing credentials.
+- Engines exposing `ProcessUtils.configureProxyEnvironment(Map)` own the single
+  subprocess proxy relay for manual and PAC modes, including anonymous, Basic
+  and NTLM authentication. Apply it after all caller environment substitutions
+  and before starting the process. Keep installer-specific aliases pointed at
+  that same relay; never start another relay in this library.
+- With that engine API, HTTP requests use `Engine.theApp.httpClient4` without a
+  library-selected proxy or proxy authorization header. Older engines retain
+  the manual configuration path; PAC requires the updated engine explicitly,
+  rather than starting a subprocess with a route sampled from one destination.
 - Always retain loopback hosts in child `NO_PROXY`, even with the engine proxy
   disabled. Failed PAC resolution must stop before spawning a network process.
   Gateway model discovery uses the engine HTTP client and the same proxy helper.

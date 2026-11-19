@@ -2038,8 +2038,8 @@
     var stdoutFile = File.createTempFile("c8o-codex-login-out-", ".log");
     var stderrFile = File.createTempFile("c8o-codex-login-err-", ".log");
     var pb = new ProcessBuilder(toJavaList([setup.codex.path, "login"]));
-    applyEngineProxyEnvironment(pb.environment(), "https://auth.openai.com");
     envObjectToMap(pb.environment(), codexRuntimeEnv(loginOptions, setup.codexHome));
+    applyEngineProxyEnvironment(pb.environment(), "https://auth.openai.com");
     pb.directory(new File(setup.workspaceRoot));
     pb.redirectOutput(stdoutFile);
     pb.redirectError(stderrFile);

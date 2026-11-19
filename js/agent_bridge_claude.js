@@ -1382,8 +1382,8 @@
       env[CLAUDE_LOGIN_URL_FILE_ENV] = filePath(urlFile);
     }
     var pb = new ProcessBuilder(toJavaList([setup.claude.path, "auth", "login"]));
-    applyEngineProxyEnvironment(pb.environment(), "https://claude.com");
     envObjectToMap(pb.environment(), env);
+    applyEngineProxyEnvironment(pb.environment(), "https://claude.com");
     pb.directory(new File(setup.workspaceRoot));
     pb.redirectOutput(stdoutFile);
     pb.redirectError(stderrFile);
