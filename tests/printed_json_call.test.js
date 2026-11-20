@@ -232,3 +232,17 @@ test('a final response with provider finish_reason stop is also eligible', () =>
   play(e, [say(printed()), JSON.stringify({jsonrpc:'2.0',id:7,result:{finish_reason:'stop'}})]);
   assert.equal(prompts(e).length, 1);
 });
+
+
+test('printed retries share the existing overall two-nudge budget and leave an example exit', () => {
+  const e = turn(7);
+  play(e, [say(printed()), answer(7)]);
+  assert.equal(e.turnNudges, 1);
+  assert.equal(e.turnPrintedCallRetries, 1);
+  assert.match(prompts(e)[0].params.prompt[0].text, /only meant to show an example/);
+  const spent = turn(8);
+  spent.turnNudges = 2;
+  play(spent, [say(printed()), answer(8)]);
+  assert.equal(prompts(spent).length, 0);
+  assert.equal(types(spent, 'turn/end')[0].data.result.incomplete, true);
+});
