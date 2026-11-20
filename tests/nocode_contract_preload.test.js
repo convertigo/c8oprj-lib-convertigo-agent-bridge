@@ -1,4 +1,4 @@
-// The instructions of a No Code session carry the core of the No Code form contract, so that the agent does not spend a
+// The instructions of a No Code session, and of a Studio agent outside Flow, carry the core of the No Code form contract, so that the agent does not spend a
 // step on nocode-form-contract-get. The text is built once per contract version and read back as is: every conversation
 // gets the same bytes, which keeps the provider's prompt cache warm. A symbol turns it off; a failure leaves it out.
 // node --test tests/nocode_contract_preload.test.js
@@ -109,10 +109,35 @@ test('the No Code instructions end with the contract core, the same bytes on eve
   });
 });
 
-test('other profiles do not ask for the contract', () => {
+test('a Studio agent gets the same core at the end of its instructions; a Flow agent does not ask for it', () => {
   withAgents((io) => {
-    agentSkillInstructions('vibe', 'generalist', {});
-    agentSkillInstructions('codex', '');
+    const noCode = agentSkillInstructions('vibe', 'nocode', {});
+    const section = noCode.slice(noCode.indexOf('\n## No Code form contract core ('));
+    for (const [provider, profile] of [['vibe', 'generalist'], ['codex', ''], ['claude', 'generalist']]) {
+      const studio = agentSkillInstructions(provider, profile, {});
+      assert.match(studio, /^# Convertigo Agent Instructions/, provider + ' keeps the Studio instructions');
+      assert.ok(studio.endsWith(section), provider + ' ends with the same bytes as No Code');
+    }
+    assert.equal(io.writes, 1, 'one file per contract version, shared with No Code');
+    // a Studio with the Flow capability: its Flow agent uses no No Code tool
+    const savedFlow = global.flowCapabilityAvailable;
+    global.flowCapabilityAvailable = () => true;
+    try {
+      const calls = io.calls;
+      const flow = agentSkillInstructions('vibe', 'flow', {});
+      assert.match(flow, /flow-only/, 'the Flow profile is the one used');
+      assert.doesNotMatch(flow, /No Code form contract core/);
+      assert.equal(io.calls, calls, 'Flow does not ask for the contract');
+    } finally {
+      global.flowCapabilityAvailable = savedFlow;
+    }
+  });
+});
+
+test('assistant.nocode.contract_preload=false leaves the core out of the Studio instructions too', () => {
+  withAgents((io) => {
+    symbols['assistant.nocode.contract_preload'] = 'false';
+    assert.doesNotMatch(agentSkillInstructions('vibe', 'generalist', {}), /No Code form contract core/);
     assert.equal(io.calls, 0);
   });
 });

@@ -5191,9 +5191,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   }
 
   // ---- No Code: the core of the form contract in the instructions ----
-  // The instructions of a No Code session end with the core of the No Code form contract of the installed C8Oforms (what
-  // nocode-form-contract-get answers without sections: quickReference, types, aliases, section index), so that the agent
-  // does not spend a step on that call. The text is built once per contract version, kept under
+  // The instructions of a No Code session, and those of a Studio agent outside Flow, end with the core of the No Code form
+  // contract of the installed C8Oforms (what nocode-form-contract-get answers without sections: quickReference, types,
+  // aliases, section index), so that the agent does not spend a step on that call. The text is built once per contract version, kept under
   // <agents>/nocode/contract-core/<version>.md and read back as is: every conversation gets the same bytes for a given
   // contract. The global symbol assistant.nocode.contract_preload=false turns it off; a server without lib_ConvertigoMCP
   // or without the contract in C8Oforms gets the instructions without it.
@@ -5344,7 +5344,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       isFlow ? "For delegated work, reuse the persistent backend and frontend specialists described by that skill rather than spawning a new agent per lot." : (isVibe ? "Start with `skills/convertigo-vibe-generalist/SKILL.md`, then read only the exact MCP guide required by the task." : "Start with `skills/convertigo-mcp/AGENT.md` and `skills/convertigo-mcp/TOOLS.md`, then read only the prompt or resource files relevant to the task."),
       isNoCode ? "The managed NoCode skill is available in `skills/convertigo-nocode/SKILL.md` and should be preferred for this surface." : "",
       "",
-      "Provider: " + providerLabel(provider)
+      "Provider: " + providerLabel(provider),
+      // a Studio agent creates and edits No Code forms with the same tools: the same core, the same bytes (Flow uses none)
+      isFlow ? "" : noCodeContractCorePreamble(options)
     ].filter(function(line) { return line !== ""; }).join("\n");
   }
 
