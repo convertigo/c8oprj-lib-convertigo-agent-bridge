@@ -1389,3 +1389,12 @@ Pushes/tags build and publish pre-releases; they never deploy a server.
 Set the optional `assistant.agents.directory` global symbol to a dedicated,
 absolute directory when the default workspace path is too long. See
 [agent storage configuration and migration](docs/agents-directory.md).
+
+## No Code form contract in the instructions
+
+The instructions of a No Code session end with the core of the No Code form
+contract (what `nocode-form-contract-get` answers without sections), so that
+the agent does not spend a step on that call. The text is built once per
+contract version under `<agents>/nocode/contract-core/` and reused as is, so
+every conversation gets the same bytes. Set the global symbol
+`assistant.nocode.contract_preload` to `false` to leave it out.

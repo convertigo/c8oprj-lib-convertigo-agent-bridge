@@ -5189,6 +5189,85 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     return section.length ? section + "\n\n" + text : text;
   }
 
+  // ---- No Code: the core of the form contract in the instructions ----
+  // The instructions of a No Code session end with the core of the No Code form contract of the installed C8Oforms (what
+  // nocode-form-contract-get answers without sections: quickReference, types, aliases, section index), so that the agent
+  // does not spend a step on that call. The text is built once per contract version, kept under
+  // <agents>/nocode/contract-core/<version>.md and read back as is: every conversation gets the same bytes for a given
+  // contract. The global symbol assistant.nocode.contract_preload=false turns it off; a server without lib_ConvertigoMCP
+  // or without the contract in C8Oforms gets the instructions without it.
+  var NOCODE_CONTRACT_PRELOAD_SYMBOL = "assistant.nocode.contract_preload";
+  var NOCODE_CONTRACT_CORE_KEYS = ["contractVersion", "capabilities", "quickReference", "types", "aliases", "sectionIndex", "moreSections"];
+  var NOCODE_CONTRACT_CORE_MAX_CHARS = 60000;
+
+  function noCodeContractPreloadEnabled() {
+    var value = "";
+    try { value = trim(Packages.com.twinsoft.convertigo.engine.Engine.theApp.databaseObjectsManager.symbolsGetValue(NOCODE_CONTRACT_PRELOAD_SYMBOL)); } catch (_ignoreNoSymbol) {}
+    return value.toLowerCase() !== "false";
+  }
+
+  function noCodeContractCoreHeading(version) {
+    return "\n## No Code form contract core (" + version + ")\n";
+  }
+
+  // The section of the instructions for one contract: its keys in a fixed order, so that the text depends on the contract only.
+  function noCodeContractCoreText(core) {
+    var version = trim(core && core.contractVersion);
+    if (!version.length || !core.quickReference) {
+      return "";
+    }
+    var kept = {};
+    NOCODE_CONTRACT_CORE_KEYS.forEach(function (key) {
+      if (core[key] !== null && typeof core[key] !== "undefined") {
+        kept[key] = core[key];
+      }
+    });
+    var json = JSON.stringify(kept);
+    if (json.length > NOCODE_CONTRACT_CORE_MAX_CHARS) {
+      return "";
+    }
+    return noCodeContractCoreHeading(version) +
+      "The contract core is already in your context below (what nocode-form-contract-get answers without sections): do not call nocode-form-contract-get for it; ask only for a section you need.\n\n" +
+      "```json\n" + json + "\n```\n";
+  }
+
+  function noCodeContractCore() {
+    var response = callLocalSequence("lib_ConvertigoMCP", "tools_nocode_form_contract_get", {});
+    var core = response && response.document ? response.document : response;
+    for (var depth = 0; core && core.result && typeof core.result === "object" && !core.contractVersion && depth < 4; depth++) {
+      core = core.result;
+    }
+    return core || null;
+  }
+
+  function noCodeContractCorePreamble(options) {
+    if (!noCodeContractPreloadEnabled()) {
+      return "";
+    }
+    try {
+      var core = noCodeContractCore();
+      var version = trim(core && core.contractVersion);
+      if (!version.length) {
+        return "";
+      }
+      var file = new File(new File(new File(agentsDirectory(resolveWorkspaceRoot(options || {})), "nocode"), "contract-core"),
+        version.replace(/[^A-Za-z0-9._+-]/g, "_") + ".md");
+      if (file.isFile()) {
+        var cached = readTextFile(file);
+        if (cached.indexOf(noCodeContractCoreHeading(version)) === 0) {
+          return cached;
+        }
+      }
+      var text = noCodeContractCoreText(core);
+      if (text.length) {
+        writeTextFile(file, text);
+      }
+      return text;
+    } catch (_noContractCore) {
+      return "";
+    }
+  }
+
   // options: the session's (No Code: its policy decides noCodeWebReadRule), none for a home written outside one
   function agentSkillInstructions(provider, profile, options) {
     var capabilityProfile = agentCapabilityProfile({ agentProfile: profile });
@@ -5214,7 +5293,8 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
         "Pass reveal:true only to supported mutation tools when the host requests reveal. Never add it to a read.",
         options ? noCodeWebReadRule(provider, options) : "",
         "Reply in the user's language, with short factual progress updates.",
-        "Provider: " + providerLabel(provider)
+        "Provider: " + providerLabel(provider),
+        noCodeContractCorePreamble(options)
       ].filter(function(line) { return line !== ""; }).join("\n");
     }
     return [
