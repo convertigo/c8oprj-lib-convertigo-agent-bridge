@@ -18,5 +18,15 @@ for (const provider of ['vibe', 'codex', 'claude']) {
   assert.match(text, /call nocode-app-create once with the business spec/, provider);
   // the panel sends nothing during a turn: a question waits for the next message, not for a tool
   assert.match(text, /ask it in your final message and end the turn/, provider);
+  // the rows of the tables the turn context names: straight to the two tools, the rows answered as the proof
+  assert.match(text, /A request only about the rows of the tables the turn context names \(sample data to add, rows to change or delete\) needs neither the skill, its drawers nor a tool search/, provider);
+  assert.match(text, /Its answer lists the rows written \(rows, with their ids\): that is the proof, read nothing afterwards\./, provider);
+  assert.match(text, /editing it; reading or writing its data needs no form read\./, provider);
+  if (provider === 'vibe') {
+    assert.match(text, /in run_typescript, read the columns with tools\.mcp_Convertigo\.nocode_baserow_catalog_list\(\{ tableId, includeColumns: true, view: "compact" \}\)/);
+    assert.match(text, /tools\.mcp_Convertigo\.nocode_baserow_schema_apply\(\{ mode: "apply", view: "compact", schema: \{ baseId, tables: \[\{ id, name, sampleRows: \[\.\.\.\], upsertKey \}\] \} \}\)/);
+  } else {
+    assert.match(text, /nocode-baserow-schema-apply \{ mode: "apply"/, provider);
+  }
 }
 console.log('no-code agent instructions ok');

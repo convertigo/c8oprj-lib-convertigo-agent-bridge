@@ -5270,6 +5270,19 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   }
 
   // options: the session's (No Code: its policy decides noCodeWebReadRule), none for a home written outside one
+  // The rows of the tables the turn context names (the tables of the open application, or a selected table): a request
+  // only about them goes straight to the two tools, without the skill, its drawers or a tool search (each one a model
+  // request of several seconds before the work).
+  function noCodeRowsRule(provider) {
+    var vibe = normalizeProvider(provider) === "vibe";
+    var catalog = vibe ? "tools.mcp_Convertigo.nocode_baserow_catalog_list({ tableId, includeColumns: true, view: \"compact\" })" : "nocode-baserow-catalog-list { tableId, includeColumns: true }";
+    var apply = vibe ? "tools.mcp_Convertigo.nocode_baserow_schema_apply({ mode: \"apply\", view: \"compact\", schema: { baseId, tables: [{ id, name, sampleRows: [...], upsertKey }] } })" :
+      "nocode-baserow-schema-apply { mode: \"apply\", schema: { baseId, tables: [{ id, name, sampleRows: [...], upsertKey }] } }";
+    return "A request only about the rows of the tables the turn context names (sample data to add, rows to change or delete) needs neither the skill, its drawers nor a tool search: " +
+      (vibe ? "in run_typescript, " : "") + "read the columns with " + catalog + " when you need them, then write with " + apply +
+      ". Its answer lists the rows written (rows, with their ids): that is the proof, read nothing afterwards.";
+  }
+
   function agentSkillInstructions(provider, profile, options) {
     var capabilityProfile = agentCapabilityProfile({ agentProfile: profile });
     var isNoCode = capabilityProfile.id === "nocode";
@@ -5284,7 +5297,8 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
         "For a new application over business records (a list of records with its entry form, detail or dashboard), call nocode-app-create once with the business spec before anything else, then change its result with nocode-form-edit. A form or a questionnaire asked alone is not one.",
         "Never fall back to requestable-execute, databaseobject-*, project tools, batch wrappers, shell, raw HTTP, or filesystem access to read or modify forms.",
         AGENT_TEMP_DIR_RULE.replace(/^- /, ""),
-        "Read an existing form with nocode-form-get using its document id before auditing, proposing improvements, or editing. Tool names may use underscores instead of hyphens.",
+        "Read an existing form with nocode-form-get using its document id before auditing, proposing improvements, or editing it; reading or writing its data needs no form read. Tool names may use underscores instead of hyphens.",
+        noCodeRowsRule(provider),
         "Use the current form/page/element context as the default target. Never infer content from the form name alone. Read results describe the saved version, not unsaved editor changes.",
         "A review or request for suggestions does not authorize mutations. Never use an empty edit/update as a read operation.",
         "When you need the user's answer or choice, ask it in your final message and end the turn: the user answers in their next message, and nothing they type reaches you while a turn runs.",
