@@ -3861,7 +3861,8 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     sequenceArray[0] = String(sequence);
     params.put("__project", projectArray);
     params.put("__sequence", sequenceArray);
-    params.put("__context", "agentBridge_" + String(now()));
+    // a context of its own for each call: two calls in the same millisecond must not share (and wait on) one context
+    params.put("__context", "agentBridge_" + String(UUID.randomUUID()));
     variables = variables || {};
     for (var key in variables) {
       if (Object.prototype.hasOwnProperty.call(variables, key) && variables[key] !== null && typeof variables[key] !== "undefined") {
