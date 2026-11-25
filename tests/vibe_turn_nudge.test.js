@@ -533,3 +533,29 @@ for (const python of runtimePythons) {
     });
   }
 }
+
+// A Studio turn (Vibe 3.1.0, mistral-large-4) in the middle of a browser check ended on
+// 'run_typescript({code": "async function main() {...browser_click...}"})': the user saw the raw call as the answer and
+// no nudge came. The model wrote it as a second agent message after a narration, with no tool call in between. Each
+// Vibe message has its own messageId and the panel shows the last one alone as the answer, but the Bridge read both
+// messages as one text, which is no printed call. The lines are those of vibe-acp 3.1.0's serializers
+// (replay_history_entry, two assistant messages, then the end_turn answer).
+test("a call printed as its own message after a narration is nudged: the turn ends on its last message", () => {
+  const lines = fs.readFileSync(path.join(__dirname, "fixtures", "vibe-3.1.0-printed-call-second-message.ndjson"), "utf8").split("\n").filter(Boolean);
+  const entry = turn(7);
+  play(entry, [call("e1", "mcp_playwright.browser_snapshot"), ...lines]);
+  const nudge = types(entry, "turn/nudge")[0];
+  assert.ok(nudge, "the printed call of the second message is nudged");
+  assert.deepEqual([nudge.data.reason, nudge.data.tool], ["printed_call", "run_typescript"]);
+  assert.equal(types(entry, "turn/end").length, 0);
+  // One message streamed in several chunks of the same messageId is still read whole.
+  const chunked = turn(8);
+  const chunk = (text, messageId) => update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text }, messageId });
+  play(chunked, [call("e1"), chunk("run_typescript(", "m1"), chunk('code="async function main() {}")', "m1"), answer(8)]);
+  assert.equal(types(chunked, "turn/nudge")[0].data.reason, "printed_call");
+  // The narration alone, then an answer as a later message: an ordinary end, the last message is an answer.
+  const answered = turn(9);
+  play(answered, [call("e1"), chunk("run_typescript", "m1"), chunk("La page est corrigée.", "m2"), answer(9)]);
+  assert.equal(types(answered, "turn/nudge").length, 0);
+  assert.equal(types(answered, "turn/end").length, 1);
+});

@@ -1,0 +1,3 @@
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"content": {"text": "Je clique sur Enregistrer puis je relis la page.", "type": "text"}, "messageId": "message-0", "sessionUpdate": "agent_message_chunk"}}}
+{"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": {"content": {"text": "run_typescript({code\": \"async function main() {\\n  await tools.mcp_playwright.browser_click({element: \\\"Enregistrer\\\", ref: \\\"e42\\\"});\\n  return await tools.mcp_playwright.browser_snapshot({});\\n}\"})", "type": "text"}, "messageId": "message-1", "sessionUpdate": "agent_message_chunk"}}}
+{"jsonrpc": "2.0", "id": 7, "result": {"stopReason": "end_turn"}}

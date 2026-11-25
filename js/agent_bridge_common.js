@@ -15101,7 +15101,17 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
 
     if (kind === "agent_message_chunk") {
       eventData.text = extractContentText(update.content);
-      // The text since the last tool call: what the turn ends on.
+      // The text of the last agent message since the last tool call: what the turn ends on. Each Vibe message has its
+      // own messageId and the panel shows the last one alone as the answer (the earlier ones go to the work log). A
+      // turn that said "Je clique sur Enregistrer." then printed 'run_typescript({code": "..."})' as a second message
+      // was read as one text that is no printed call, so it ended on the raw call with no nudge.
+      var chunkMessageId = trim(update.messageId || update.message_id || "");
+      if (chunkMessageId.length && chunkMessageId !== trim(entry.turnMessageId)) {
+        entry.turnMessageId = chunkMessageId;
+        entry.turnTail = "";
+        entry.turnFinalText = "";
+        entry.turnFinalTextOverflow = false;
+      }
       entry.turnTail = (String(entry.turnTail || "") + String(eventData.text || "")).slice(-2000);
       if (entry.provider === "vibe" && entry.turnFinalTextOverflow !== true) {
         var finalText = String(entry.turnFinalText || "") + String(eventData.text || "");

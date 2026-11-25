@@ -1031,6 +1031,10 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
 
 The ACP adapter retains the complete final-message candidate up to 262144 characters,
 separately from the short announcement tail. It never classifies a suffix after overflow.
+The candidate is the last agent message only: a chunk with a new `messageId` starts it
+again, as the panel shows the last message alone as the answer. A printed call written as
+its own message after a narration was read with the narration and never nudged (3.1.0
+lines in `tests/fixtures/vibe-3.1.0-printed-call-second-message.ndjson`).
 A known tool or namespaced MCP tool followed only by a JSON object (with up to eight
 non-word separator characters) can request a real tool call in the same session.
 It never executes arguments from text. Printed-call retries default to one per user
