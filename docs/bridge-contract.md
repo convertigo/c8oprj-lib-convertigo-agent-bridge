@@ -262,11 +262,32 @@ Un `tool/update` en echec qui porte un refus du coeur a `coreRefusal` :
 `core_rejected_input` ou `convertigo_mcp_suspended` et marque le process ; un
 tour dont la requete echoue sur un refus du coeur le marque aussi. Au
 troisieme de suite (un appel reussi remet le compte a zero), le Bridge annule
-le tour (`session/cancel`, `turn/interrupt_requested` de raison `mcp_lost`,
-`warning` `mcp_lost_turn_stopped`) et arrete le process si le tour tourne
-encore 15 s plus tard (`mcp_lost_process_stopped`). Le demarrage suivant
-remplace un process marque, sur la meme session (`warning` `mcp_lost_restart`) :
-le nouveau process relit ses outils et son jeton MCP.
+le tour Vibe (`session/cancel`, `turn/interrupt_requested` de raison `mcp_lost`,
+`warning` `mcp_lost_turn_stopped`, avec `resume: true|false`).
+
+Une fois par message de l'utilisateur (`resume: true`), le tour de l'Assistant
+continue : la reponse de Vibe a l'annulation ne finit pas le tour (ni `turn/end`
+ni `acp/response_error`), ou, sans reponse 15 s plus tard, le process est arrete
+sans evenement de fin (`mcp_lost_process_stopped`, etat `restarting`). Le Bridge
+attend ensuite le MCP comme au demarrage (sonde `initialize` avec le jeton de la
+session toutes les 2 s, `progress/message` de code `convertigo_mcp_wait`, 60 s au
+plus), redemarre Vibe sur la meme session dans le meme tour (memes handle, flux et
+curseurs) et lui envoie une consigne de reprise : les outils Convertigo ont ete
+perdus puis sont revenus, la derniere modification peut etre incomplete, appeler
+`project-changes`, relire les objets modifies depuis la derniere preuve reussie,
+reparer ce qui est a moitie fait, puis continuer la demande. Il pousse `warning`
+`mcp_lost_resumed` (`cause` : `convertigo_mcp_suspended` ou `core_rejected_input`,
+`requestId` de la reprise, `message`) et une ligne `progress/message` de code
+`mcp_lost_resumed`. Si le MCP ne revient pas, le tour finit par `warning`
+`convertigo_mcp_unreachable` et `turn/error`
+`{code: "convertigo_mcp_unreachable", message}` (francais puis anglais, qui dit
+que la derniere modification peut etre incomplete).
+
+Une deuxieme perte dans le meme message (`resume: false`) garde l'ancien
+comportement : le process est arrete si le tour tourne encore 15 s plus tard
+(`mcp_lost_process_stopped`) et le demarrage suivant remplace un process marque,
+sur la meme session (`warning` `mcp_lost_restart`) : le nouveau process relit ses
+outils et son jeton MCP.
 
 ### MCP Convertigo absent au demarrage d'une session Vibe
 

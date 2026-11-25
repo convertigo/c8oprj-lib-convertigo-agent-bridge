@@ -701,7 +701,11 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
   from the scope ("context" is not defined): `getServerStore` keeps the store of the last request
   (`lastServerStore`), and `requestParameter`/`callLocalSequence` read no request on a `lib_ConvertigoAgentBridge-`
   thread. Without it, a restart from a background thread lost the registry and every server secret.
-- Run `node --test tests/vibe_mcp_unavailable_at_start.test.js` and the Bridge suite.
+- The same recovery resumes a turn that lost the Convertigo MCP (`noteVibeMcpLost`, third lost call in a row): once
+  per user message, kind `resume`, a continuation prompt that has the model call `project-changes` and repair its last
+  change (warning `mcp_lost_resumed`); a second loss in the message keeps the stop-and-wait-for-the-next-message path.
+- Run `node --test tests/vibe_mcp_unavailable_at_start.test.js tests/vibe_mcp_lost_resume.test.js tests/vibe_mcp_lost.test.js`
+  and the Bridge suite.
 
 ## Event Flow
 

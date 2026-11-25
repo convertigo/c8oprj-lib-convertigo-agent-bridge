@@ -15100,7 +15100,13 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   }
 
   // Counts these failures in a row. The first one marks the process for a restart and tells the turn; at
-  // VIBE_MCP_LOST_FAILURES_MAX the Bridge cancels the turn, and stops the process if the cancel is not answered.
+  // VIBE_MCP_LOST_FAILURES_MAX the Bridge cancels the turn, and stops the process if the cancel is not answered. A
+  // multi-call change then stayed half done until the user wrote again: once per user message, the turn now goes on
+  // (beginVibeMcpRecovery, kind "resume"): once the cancel is answered (or the process stopped) and the MCP answers,
+  // Vibe restarts on the same session within the same turn and gets a continuation prompt that has it check its last
+  // change first (warning mcp_lost_resumed); an MCP that does not come back ends the turn (convertigo_mcp_unreachable).
+  var VIBE_MCP_RESUMES_PER_MESSAGE = 1;
+
   function noteVibeMcpLost(entry, reason, detail) {
     entry.mcpLostFailures = Number(entry.mcpLostFailures || 0) + 1;
     if (!trim(entry.restartReason).length) {
@@ -15111,18 +15117,22 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
         reason: reason,
         detail: detail,
         message: "Vibe lost the Convertigo MCP for this session (" + vibeMcpLostLabel(reason, detail)
-          + "): the next message restarts Vibe on this conversation."
+          + "): Vibe restarts on this conversation to get it back."
       });
     }
     if (entry.mcpLostFailures !== VIBE_MCP_LOST_FAILURES_MAX) {
       return;
     }
+    var resume = Number(entry.turnMcpResumes || 0) < VIBE_MCP_RESUMES_PER_MESSAGE && !!entry.mcpProbeTarget
+      && trim(entry.turnRequestId).length > 0 && !(entry.mcpRecovery && entry.mcpRecovery.done !== true);
     pushEvent(entry, "warning", {
       phase: "vibe/mcp",
       reason: "mcp_lost_turn_stopped",
       count: entry.mcpLostFailures,
+      resume: resume,
       message: "Vibe failed " + entry.mcpLostFailures + " tool calls in a row without the Convertigo MCP: the Bridge "
-        + "stopped the turn. The next message restarts Vibe on this conversation."
+        + (resume ? "stopped the turn; it restarts Vibe on this conversation and resumes the work once the MCP answers."
+          : "stopped the turn. The next message restarts Vibe on this conversation.")
     });
     var turnRequestId = trim(entry.turnRequestId);
     try {
@@ -15130,6 +15140,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       pushEvent(entry, "turn/interrupt_requested", { protocol: "acp", reason: "mcp_lost" });
     } catch (_ignoreMcpLostCancel) {}
     stopConversationSubagents(entry, "its conversation's turn was stopped (the agent lost the Convertigo MCP)");
+    if (resume) {
+      beginVibeMcpRecovery(entry, "resume", trim(entry.restartReason) || reason, true, turnRequestId);
+      return;
+    }
     var watchdog = new Thread(new Runnable({
       run: function () {
         try {
