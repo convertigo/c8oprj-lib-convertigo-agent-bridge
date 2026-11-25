@@ -13726,6 +13726,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
         entry.turnMcpRestarts = 0;
         entry.turnMcpResumes = 0;
         entry.mcpRecovery = null;
+        // What the end of the turn checks against the MCP's proof state (see vibeUnprovenChanges).
+        entry.turnProofNudges = 0;
+        entry.turnBrowserProofAt = 0;
       }
       entry.turnActive = true;
       keepManagedMcpLease(entry);
@@ -15059,6 +15062,193 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     return true;
   }
 
+  // Changes not proven at the end of a turn ----------------------------------------------------------------------------
+  //
+  // A turn ended with "corrige, build OK" on objects nothing had run or shown since their last change. lib_ConvertigoMCP
+  // records, per Tigo conversation (X-Convertigo-Conversation-Id), what each write left unproven and what its proofs
+  // (requestable-execute, browser-verify...) proved again, under MCP_PROOF_STATE_KEY of the server store: a map from the
+  // conversation id to a JSON string {"v":1, "at", "writes", "unproven":[{qname, project, kind: backend|ui|file,
+  // changedAt}], "lastProof": {tool, target, at, ok}|null}. An older MCP writes nothing: no data, nothing is done.
+  // When the model's last message would end a turn, the items changed since the turn started are what is left, minus
+  // the UI ones a Playwright browser call the Bridge saw complete after their change proved. If some are left and the
+  // answer claims success without saying they are not verified, the Bridge sends one corrective prompt in the same turn
+  // (its own budget, VIBE_PROOF_NUDGES_MAX per user message, beside VIBE_TURN_NUDGES_MAX). Whether or not, a turn that
+  // really ends with some left pushes, just before its turn/end, a warning {phase:"turn/proof",
+  // reason:"unverified_changes", items:[{qname, kind}], count, nudged, message}: the Assistant shows it under the answer.
+  var MCP_PROOF_STATE_KEY = "lib_ConvertigoMCP.proofState";
+  var VIBE_PROOF_NUDGES_MAX = 1;
+  var VIBE_PROOF_ITEMS_MAX = 15;
+  // A Playwright browser call that shows the page: by itself, or from the code of run_typescript.
+  var VIBE_BROWSER_PROOF_TOOL = /^(?:mcp_)?playwright[._\-]browser_(?:snapshot|evaluate|take_screenshot|click|navigate)/i;
+  var VIBE_BROWSER_PROOF_CODE = /\bmcp_playwright\s*\.\s*browser_(?:snapshot|evaluate|take_screenshot|click|navigate)\b/;
+  var VIBE_LETTER = "A-Za-z\\u00C0-\\u017F";
+  // A claim that the work is done (French or English), as whole words.
+  var VIBE_SUCCESS_CLAIM = new RegExp("(?:^|[^" + VIBE_LETTER + "])(corrig\\u00e9e?s?|r\\u00e9solue?s?|r\\u00e9gl\\u00e9e?s?|fonctionnent|fonctionne"
+    + "|fonctionnelle?s?|op\\u00e9rationnelle?s?|build (?:ok|r\\u00e9ussie?|termin\\u00e9e?|pass\\u00e9e?)|compilation r\\u00e9ussie|c['\\u2019]est bon|tout est bon"
+    + "|fixed|resolved|works|working|build (?:ok|succeeded|successful|passed|passes)|builds successfully)(?=$|[^" + VIBE_LETTER + "])", "gi");
+  // A negation just before the claim ("ne fonctionne pas", "not working", "doesn't work"): no claim.
+  var VIBE_NEGATED_CLAIM = /(?:(?:^|[^A-Za-z\u00C0-\u017F])(?:ne|n['\u2019]|pas|plus|not|no|never|jamais)|n['\u2019]t)\s+(?:\S+\s+)?$/i;
+  // The answer already says some changes are not verified.
+  var VIBE_SAYS_UNVERIFIED = new RegExp("(?:^|[^" + VIBE_LETTER + "])(?:non v\\u00e9rifi\\u00e9e?s?|non prouv\\u00e9e?s?|pas (?:encore )?(?:pu |\\u00e9t\\u00e9 )?(?:v\\u00e9rifi|prouv|test)"
+    + "|reste(?:nt)? \\u00e0 (?:v\\u00e9rifier|prouver|tester)|sans preuve|\\u00e0 v\\u00e9rifier|not (?:yet )?(?:been )?(?:verified|proven|tested)|could(?: not|n't) (?:verify|prove|test)"
+    + "|unverified|unproven|untested|(?:remains?|needs?|still) to be (?:verified|proven|tested))", "i");
+
+  function vibeClaimsSuccess(text) {
+    var body = String(text || "");
+    var pattern = new RegExp(VIBE_SUCCESS_CLAIM.source, "gi");
+    var match;
+    while ((match = pattern.exec(body)) !== null) {
+      var before = body.substring(Math.max(0, match.index - 30), match.index + match[0].length - match[1].length);
+      if (!VIBE_NEGATED_CLAIM.test(before)) {
+        return true;
+      }
+      if (match[0].length === 0) {
+        pattern.lastIndex++;
+      }
+    }
+    return false;
+  }
+
+  function vibeSaysUnverified(text) {
+    return VIBE_SAYS_UNVERIFIED.test(String(text || ""));
+  }
+
+  // A tool call that proves a page in the browser: remembered at its start, counted when it completes.
+  function rememberVibeBrowserProofCall(entry, toolCallId, title, rawInput) {
+    var id = trim(toolCallId);
+    if (!id.length) {
+      return;
+    }
+    var name = trim(String(title || "").split(/[\s:(]/)[0]);
+    var code = rawInput && typeof rawInput === "object" ? String(rawInput.code || "") : "";
+    if (VIBE_BROWSER_PROOF_TOOL.test(name) || (/^run_typescript$/i.test(name) && VIBE_BROWSER_PROOF_CODE.test(code))) {
+      entry.browserProofCalls = entry.browserProofCalls || {};
+      entry.browserProofCalls[id] = true;
+    }
+  }
+
+  function noteVibeBrowserProofDone(entry, toolCallId, status) {
+    var id = trim(toolCallId);
+    if (!id.length || !entry.browserProofCalls || entry.browserProofCalls[id] !== true) {
+      return;
+    }
+    if (status === "completed") {
+      entry.turnBrowserProofAt = now();
+    }
+    if (status === "completed" || status === "failed" || status === "cancelled") {
+      delete entry.browserProofCalls[id];
+    }
+  }
+
+  // The changes of this turn the MCP holds unproven ([{qname, project, kind, changedAt}]), or null without data.
+  function vibeUnprovenChanges(entry) {
+    try {
+      var id = trim(entry.mcpConversationId);
+      var store = id.length ? getServerStore() : null;
+      var states = store !== null && typeof store !== "undefined" ? store.get(MCP_PROOF_STATE_KEY) : null;
+      var text = states === null || typeof states === "undefined" ? null : states.get(id);
+      if (text === null || typeof text === "undefined") {
+        return null;
+      }
+      var state = JSON.parse(String(text));
+      if (!state || Number(state.v) !== 1 || !state.unproven || typeof state.unproven.length !== "number") {
+        return null;
+      }
+      var since = Number(entry.turnStartedAt || 0);
+      var browserAt = Number(entry.turnBrowserProofAt || 0);
+      var left = [];
+      for (var i = 0; i < state.unproven.length; i++) {
+        var item = state.unproven[i];
+        if (!item || !trim(item.qname).length || !(Number(item.changedAt) >= since)) {
+          continue;
+        }
+        if (trim(item.kind) === "ui" && browserAt > Number(item.changedAt)) {
+          continue;
+        }
+        left.push({ qname: trim(item.qname), project: trim(item.project), kind: trim(item.kind) || "backend", changedAt: Number(item.changedAt) });
+      }
+      return left;
+    } catch (_ignoreProofState) {
+      return null;
+    }
+  }
+
+  function vibeProofItemsLine(items) {
+    var shown = items.slice(0, VIBE_PROOF_ITEMS_MAX).map(function (item) {
+      return "`" + item.qname + "` (" + item.kind + ")";
+    });
+    return shown.join(", ") + (items.length > shown.length ? " and " + (items.length - shown.length) + " more" : "");
+  }
+
+  // The corrective prompt when the answer claims success over unproven changes; true when the turn goes on with it.
+  function sendVibeProofNudge(entry, message) {
+    var result = message.result || {};
+    var stopReason = trim(result.stopReason || result.stop_reason || "");
+    if ((stopReason.length && stopReason !== "end_turn") || entry.turnInterrupted === true || entry.turnWriteRefused === true
+        || entry.turnActive !== true || entry.status !== "running" || !trim(entry.sessionId).length
+        || Number(entry.turnProofNudges || 0) >= VIBE_PROOF_NUDGES_MAX) {
+      return false;
+    }
+    var text = vibeFinalText(entry);
+    if (!text.length || !vibeClaimsSuccess(text) || vibeSaysUnverified(text)) {
+      return false;
+    }
+    var items = vibeUnprovenChanges(entry);
+    if (items === null || !items.length) {
+      return false;
+    }
+    var prompt = "Note from the Agent Bridge: your answer says the work is done, but " + items.length + " object(s) you changed in this "
+      + "turn have no proof after their last change: " + vibeProofItemsLine(items) + ". Prove them now: `requestable-execute` for a "
+      + "sequence or a transaction, `browser-verify` for a page. If you cannot, tell the user clearly which ones are not verified and why. "
+      + "Never call them fixed, working or build OK without that proof.";
+    var nudged;
+    try {
+      nudged = sendAcpRequest(entry, "session/prompt", { sessionId: entry.sessionId, prompt: [{ type: "text", text: prompt }] });
+    } catch (_ignoreProofNudgeSend) {
+      return false;
+    }
+    entry.turnProofNudges = Number(entry.turnProofNudges || 0) + 1;
+    entry.turnRequestId = String(nudged.id);
+    entry.turnTail = "";
+    entry.turnFinalText = "";
+    entry.turnFinalTextOverflow = false;
+    pushEvent(entry, "turn/nudge", {
+      reason: "unproven_changes",
+      tool: "",
+      count: entry.turnProofNudges,
+      max: VIBE_PROOF_NUDGES_MAX,
+      endedRequestId: message.id,
+      requestId: nudged.id,
+      text: "",
+      textLength: text.length,
+      error: "",
+      plan: null,
+      items: items.slice(0, VIBE_PROOF_ITEMS_MAX).map(function (item) { return { qname: item.qname, kind: item.kind }; }),
+      itemCount: items.length
+    });
+    var line = "Agent Bridge: the agent called its work done with " + items.length + " change(s) not proven after their last change; it was "
+      + "asked to prove them or say so (" + entry.turnProofNudges + "/" + VIBE_PROOF_NUDGES_MAX + ").";
+    pushEvent(entry, "progress/message", { text: line, nudge: "unproven_changes" });
+    try { log.info("(lib_ConvertigoAgentBridge) " + line + " Handle " + entry.handle); } catch (_ignoreProofNudgeLog) {}
+    return true;
+  }
+
+  // Just before a Vibe turn's turn/end: the changes still unproven, if any.
+  function pushVibeUnprovenWarning(entry) {
+    var items = vibeUnprovenChanges(entry);
+    if (items === null || !items.length) {
+      return;
+    }
+    pushEvent(entry, "warning", {
+      phase: "turn/proof",
+      reason: "unverified_changes",
+      items: items.slice(0, VIBE_PROOF_ITEMS_MAX).map(function (item) { return { qname: item.qname, kind: item.kind }; }),
+      count: items.length,
+      nudged: Number(entry.turnProofNudges || 0) > 0,
+      message: items.length + " change(s) not proven after their last change"
+    });
+  }
+
   var VIBE_MCP_LOST_FAILURES_MAX = 3;
   var VIBE_MCP_LOST_STOP_GRACE_MILLIS = 15000;
 
@@ -15702,6 +15892,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   // reads on) and its turn; the old entry pushes nothing more.
   var VIBE_ADOPTED_TURN_FIELDS = ["turnActive", "turnRequestId", "turnNudges", "turnPrintedCallRetries", "turnActed", "turnToolCalls",
     "turnWriteRefused", "turnStartedAt", "turnMcpRestarts", "turnMcpResumes", "turnPromptBlocks", "turnPromptMessageId",
+    "turnProofNudges", "turnBrowserProofAt",
     "planEntries", "seenToolNames", "gatewayBudgetRefusal", "gatewayBudgetProbed", "mcpConversationId"];
 
   function adoptVibeTurn(entry, old) {
@@ -15776,6 +15967,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       eventData.status = update.status || "";
       rememberToolCallTitle(entry, eventData.toolCallId, eventData.title, update.kind);
       rememberAcpToolStart(entry, eventData.toolCallId);
+      rememberVibeBrowserProofCall(entry, eventData.toolCallId, eventData.title, update.rawInput || update.raw_input || null);
       entry.turnTail = "";
       entry.turnFinalText = "";
       entry.turnFinalTextOverflow = false;
@@ -15809,6 +16001,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       var lost = eventData.status === "failed"
         ? vibeMcpLostReason(eventData.title || (entry.toolCallTitles && entry.toolCallTitles[trim(eventData.toolCallId)]) || "", failure, refusal)
         : "";
+      noteVibeBrowserProofDone(entry, eventData.toolCallId, eventData.status);
       pushEvent(entry, "tool/update", eventData);
       if (lost.length) {
         noteVibeMcpLost(entry, lost, refusal !== null ? refusal : { code: failure.code });
@@ -15918,6 +16111,8 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
             });
           } else if (entry.provider === "vibe" && sendVibeTurnNudge(entry, message)) {
             // The turn goes on with the nudge: its own answer ends it.
+          } else if (entry.provider === "vibe" && sendVibeProofNudge(entry, message)) {
+            // The answer claimed success over changes nothing proved: the turn goes on with the corrective prompt.
           } else {
             var ended = message.result || {};
             var endedStopReason = trim(ended.stopReason || ended.stop_reason || "");
@@ -15929,6 +16124,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
               pending.response.result = ended;
               pushEvent(entry, "turn/incomplete", ended.error);
               pushEvent(entry, "progress/message", {text: ended.error.message, code: "PRINTED_TOOL_CALL"});
+            }
+            if (entry.provider === "vibe") {
+              pushVibeUnprovenWarning(entry);
             }
             pushEvent(entry, "turn/end", {
               requestId: message.id,

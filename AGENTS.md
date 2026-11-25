@@ -707,6 +707,17 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - Run `node --test tests/vibe_mcp_unavailable_at_start.test.js tests/vibe_mcp_lost_resume.test.js tests/vibe_mcp_lost.test.js`
   and the Bridge suite.
 
+## Unproven changes at the end of a Vibe turn
+
+- Contract with lib_ConvertigoMCP (server store key `lib_ConvertigoMCP.proofState`, a map from the conversation id of
+  `X-Convertigo-Conversation-Id` to `{"v":1,"unproven":[{qname,project,kind,changedAt}],"lastProof":...}`) and with
+  the Assistant (warning `unverified_changes`): see docs/bridge-contract.md. Read defensively: no data, nothing done.
+- `sendVibeProofNudge` runs after the other nudges, once per user message (`turnProofNudges`, not counted in
+  VIBE_TURN_NUDGES_MAX), only for an `end_turn` whose last message claims success (`vibeClaimsSuccess`, negations
+  excluded) without saying what is not verified (`vibeSaysUnverified`). `pushVibeUnprovenWarning` runs before every
+  Vibe `turn/end`. UI items are proven by a Playwright browser call the Bridge saw complete after their change.
+- Run `node --test tests/vibe_unproven_changes.test.js` and the Bridge suite.
+
 ## Event Flow
 
 - Assistant UI reads agent progress through `agent_events` / long polling.

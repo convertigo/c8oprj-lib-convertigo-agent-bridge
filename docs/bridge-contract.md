@@ -289,6 +289,37 @@ comportement : le process est arrete si le tour tourne encore 15 s plus tard
 sur la meme session (`warning` `mcp_lost_restart`) : le nouveau process relit ses
 outils et son jeton MCP.
 
+### Changements non prouves en fin de tour (Vibe)
+
+lib_ConvertigoMCP ecrit, pour chaque conversation qu'il recoit dans
+`X-Convertigo-Conversation-Id`, l'etat de ses preuves dans `context.server`, sous
+`lib_ConvertigoMCP.proofState` : une map de l'id de conversation vers une chaine
+JSON `{"v":1, "at", "writes", "unproven":[{"qname", "project", "kind":
+"backend"|"ui"|"file", "changedAt"}], "lastProof": {"tool", "target", "at",
+"ok"}|null}`. Le Bridge la lit sans rien supposer (cle, map ou entree absente,
+`v` autre que 1 : rien). Quand le dernier message du modele finirait un tour, il
+garde les elements de `changedAt` posterieur au debut du tour de l'utilisateur et
+retire les `ui` qu'un appel Playwright vu par le Bridge (`browser_snapshot`,
+`browser_evaluate`, `browser_take_screenshot`, `browser_click`,
+`browser_navigate` du serveur `playwright`, ou un `run_typescript` qui les appelle)
+a prouves en reussissant apres leur changement.
+
+- S'il en reste et que la reponse se dit reussie (corrige, resolu, regle,
+  fonctionne, operationnel, build OK/reussi, c'est bon, fixed, resolved, works,
+  working, build OK/succeeded..., hors negation) sans dire deja qu'ils ne sont pas
+  verifies (non verifie, pas pu verifier, reste a verifier, non prouve, not
+  verified, could not verify, unverified...), le Bridge envoie dans le meme tour
+  une consigne : prouver les QNames listes (15 au plus) avec `requestable-execute`
+  ou `browser-verify`, ou dire clairement a l'utilisateur lesquels ne sont pas
+  verifies et pourquoi. Une seule par message de l'utilisateur, hors du compte des
+  autres relances : `turn/nudge` de raison `unproven_changes` (`items`,
+  `itemCount`) et une ligne `progress/message`.
+- Qu'il ait relance ou non, un tour qui finit (son `turn/end`, arret compris) avec
+  des elements restants pousse juste avant son `turn/end` un `warning`
+  `{phase: "turn/proof", reason: "unverified_changes", items: [{qname, kind}]
+  (15 au plus), count: <total>, nudged: true|false, message: "<N> change(s) not
+  proven after their last change"}`.
+
 ### MCP Convertigo absent au demarrage d'une session Vibe
 
 Vibe 3.1 resout ses serveurs MCP au demarrage d'une session (`session/new`,
