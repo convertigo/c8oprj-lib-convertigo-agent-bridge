@@ -84,7 +84,8 @@ same context.
 - Always retain loopback hosts in child `NO_PROXY`, even with the engine proxy
   disabled. Failed PAC resolution must stop before spawning a network process.
   Gateway model discovery uses the engine HTTP client and the same proxy helper.
-- The managed Vibe runtime is pinned to `mistral-vibe==3.1.0`; generated configs
+- The managed Vibe runtime is the 3.1 line: installs ask pip for
+  `mistral-vibe>=3.1.0,<3.2` (MANAGED_VIBE_LINE, MANAGED_VIBE_MINIMUM); generated configs
   enable the system trust store. Cover proxy changes with
   `node --test tests/proxy_transport.test.js` and preserve cached model fallback.
 - Refresh model capabilities from the installed CLI after setup. A runtime
@@ -916,7 +917,7 @@ it never executes printed arguments. Keep ordinary answers, questions and malfor
 The short announcement detector also recognizes present-tense verification after a write;
 read-only turns and requests for user input still finish normally.
 Run `node --test tests/vibe_turn_nudge.test.js` and the Bridge suite after changing it.
-Before changing the runtime pin, set `VIBE_TEST_PYTHONS` to a JSON array of the
+Before changing the managed runtime line, set `VIBE_TEST_PYTHONS` to a JSON array of the
 Python executables for the previous and new installed runtimes, then run that
 test. It validates the generated `mistral` and `convertigo` configurations and
 feeds their actual ACP serializers through the turn handler, entirely offline.
@@ -1019,12 +1020,17 @@ Printed `todo({...})` calls are recognized too. After bounded nudges fail, the t
 
 ## Managed runtime update target
 
-- The qualified package version has one source of truth in MANAGED_VIBE_VERSION.
-  Installation and the update action must use that same target. Registry discovery
-  may report a newer package, but that alone does not change the qualified target.
-- runtime.latestVersion is the update action's target; availableVersion retains
-  the registry result. Existing cached registry checks must follow the current
-  target without rewriting the cache or starting a runtime.
+- The qualified Vibe runtime is a line, not one version: every 3.1.x is fine
+  (MANAGED_VIBE_LINE "3.1", MANAGED_VIBE_MINIMUM "3.1.0", decided 25/11). Installation
+  and the update action ask pip for `mistral-vibe>=3.1.0,<3.2`, so they get the newest
+  3.1.x; an installed 3.1.x is never reinstalled unless the install is forced.
+- The registry check (`pip index versions`) keeps the released versions (`versions`).
+  runtime.latestVersion and targetVersion are the newest final 3.1.x among them
+  (`managedVibeTargetVersion`), never 3.2 or a pre-release; availableVersion retains
+  the registry's newest package. An installed 3.1.x is up to date unless a newer
+  3.1.x exists; an older line (3.0.x) is offered the newest 3.1.x. Existing cached
+  registry checks (without the list) follow the line without rewriting the cache or
+  starting a runtime. Releases after 3.1.0 were not benched when the line was opened.
 - Run tests/runtime_update_target.test.js with the runtime and proxy suites.
 
 ## Printed JSON tool calls

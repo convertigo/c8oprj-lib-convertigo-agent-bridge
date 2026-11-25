@@ -315,10 +315,10 @@ for (const policy of ['files', 'mcp-only']) {
     });
   }
 }
-test('managed ACP commands never enable blanket approval and runtime version stays pinned', () => {
+test('managed ACP commands never enable blanket approval and the runtime stays on the 3.1 line', () => {
   assert.doesNotMatch(vibeSource, /--auto-approve|--yolo/);
   assert.match(vibeSource, /managedVibePackageRequirement\(\)/);
-  assert.equal(managedVibePackageRequirement(), "mistral-vibe==3.1.0");
+  assert.equal(managedVibePackageRequirement(), "mistral-vibe>=3.1.0,<3.2");
   assert.match(withEngine('files', () => writtenConfig(noCode)), /default_agent = "accept-edits"/);
   assert.match(withEngine('files', () => writtenConfig(noCode)), /enable_auto_approve = false\nbypass_tool_permissions = false/);
 });

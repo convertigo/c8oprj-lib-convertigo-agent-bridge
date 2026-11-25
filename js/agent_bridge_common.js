@@ -181,7 +181,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   var RUNTIME_UPDATE_CACHE_KEY = "lib_ConvertigoAgentBridge.runtimeUpdateCache.v1";
   var RUNTIME_UPDATE_CACHE_FILE = "runtime-update-checks.json";
   var DEFAULT_RUNTIME_UPDATE_CACHE_MS = 21600000;
-  var MANAGED_VIBE_VERSION = "3.1.0";
+  // The managed Vibe runtime: any release of the 3.1 line (3.1.0 and later 3.1.x), never 3.2 or later. Installs ask pip
+  // for the newest 3.1.x; an installed 3.1.x is up to date unless the registry has a newer 3.1.x.
+  var MANAGED_VIBE_LINE = "3.1";
+  var MANAGED_VIBE_MINIMUM = "3.1.0";
   var STORAGE_CLEANUP_FILE = "storage-cleanup.json";
   var DEFAULT_STORAGE_CLEANUP_INTERVAL_MS = 21600000;
   var DEFAULT_STORAGE_ORPHAN_GRACE_MS = 86400000;
@@ -11371,8 +11374,32 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     return 0;
   }
 
+  // "mistral-vibe>=3.1.0,<3.2": pip takes the newest release of the managed line.
   function managedVibePackageRequirement() {
-    return "mistral-vibe==" + MANAGED_VIBE_VERSION;
+    var parts = MANAGED_VIBE_LINE.split(".");
+    return "mistral-vibe>=" + MANAGED_VIBE_MINIMUM + ",<" + parts[0] + "." + (parseInt(parts[1], 10) + 1);
+  }
+
+  // A final release of the managed line (3.1.x), not a pre-release (3.1.6rc1, 3.1.6.dev1, 3.1.6-beta.1).
+  function vibeVersionInManagedLine(version) {
+    var text = trim(version);
+    return text.indexOf(MANAGED_VIBE_LINE + ".") === 0 && /^\d+\.\d+\.\d+$/.test(text)
+      && compareRuntimeVersions(text, MANAGED_VIBE_MINIMUM) >= 0;
+  }
+
+  // The newest release of the managed line the registry check found (its version list, or its newest version for a
+  // check cached before the list was kept), else the line's minimum: never a 3.2 or later.
+  function managedVibeTargetVersion(latest) {
+    latest = latest || {};
+    var candidates = (latest.versions && typeof latest.versions.length === "number" ? latest.versions : []).concat([latest.latestVersion]);
+    var target = MANAGED_VIBE_MINIMUM;
+    for (var i = 0; i < candidates.length; i++) {
+      var version = trim(candidates[i]);
+      if (vibeVersionInManagedLine(version) && compareRuntimeVersions(version, target) > 0) {
+        target = version;
+      }
+    }
+    return target;
   }
 
   function runtimeUpdateStatus(provider, command, latest, source) {
@@ -11380,9 +11407,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     latest = latest || {};
     var installedVersion = extractRuntimeVersion(command.version);
     var availableVersion = extractRuntimeVersion(latest.latestVersion);
-    // The update action installs the qualified version, not necessarily the registry's newest package.
-    // Apply this when reading old cached checks too, without changing the registry cache itself.
-    var latestVersion = provider === "vibe" && availableVersion.length ? MANAGED_VIBE_VERSION : availableVersion;
+    // Vibe: the update action installs the newest release of the managed line, not necessarily the registry's newest
+    // package. Apply this when reading old cached checks too, without changing the registry cache itself.
+    var vibeTarget = provider === "vibe" ? managedVibeTargetVersion(latest) : "";
+    var latestVersion = provider === "vibe" && availableVersion.length ? vibeTarget : availableVersion;
     return {
       provider: provider,
       installed: command.found === true,
@@ -11391,7 +11419,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       installedVersion: installedVersion,
       latestVersion: latestVersion,
       availableVersion: availableVersion,
-      targetVersion: provider === "vibe" ? MANAGED_VIBE_VERSION : latestVersion,
+      targetVersion: provider === "vibe" ? vibeTarget : latestVersion,
       checked: latest.checked === true,
       cached: latest.cached === true,
       updateAvailable: installedVersion.length > 0 && latestVersion.length > 0 && compareRuntimeVersions(installedVersion, latestVersion) < 0,
@@ -11493,9 +11521,20 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       });
       var text = String((probe.stdout || "") + "\n" + (probe.stderr || ""));
       var match = text.match(/mistral-vibe\s*\(([^)]+)\)/i) || text.match(/Available versions:\s*([^\s,]+)/i);
+      // The released versions, newest first: the update target is the newest of the managed line among them.
+      var listed = text.match(/Available versions:\s*([^\r\n]+)/i);
+      var versions = [];
+      (listed ? listed[1].split(",") : []).forEach(function (item) {
+        // as listed: a pre-release keeps its suffix (3.1.6rc1), so it is never taken for a release
+        var version = trim(item);
+        if (/^\d+(?:\.\d+)+[0-9A-Za-z.+\-]*$/.test(version) && versions.indexOf(version) < 0) {
+          versions.push(version);
+        }
+      });
       return {
         checked: true,
         latestVersion: match ? extractRuntimeVersion(match[1]) : "",
+        versions: versions,
         error: probe.ok ? "" : String(probe.stderr || probe.error || "PyPI version check failed")
       };
     });
