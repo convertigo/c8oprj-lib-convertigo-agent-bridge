@@ -426,7 +426,14 @@
       after: mcpAfter,
       message: "The Convertigo MCP changed while Vibe started: Vibe starts again to read its tools."
     });
-    stopEntry(entry, true);
+    if (entry.adoptedTurn === true) {
+      // a restart in place (restartVibeInPlace): the next start takes this entry's turn and stream again
+      entry.restartingInPlace = true;
+      entry.status = "restarting";
+      stopEntryProcess(entry);
+    } else {
+      stopEntry(entry, true);
+    }
     if (boolValue(options.mcpGenerationRetry, false) || !waitForStableMcpGeneration(MCP_GENERATION_WAIT_MS).length) {
       return { ok: false, status: "error", phase: "mcp/unavailable", handle: trim(entry.handle), error: VIBE_MCP_UPDATING_MESSAGE, timestamp: now() };
     }
@@ -437,6 +444,9 @@
       }
     }
     again.mcpGenerationRetry = true;
+    if (entry.adoptedTurn === true) {
+      again.restartInPlace = "true";
+    }
     startupMark("mcp/restart");
     return startAgain(again);
   }
@@ -471,6 +481,18 @@
     } catch (_ignoreStartSweep) {}
     var existing = registry.get(handle);
     var timeoutMs = intValue(options.requestTimeoutMs, 60000, 1000, 600000);
+    // A restart within the running turn (restartVibeInPlace): the old process stops here, without any event, and the
+    // new one takes its turn and its event stream (adoptVibeTurn).
+    var inPlaceOf = null;
+    if (boolValue(options.restartInPlace, false) && existing !== null && typeof existing !== "undefined" && existing.restartingInPlace === true) {
+      inPlaceOf = existing;
+      existing = null;
+      if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
+        options.sessionId = trim(inPlaceOf.sessionId);
+      }
+      inPlaceOf.status = "restarting";
+      stopEntryProcess(inPlaceOf);
+    }
     // A prewarm never changes a process its conversation already has (a late prewarm call must not reset its model),
     // unless the Convertigo MCP was replaced since it started: it is started again now, not at the user's message.
     if (boolValue(options.prewarm, false) && existing !== null && typeof existing !== "undefined"
@@ -496,6 +518,24 @@
         cause: trim(existing.restartReason),
         detail: existing.restartDetail || null,
         message: "Vibe restarts on this conversation to get the Convertigo MCP back."
+      });
+      stopEntry(existing, true);
+      existing = null;
+    }
+    // A process that started without its Convertigo tools (convertigoMcpMissing: the probe failed or Vibe said so) is
+    // replaced as soon as the MCP answers; while it does not, it is kept and its next prompt waits for the MCP.
+    if (existing !== null && typeof existing !== "undefined" && existing.convertigoMcpMissing && existing.turnActive !== true
+        && existing.mcpProbeTarget && processAlive(existing.process) && !boolValue(options.prewarm, false)
+        && convertigoMcpProbeHttp(existing.mcpProbeTarget, {}).ok === true) {
+      if (!trim(options.sessionId || options.externalSessionId || options.vibeSessionId).length) {
+        options.sessionId = trim(existing.sessionId);
+      }
+      pushEvent(existing, "warning", {
+        phase: "vibe/mcp",
+        reason: "convertigo_mcp_restarted",
+        cause: "convertigo_mcp_unavailable_at_start",
+        resent: false,
+        message: "The Convertigo MCP answers again: Vibe restarts on this conversation to get its tools."
       });
       stopEntry(existing, true);
       existing = null;
@@ -759,6 +799,18 @@
       applyGatewayBudgetHook(env, noCodeSandbox);
     }
     startupMark("sandbox");
+    // The Convertigo MCP this session will read its tools from, probed before Vibe starts: Vibe resolves its servers
+    // once, at the start of the session. A start waits a little for it; past that, the process starts marked and its
+    // prompt waits for the MCP within the turn (see vibeMcpConnectNotices in agent_bridge_common.js).
+    var mcpProbeTarget = convertigoMcpProbeTarget(mcpEndpoint, options);
+    var mcpAtStart = null;
+    if (mcpProbeTarget !== null) {
+      mcpAtStart = convertigoMcpProbeHttp(mcpProbeTarget, {});
+      if (!mcpAtStart.ok && !boolValue(options.prewarm, false) && inPlaceOf === null) {
+        mcpAtStart = waitForConvertigoMcp(mcpProbeTarget, CONVERTIGO_MCP_START_WAIT_MS, null, null).last;
+      }
+      startupMark("mcp/probe");
+    }
     var noCode = normalizeSkillProfile(options) === "nocode";
     var ttlMillis = intValue(options.ttlSeconds, noCode ? NOCODE_TTL_SECONDS : DEFAULT_TTL_SECONDS, 30, 86400) * 1000;
     var entry = createEntry(handle, "vibe", "acp", command, cwd, env, ttlMillis, setup.setup.home, credentials, requestedModel || setup.setup.model);
@@ -782,6 +834,20 @@
     entry.mcpCatalogKey = trim(options.mcpCatalogKey);
     entry.settingsProbe = settingsProbe;
     entry.mcpGeneration = mcpBefore;
+    entry.mcpProbeTarget = mcpProbeTarget;
+    if (mcpAtStart !== null && mcpAtStart.ok !== true) {
+      entry.convertigoMcpMissing = { source: "probe", error: mcpAtStart.code, at: now() };
+    }
+    // what a restart within a turn starts again with (restartVibeInPlace)
+    entry.startOptions = {};
+    for (var startOption in options) {
+      if (Object.prototype.hasOwnProperty.call(options, startOption) && startOption !== "restartInPlace" && startOption !== "prewarm") {
+        entry.startOptions[startOption] = options[startOption];
+      }
+    }
+    if (inPlaceOf !== null) {
+      adoptVibeTurn(entry, inPlaceOf);
+    }
     entry.toolPolicy = vibeToolPolicy(options);
     entry.noCodePolicy = noCodeSandbox !== null ? noCodeSandbox.policy : noCodeToolPolicyName(options);
     entry.sandbox = agentSessionSandbox(options, "vibe", noCodeSandbox);
@@ -923,12 +989,18 @@
       entry.status = "error";
       entry.lastError = String(e);
       entry.closedAt = now();
-      pushEvent(entry, "error", {
-        message: String(e),
-        phase: entry.phase,
-        acpError: e.acpError || null
-      });
-      stopEntry(entry, false);
+      if (entry.adoptedTurn === true) {
+        // a restart within a turn: the recovery ends the turn with its own message (endVibeTurnWithoutMcp)
+        entry.eventsDetached = true;
+        stopEntryProcess(entry);
+      } else {
+        pushEvent(entry, "error", {
+          message: String(e),
+          phase: entry.phase,
+          acpError: e.acpError || null
+        });
+        stopEntry(entry, false);
+      }
       return {
         ok: false,
         status: "error",
@@ -1265,10 +1337,16 @@
     if (entry.turnActive === true) {
       return { ok: false, status: "busy", handle: handle, error: "A turn is already running in this conversation", state: statusOf(entry), timestamp: now() };
     }
+    if (entry.convertigoMcpMissing && entry.mcpProbeTarget) {
+      return deferVibePromptUntilMcp(entry, handle, messageId, promptBlocks, promptText.length, images.blocks.length, described);
+    }
 
     try {
       entry.mcpLostFailures = 0;
       var pending = sendAcpRequest(entry, "session/prompt", params);
+      // the message, for a restart of Vibe within this turn (restartVibeInPlace)
+      entry.turnPromptBlocks = promptBlocks;
+      entry.turnPromptMessageId = messageId;
       pushEvent(entry, "turn/start", {
         requestId: pending.id,
         messageId: messageId,
@@ -1320,6 +1398,36 @@
     }
   };
 
+  // A prompt to a process that started without its Convertigo tools: the turn starts now, without Vibe, waits for the
+  // MCP (progress lines), then Vibe restarts on the same session and gets the message, or the turn ends saying the MCP
+  // does not answer (beginVibeMcpRecovery).
+  function deferVibePromptUntilMcp(entry, handle, messageId, promptBlocks, textLength, imageCount, described) {
+    var missing = entry.convertigoMcpMissing || {};
+    var requestId = "mcp-wait-" + now();
+    entry.mcpLostFailures = 0;
+    pushEvent(entry, "turn/start", {
+      requestId: requestId,
+      messageId: messageId,
+      textLength: textLength,
+      imageCount: imageCount,
+      deferred: "convertigo_mcp"
+    });
+    entry.turnPromptBlocks = promptBlocks;
+    entry.turnPromptMessageId = messageId;
+    var turnCursor = entry.nextIndex;
+    pushDescribedImageEvents(entry, described);
+    pushEvent(entry, "warning", {
+      phase: "vibe/mcp",
+      reason: "convertigo_mcp_unavailable_at_start",
+      source: trim(missing.source) || "probe",
+      error: trim(missing.error),
+      message: "Vibe started this session without the Convertigo MCP (" + (trim(missing.error) || "no answer")
+        + "): the turn waits for the MCP, then Vibe restarts on this conversation."
+    });
+    beginVibeMcpRecovery(entry, "deferred", "convertigo_mcp_unavailable_at_start", false);
+    return { ok: true, status: "submitted", handle: handle, requestId: requestId, cursor: turnCursor, state: statusOf(entry), timestamp: now() };
+  }
+
   C8O.agentBridge.vibeClose = function (options) {
     options = options || {};
     var handle = resolveHandle(options.handle);
@@ -1335,6 +1443,7 @@
     // An explicit close is the fallback when session/cancel did not finish the turn.
     // Do not wait on another protocol write (session/close) to the same blocked pipe.
     var stateBeforeRemove = statusOf(entry);
+    abortVibeMcpRecovery(entry, "closed");
     stopConversationSubagents(entry, "its conversation was closed");
     stopEntry(entry, true);
     return {

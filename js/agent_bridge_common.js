@@ -2580,7 +2580,20 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     return "";
   }
 
+  // A thread of the Bridge (a reader, a watchdog, the MCP recovery) runs after the request that started it: the request
+  // it would read is over, or already serves another call, so it reads none.
+  function onBridgeThread() {
+    try {
+      return String(Thread.currentThread().getName()).indexOf("lib_ConvertigoAgentBridge-") === 0;
+    } catch (_ignoreThreadName) {
+      return false;
+    }
+  }
+
   function requestParameter(name) {
+    if (onBridgeThread()) {
+      return "";
+    }
     try {
       var request = context && context.httpServletRequest ? context.httpServletRequest : null;
       if (request !== null) {
@@ -3874,6 +3887,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     }
     var requester = null;
     try {
+      if (onBridgeThread()) {
+        throw new Error("no request on a Bridge thread");
+      }
       requester = new InternalRequester(params, context.httpServletRequest);
     } catch (_ignoreHttpRequest) {
       requester = new InternalRequester(params);
@@ -8211,18 +8227,25 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     };
   }
 
+  // The store of the last request this scope served. Once a request ends, the engine takes `context` and `server` out of
+  // its scope ("context" is not defined): a thread of the Bridge that outlives it (a reader, a watchdog, the MCP
+  // recovery that restarts Vibe within its turn) reads the store that request read, not a fallback registry of its own.
+  var lastServerStore = null;
+
   function getServerStore() {
     try {
       if (context && context.server) {
-        return context.server;
+        lastServerStore = context.server;
+        return lastServerStore;
       }
     } catch (_ignoreContextServer) {}
     try {
       if (typeof server !== "undefined" && server) {
-        return server;
+        lastServerStore = server;
+        return lastServerStore;
       }
     } catch (_ignoreServer) {}
-    return null;
+    return lastServerStore;
   }
 
   function getRegistry() {
@@ -13669,6 +13692,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   }
 
   function pushEvent(entry, type, data) {
+    if (entry.eventsDetached === true) {
+      // A process restarted in place (restartVibeInPlace): its turn and its event stream went on in the new process.
+      return { index: -1, at: now(), type: String(type), data: data || {} };
+    }
     var event = {
       index: entry.nextIndex++,
       at: now(),
@@ -13694,6 +13721,11 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
         entry.turnToolCalls = 0;
         entry.gatewayBudgetRefusal = null;
         entry.gatewayBudgetProbed = false;
+        // The turn's restarts of Vibe for its Convertigo MCP (see beginVibeMcpRecovery): once each per user message.
+        entry.turnStartedAt = event.at;
+        entry.turnMcpRestarts = 0;
+        entry.turnMcpResumes = 0;
+        entry.mcpRecovery = null;
       }
       entry.turnActive = true;
       keepManagedMcpLease(entry);
@@ -13703,6 +13735,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       entry.turnRequestId = "";
       entry.turnFinalText = "";
       entry.turnFinalTextOverflow = false;
+      entry.turnPromptBlocks = null;
       touchManagedMcpLease(entry, true);
     }
     if (event.type === "turn/interrupt_requested") {
@@ -15130,6 +15163,553 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     return "core refusal: " + parts.join(", ");
   }
 
+  // The Convertigo MCP of a Vibe session: missing when it starts -----------------------------------------------------
+  //
+  // Vibe 3.1 resolves its MCP servers when a session starts (session/new, session/load). A Convertigo MCP that refuses
+  // the connection or the token then leaves the session without any Convertigo tool for its whole life, even once the
+  // MCP answers again. Vibe says it once, in an agent message of its own right after the session starts:
+  // "MCP server 'Convertigo' failed to connect: mcp_transport_failed." (or "authentication was rejected"). On a bench
+  // with the customer's stack the model then worked around the missing tools: curl to the MCP with the token of its
+  // environment (a turn of 7.5 min), or sleep and curl probes for more than 10 min, a turn that never ended. So:
+  // - before it starts a process for a session that uses the Convertigo MCP, the Bridge probes it (an MCP initialize
+  //   with the url and headers Vibe will use); a start waits up to CONVERTIGO_MCP_START_WAIT_MS for it, then starts
+  //   anyway and marks the process (convertigoMcpMissing), as the notice does;
+  // - a prompt to a marked process starts the turn without sending it: the turn waits for the MCP (a progress line
+  //   every CONVERTIGO_MCP_PROGRESS_MS, at most CONVERTIGO_MCP_WAIT_MS), then Vibe restarts on the same session within
+  //   the same turn (restartVibeInPlace) and gets the user's message;
+  // - a notice during a turn cancels it first (warning convertigo_mcp_unavailable_at_start), then the same; Vibe gets
+  //   the message again, once per user message (convertigo_mcp_restarted);
+  // - an MCP that does not come back ends the turn with a message that says so (warning convertigo_mcp_unreachable):
+  //   no turn runs without its tools.
+  var CONVERTIGO_MCP_PROBE_TIMEOUT_MS = 3000;
+  var CONVERTIGO_MCP_POLL_MS = 2000;
+  var CONVERTIGO_MCP_WAIT_MS = 60000;
+  var CONVERTIGO_MCP_START_WAIT_MS = 6000;
+  var CONVERTIGO_MCP_PROGRESS_MS = 15000;
+  // Restarts of Vibe for a Convertigo MCP missing at its start, per user message.
+  var VIBE_MCP_RESTARTS_PER_MESSAGE = 1;
+  // An entry under recovery stays in the registry, its process stopped or not, for at most this long.
+  var VIBE_MCP_RECOVERY_MAX_MS = 300000;
+  // An error is a code or a few words ("mcp_transport_failed", "authentication was rejected"): no period, no line break.
+  var VIBE_MCP_NOTICE_SOURCE = "MCP server '([^']+)' failed to connect: ([^.\\n]*?)\\.?(?=\\s+MCP server '|\\s*$)";
+  // The Convertigo servers of a Vibe home, by their lower-case name.
+  var VIBE_CONVERTIGO_MCP_SERVERS = { "convertigo": true, "convertigo-flow": true };
+
+  // A call to a tool of a Convertigo MCP server, by its ACP title.
+  function vibeConvertigoToolTitle(title) {
+    return /^(?:mcp_Convertigo\.|Convertigo_|mcp_convertigo_flow\.|convertigo-flow_)/i.test(trim(title));
+  }
+
+  // The Convertigo MCP a session reads its tools from, as Vibe calls it ({url, headers}), or null for a session without
+  // it (a settings probe, another endpoint).
+  function convertigoMcpProbeTarget(mcpEndpoint, options) {
+    options = options || {};
+    if (boolValue(options.settingsProbe, false) || !usesProtectedConvertigoMcp(mcpEndpoint, options)) {
+      return null;
+    }
+    var server = convertigoMcpSessionServer(mcpEndpoint, options);
+    if (server !== null) {
+      return { url: server.url, headers: server.headers };
+    }
+    // a Flow-only home: its `convertigo-flow` server is served by the same engine as the Legacy endpoint
+    var token = managedMcpBearerToken(options);
+    return {
+      url: vibeMcpTransportEndpoint(vibeLegacyMcpEndpoint(mcpEndpoint), options),
+      headers: token.length ? [{ name: "Authorization", value: "Bearer " + token }] : []
+    };
+  }
+
+  function readStreamText(stream, maxChars) {
+    var reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8));
+    var buffer = Packages.java.lang.reflect.Array.newInstance(Packages.java.lang.Character.TYPE, 4096);
+    var text = new Packages.java.lang.StringBuilder();
+    var read;
+    while (text.length() < maxChars && (read = reader.read(buffer, 0, 4096)) !== -1) {
+      text.append(buffer, 0, read);
+    }
+    return String(text.toString());
+  }
+
+  // One MCP initialize: {ok, code, status, ms, error}, code "ok", "connection_refused", "timeout", "unauthorized"
+  // (HTTP 401 or 403), "http_<status>", "rpc_error" or "error". A loopback url never goes through a proxy. state keeps
+  // the engine's session cookie between the probes of one wait.
+  var convertigoMcpProbeHttp = function (target, state) {
+    var started = now();
+    var connection = null;
+    var stream = null;
+    try {
+      var url = new URL(String(target.url));
+      var host = trim(url.getHost()).toLowerCase().replace(/^\[|\]$/g, "");
+      var loopback = host === "localhost" || host === "::1" || /^127\./.test(host) || /\.localhost$/.test(host);
+      connection = loopback ? url.openConnection(Packages.java.net.Proxy.NO_PROXY) : url.openConnection();
+      connection.setConnectTimeout(CONVERTIGO_MCP_PROBE_TIMEOUT_MS);
+      connection.setReadTimeout(CONVERTIGO_MCP_PROBE_TIMEOUT_MS);
+      connection.setInstanceFollowRedirects(false);
+      connection.setRequestMethod("POST");
+      connection.setDoOutput(true);
+      connection.setRequestProperty("Content-Type", "application/json");
+      connection.setRequestProperty("Accept", "application/json, text/event-stream");
+      var headers = target.headers || [];
+      for (var h = 0; h < headers.length; h++) {
+        connection.setRequestProperty(String(headers[h].name), String(headers[h].value));
+      }
+      if (state && trim(state.cookie).length) {
+        connection.setRequestProperty("Cookie", trim(state.cookie));
+      }
+      var body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+        protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "lib_ConvertigoAgentBridge-probe", version: "1" } } });
+      var output = connection.getOutputStream();
+      try {
+        output.write(new Packages.java.lang.String(body).getBytes(StandardCharsets.UTF_8));
+      } finally {
+        output.close();
+      }
+      var status = Number(connection.getResponseCode());
+      var cookie = responseSessionCookie(connection.getHeaderField("Set-Cookie"));
+      if (state && cookie.length) {
+        state.cookie = cookie;
+      }
+      stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+      var text = stream === null ? "" : readStreamText(stream, 65536);
+      var answered = status >= 200 && status < 300;
+      var code = answered ? (/"result"\s*:/.test(text) ? "ok" : "rpc_error") : (status === 401 || status === 403 ? "unauthorized" : "http_" + status);
+      return { ok: code === "ok", code: code, status: status, ms: now() - started, error: code === "ok" ? "" : text.substring(0, 300) };
+    } catch (probeError) {
+      var said = String(probeError && probeError.javaException ? probeError.javaException : probeError);
+      var failure = /ConnectException|Connection refused/i.test(said) ? "connection_refused"
+        : (/SocketTimeoutException|timed out/i.test(said) ? "timeout" : "error");
+      return { ok: false, code: failure, status: 0, ms: now() - started, error: said.substring(0, 300) };
+    } finally {
+      try { if (stream !== null) stream.close(); } catch (_ignoreProbeStream) {}
+      try { if (connection !== null) connection.disconnect(); } catch (_ignoreProbeDisconnect) {}
+    }
+  };
+  var convertigoMcpSleep = function (ms) {
+    Thread.sleep(ms);
+  };
+
+  // Probes until the MCP answers or budgetMs passes: {ok, attempts, waitedMs, last, stopped}. onWait(result, waitedMs)
+  // after each failed probe; stop() true ends the wait early (the turn was stopped, the conversation closed).
+  function waitForConvertigoMcp(target, budgetMs, onWait, stop) {
+    var started = now();
+    var state = {};
+    var attempts = 0;
+    var last = null;
+    while (true) {
+      last = convertigoMcpProbeHttp(target, state);
+      attempts++;
+      var waited = now() - started;
+      if (last.ok === true) {
+        return { ok: true, attempts: attempts, waitedMs: waited, last: last, stopped: false };
+      }
+      if (typeof onWait === "function") {
+        try { onWait(last, waited); } catch (_ignoreOnWait) {}
+      }
+      if (typeof stop === "function" && stop() === true) {
+        return { ok: false, attempts: attempts, waitedMs: waited, last: last, stopped: true };
+      }
+      if (waited + CONVERTIGO_MCP_POLL_MS > budgetMs) {
+        return { ok: false, attempts: attempts, waitedMs: waited, last: last, stopped: false };
+      }
+      convertigoMcpSleep(CONVERTIGO_MCP_POLL_MS);
+    }
+  }
+
+  // The "MCP server '<name>' failed to connect: <error>." notices a whole agent message is made of (Vibe joins those of
+  // several servers with a space), or [] for any other message.
+  function vibeMcpConnectNotices(text) {
+    var body = trim(text);
+    var found = [];
+    if (body.indexOf("MCP server '") !== 0) {
+      return found;
+    }
+    var pattern = new RegExp(VIBE_MCP_NOTICE_SOURCE, "g");
+    var covered = 0;
+    var match;
+    while ((match = pattern.exec(body)) !== null && match[0].length) {
+      covered += match[0].length;
+      found.push({ server: match[1], error: trim(match[2]), convertigo: VIBE_CONVERTIGO_MCP_SERVERS[String(match[1]).toLowerCase()] === true });
+    }
+    // only notices: what is left between them is their separating spaces
+    return body.replace(new RegExp(VIBE_MCP_NOTICE_SOURCE, "g"), "").replace(/\s+/g, "").length === 0 ? found : [];
+  }
+
+  // A notice is a line of the work log, never the answer. One that names a Convertigo server marks the process, unless
+  // a Convertigo tool already answered in it (a refresh that failed keeps the tools it had). During a turn on this
+  // process, the turn is cancelled and goes on in a restarted Vibe (beginVibeMcpRecovery); otherwise the next prompt
+  // waits for the MCP and restarts Vibe first (vibePrompt).
+  function noteVibeMcpConnectNotices(entry, notices, text) {
+    pushEvent(entry, "progress/message", { text: "Vibe: " + text, code: "mcp_connect_failed" });
+    var convertigo = null;
+    for (var i = 0; i < notices.length && convertigo === null; i++) {
+      convertigo = notices[i].convertigo === true ? notices[i] : null;
+    }
+    if (convertigo === null || entry.convertigoMcpCalled === true || entry.convertigoMcpMissing) {
+      return;
+    }
+    entry.convertigoMcpMissing = { source: "notice", server: convertigo.server, error: convertigo.error, at: now() };
+    try { log.warn("(lib_ConvertigoAgentBridge) Vibe started without the Convertigo MCP (" + convertigo.error + "), handle " + entry.handle); } catch (_ignoreNoticeLog) {}
+    var running = runningVibePrompt(entry);
+    if (running === null || (entry.mcpRecovery && entry.mcpRecovery.done !== true)) {
+      return;
+    }
+    var exhausted = Number(entry.turnMcpRestarts || 0) >= VIBE_MCP_RESTARTS_PER_MESSAGE;
+    pushEvent(entry, "warning", {
+      phase: "vibe/mcp",
+      reason: "convertigo_mcp_unavailable_at_start",
+      source: "notice",
+      server: convertigo.server,
+      error: convertigo.error,
+      message: "Vibe started this session without the Convertigo MCP (" + convertigo.error + "): the Bridge stops the turn"
+        + (exhausted ? " and ends it, Vibe was already restarted for this message." : ", waits for the MCP and restarts Vibe on this conversation.")
+    });
+    try {
+      TURN_INTERRUPT_ADAPTERS.acp(entry);
+    } catch (_ignoreNoticeCancel) {}
+    beginVibeMcpRecovery(entry, exhausted ? "unreachable" : "restart", "convertigo_mcp_unavailable_at_start", true, String(running.id));
+  }
+
+  // The session/prompt Vibe has not answered yet on this process (the turn's, or one sent an instant before its
+  // turn/start), or null.
+  function runningVibePrompt(entry) {
+    var current = trim(entry.turnRequestId).length ? entry.pending.get(trim(entry.turnRequestId)) : null;
+    if (current !== null && typeof current !== "undefined" && current.done !== true && current.method === "session/prompt") {
+      return current;
+    }
+    var values = [];
+    try {
+      values = typeof entry.pending.values().toArray === "function" ? entry.pending.values().toArray() : Array.from(entry.pending.values());
+    } catch (_ignorePendingValues) {}
+    for (var i = 0; i < values.length; i++) {
+      if (values[i] && values[i].method === "session/prompt" && values[i].done !== true) {
+        return values[i];
+      }
+    }
+    return null;
+  }
+
+  // The turn goes on without Vibe ending it: kind "restart" (Vibe gets the user's message again), "resume" (a
+  // continuation prompt, see noteVibeMcpLost), "deferred" (the message Vibe never got), "unreachable" (the turn ends).
+  // awaitTurn: the Bridge cancelled the running Vibe turn; the recovery starts when Vibe answers it, or after
+  // VIBE_MCP_LOST_STOP_GRACE_MILLIS without an answer, its process stopped.
+  function beginVibeMcpRecovery(entry, kind, cause, awaitTurn, requestId) {
+    var awaiting = awaitTurn ? trim(requestId || entry.turnRequestId) : "";
+    var recovery = { kind: kind, cause: cause, awaiting: awaiting, started: false, done: false, aborted: false, at: now() };
+    entry.mcpRecovery = recovery;
+    if (awaitTurn && recovery.awaiting.length) {
+      armVibeMcpRecoveryWatchdog(entry, recovery);
+    } else {
+      startVibeMcpRecovery(entry, recovery);
+    }
+    return recovery;
+  }
+
+  function armVibeMcpRecoveryWatchdog(entry, recovery) {
+    var watchdog = new Thread(new Runnable({
+      run: function () {
+        try {
+          Thread.sleep(VIBE_MCP_LOST_STOP_GRACE_MILLIS);
+        } catch (_ignoreRecoverySleep) {}
+        if (entry.mcpRecovery !== recovery || recovery.started || recovery.done || recovery.aborted || !trim(recovery.awaiting).length) {
+          return;
+        }
+        recovery.awaiting = "";
+        pushEvent(entry, "warning", {
+          phase: "vibe/mcp",
+          reason: "mcp_lost_process_stopped",
+          message: "Vibe did not end the turn after the cancel: the Bridge stopped the process."
+        });
+        entry.status = "restarting";
+        stopEntryProcess(entry);
+        startVibeMcpRecovery(entry, recovery);
+      }
+    }), "lib_ConvertigoAgentBridge-mcp-recovery-watchdog-" + entry.handle);
+    watchdog.setDaemon(true);
+    watchdog.start();
+  }
+
+  function startVibeMcpRecovery(entry, recovery) {
+    if (recovery.started || recovery.done || recovery.aborted) {
+      return;
+    }
+    recovery.started = true;
+    var worker = new Thread(new Runnable({
+      run: function () {
+        try {
+          runVibeMcpRecovery(entry, recovery);
+        } catch (recoveryError) {
+          endVibeTurnWithoutMcp(getRegistry().get(entry.handle) || entry, recovery, { code: "error", error: String(recoveryError) });
+        }
+      }
+    }), "lib_ConvertigoAgentBridge-mcp-recovery-" + entry.handle);
+    worker.setDaemon(true);
+    worker.start();
+  }
+
+  // A Stop, or the conversation closed, during a recovery: the turn ends as stopped. true when there was one.
+  function abortVibeMcpRecovery(entry, reason) {
+    var recovery = entry && entry.mcpRecovery;
+    if (!recovery || recovery.done === true || recovery.aborted === true) {
+      return false;
+    }
+    recovery.aborted = true;
+    recovery.done = true;
+    if (trim(recovery.awaiting).length) {
+      // Vibe has not answered the turn the Bridge cancelled: its late answer must not end the user's next turn
+      entry.swallowedPrompts = entry.swallowedPrompts || {};
+      entry.swallowedPrompts[trim(recovery.awaiting)] = true;
+    }
+    if (reason !== "closed" && entry.turnActive === true) {
+      pushEvent(entry, "turn/interrupt_requested", { protocol: "acp", reason: "mcp_recovery" });
+      pushEvent(entry, "turn/end", { requestId: trim(entry.turnRequestId), method: "session/prompt", result: { stopReason: "cancelled" } });
+    }
+    if (entry.status === "restarting" && !processAlive(entry.process)) {
+      entry.status = "exited";
+      entry.closedAt = entry.closedAt || now();
+    }
+    return true;
+  }
+
+  function runVibeMcpRecovery(entry, recovery) {
+    var handle = entry.handle;
+    var registry = getRegistry();
+    var gone = function () {
+      return recovery.aborted === true || registry.get(handle) !== entry;
+    };
+    if (recovery.kind === "unreachable") {
+      endVibeTurnWithoutMcp(entry, recovery, { code: "restart_limit" });
+      return;
+    }
+    var target = entry.mcpProbeTarget;
+    if (!target) {
+      endVibeTurnWithoutMcp(entry, recovery, { code: "no_endpoint" });
+      return;
+    }
+    var lastLine = 0;
+    var waited = waitForConvertigoMcp(target, CONVERTIGO_MCP_WAIT_MS, function (probe, waitedMs) {
+      if (lastLine === 0 || waitedMs - lastLine >= CONVERTIGO_MCP_PROGRESS_MS) {
+        lastLine = Math.max(1, waitedMs);
+        pushEvent(entry, "progress/message", { code: "convertigo_mcp_wait", text: waitedMs < CONVERTIGO_MCP_POLL_MS
+          ? "Agent Bridge: the Convertigo MCP does not answer (" + probe.code + "); Tigo waits for it before going on, at most "
+            + Math.round(CONVERTIGO_MCP_WAIT_MS / 1000) + " s."
+          : "Agent Bridge: still waiting for the Convertigo MCP (" + Math.round(waitedMs / 1000) + " s, " + probe.code + ")." });
+      }
+    }, gone);
+    if (gone()) {
+      recovery.done = true;
+      return;
+    }
+    if (!waited.ok) {
+      endVibeTurnWithoutMcp(entry, recovery, { code: waited.last.code, attempts: waited.attempts, waitedMs: waited.waitedMs });
+      return;
+    }
+    pushEvent(entry, "progress/message", { code: "convertigo_mcp_back", text: "Agent Bridge: the Convertigo MCP answers; Vibe restarts on this conversation to get its tools back." });
+    var restarted = restartVibeInPlace(entry);
+    if (!restarted.ok) {
+      endVibeTurnWithoutMcp(restarted.entry, recovery, { code: "restart_failed", error: restarted.error });
+      return;
+    }
+    var fresh = restarted.entry;
+    if (recovery.aborted === true) {
+      stopEntry(fresh, true);
+      return;
+    }
+    if (fresh.convertigoMcpMissing) {
+      // the new process did not get its tools either (the MCP went away again while it started)
+      endVibeTurnWithoutMcp(fresh, recovery, { code: "missing_after_restart", error: trim(fresh.convertigoMcpMissing.error) });
+      return;
+    }
+    sendVibeRecoveryPrompt(fresh, recovery, entry.sessionId);
+  }
+
+  function vibeRecoveryPromptText(recovery) {
+    if (recovery.kind === "resume") {
+      return "Note from the Agent Bridge: the Convertigo MCP tools were lost during your last steps (" + recovery.cause + "), so the Bridge "
+        + "stopped your turn and restarted Vibe on this conversation: the tools are back. Your last change may be incomplete. Call "
+        + "`project-changes` and read back the objects you changed since your last successful proof, repair any half-made change, then "
+        + "continue the user's request.";
+    }
+    return "Note from the Agent Bridge: this session had started without the Convertigo MCP tools, so your work on the message below was "
+      + "stopped and Vibe was restarted on this conversation: the tools are now available. Do not redo what you already finished; go on "
+      + "with the Convertigo tools. The user's message again:\n\n";
+  }
+
+  // The prompt of the recovered turn, sent in the same turn: the user's message (deferred), with a note (restart), or the
+  // continuation prompt (resume).
+  function sendVibeRecoveryPrompt(fresh, recovery, previousSessionId) {
+    var blocks = [];
+    var saved = fresh.turnPromptBlocks || [];
+    if (recovery.kind === "resume") {
+      blocks.push({ type: "text", text: vibeRecoveryPromptText(recovery) });
+    } else {
+      for (var b = 0; b < saved.length; b++) {
+        blocks.push(saved[b]);
+      }
+      if (!blocks.length) {
+        blocks.push({ type: "text", text: "" });
+      }
+      if (recovery.kind === "restart" && blocks[0].type === "text") {
+        blocks[0] = { type: "text", text: vibeRecoveryPromptText(recovery) + String(blocks[0].text || "") };
+      }
+    }
+    if (trim(previousSessionId) !== trim(fresh.sessionId)) {
+      // a new session (the previous one could not be reloaded): the conversation keeps the new one
+      pushEvent(fresh, "session/update", { sessionId: fresh.sessionId, threadId: fresh.sessionId, reason: "mcp_recovery" });
+    }
+    var params = { sessionId: fresh.sessionId, prompt: blocks };
+    if (trim(fresh.turnPromptMessageId).length && recovery.kind !== "resume") {
+      params.messageId = fresh.turnPromptMessageId;
+    }
+    // counted before Vibe gets it: a notice of the new process right after counts this restart
+    if (recovery.kind === "resume") {
+      fresh.turnMcpResumes = Number(fresh.turnMcpResumes || 0) + 1;
+    } else {
+      fresh.turnMcpRestarts = Number(fresh.turnMcpRestarts || 0) + 1;
+    }
+    fresh.mcpLostFailures = 0;
+    var pending = sendAcpRequest(fresh, "session/prompt", params);
+    fresh.turnRequestId = String(pending.id);
+    recovery.done = true;
+    if (recovery.kind === "resume") {
+      pushEvent(fresh, "warning", {
+        phase: "vibe/mcp",
+        reason: "mcp_lost_resumed",
+        cause: recovery.cause,
+        requestId: pending.id,
+        message: "The Convertigo MCP was lost during the turn: Vibe restarted on this conversation and resumes the work, checking the last change first."
+      });
+      pushEvent(fresh, "progress/message", { code: "mcp_lost_resumed", text: "Agent Bridge: the Convertigo tools are back; Tigo checks its last change, then goes on." });
+    } else {
+      pushEvent(fresh, "warning", {
+        phase: "vibe/mcp",
+        reason: "convertigo_mcp_restarted",
+        cause: recovery.cause,
+        resent: recovery.kind === "restart",
+        requestId: pending.id,
+        message: "Vibe restarted on this conversation with the Convertigo MCP and got the message" + (recovery.kind === "restart" ? " again." : ".")
+      });
+      pushEvent(fresh, "progress/message", { code: "convertigo_mcp_restarted", text: "Agent Bridge: Tigo has its Convertigo tools; it starts on the message." });
+    }
+    try { log.info("(lib_ConvertigoAgentBridge) Vibe restarted in its turn for the Convertigo MCP (" + recovery.kind + ", " + recovery.cause + "), handle " + fresh.handle); } catch (_ignoreRecoveryLog) {}
+  }
+
+  function convertigoMcpUnreachableMessage(code, kind) {
+    var unauthorized = code === "unauthorized";
+    var fr = unauthorized
+      ? "Le MCP Convertigo refuse l'autorisation de cette conversation : Tigo ne peut pas travailler sans ses outils, le tour s'arr\u00eate ici. Renvoyez votre message pour relancer Tigo."
+      : "Le MCP Convertigo ne r\u00e9pond pas : Tigo ne peut pas travailler sans ses outils, le tour s'arr\u00eate ici. V\u00e9rifiez que le Studio et le projet lib_ConvertigoMCP tournent, puis renvoyez votre message.";
+    var en = unauthorized
+      ? "The Convertigo MCP refuses the authorization of this conversation: Tigo cannot work without its tools, so the turn stops here. Send your message again to restart Tigo."
+      : "The Convertigo MCP does not answer: Tigo cannot work without its tools, so the turn stops here. Check that the Studio and the lib_ConvertigoMCP project are running, then send your message again.";
+    if (kind === "resume") {
+      fr += " La derni\u00e8re modification peut \u00eatre incompl\u00e8te : faites-la v\u00e9rifier avant de continuer.";
+      en += " The last change may be incomplete: have it checked before going on.";
+    }
+    return fr + "\n\n" + en;
+  }
+
+  // The end of a turn that cannot get the Convertigo MCP back. The process keeps its mark: the next message restarts
+  // Vibe once the MCP answers.
+  function endVibeTurnWithoutMcp(entry, recovery, probe) {
+    if (recovery.aborted === true) {
+      recovery.done = true;
+      return;
+    }
+    recovery.done = true;
+    probe = probe || {};
+    entry.eventsDetached = false;
+    var code = trim(probe.code) || "unreachable";
+    pushEvent(entry, "warning", {
+      phase: "vibe/mcp",
+      reason: "convertigo_mcp_unreachable",
+      cause: recovery.cause,
+      code: code,
+      attempts: Number(probe.attempts || 0),
+      waitedMs: Number(probe.waitedMs || 0),
+      error: trim(probe.error).substring(0, 300),
+      message: "The Convertigo MCP did not come back (" + code + "): the Bridge ended the turn rather than let Vibe work without its tools."
+    });
+    pushEvent(entry, "turn/error", {
+      requestId: trim(entry.turnRequestId),
+      method: "session/prompt",
+      error: { code: "convertigo_mcp_unreachable", message: convertigoMcpUnreachableMessage(code, recovery.kind) }
+    });
+    if (entry.status === "restarting" && !processAlive(entry.process)) {
+      entry.status = "exited";
+      entry.closedAt = entry.closedAt || now();
+    }
+    try { log.warn("(lib_ConvertigoAgentBridge) Turn ended without the Convertigo MCP (" + code + ", " + recovery.cause + "), handle " + entry.handle); } catch (_ignoreUnreachableLog) {}
+  }
+
+  // vibeStart, for a restart of Vibe within its turn; replaced in tests.
+  var vibeRestartStarter = function (options) {
+    return C8O.agentBridge.vibeStart(options);
+  };
+
+  // Starts Vibe again on the same session within the running turn: the new process takes the handle, the turn and its
+  // event stream (adoptVibeTurn), so the Assistant reads one turn. {ok, entry, error}: entry is the registry's one.
+  function restartVibeInPlace(old) {
+    var options = {};
+    var saved = old.startOptions || {};
+    for (var key in saved) {
+      if (Object.prototype.hasOwnProperty.call(saved, key)) {
+        options[key] = saved[key];
+      }
+    }
+    options.sessionId = trim(old.sessionId) || trim(options.sessionId);
+    options.prewarm = "false";
+    options.restartInPlace = "true";
+    delete options.mcpGenerationRetry;
+    if (trim(old.model).length) {
+      options.model = old.model;
+    }
+    if (trim(old.reasoningEffort).length) {
+      options.reasoningEffort = old.reasoningEffort;
+    }
+    old.restartingInPlace = true;
+    var result;
+    try {
+      result = vibeRestartStarter(options);
+    } catch (startError) {
+      result = { ok: false, error: String(startError) };
+    }
+    old.restartingInPlace = false;
+    var current = getRegistry().get(old.handle);
+    if (result && result.ok !== false && current !== null && typeof current !== "undefined" && current !== old
+        && current.adoptedTurn === true && processAlive(current.process)) {
+      keepManagedMcpLease(current);
+      return { ok: true, entry: current, error: "" };
+    }
+    return { ok: false, entry: current !== null && typeof current !== "undefined" ? current : old,
+      error: trim(result && (result.error || result.status)) || "Vibe did not restart" };
+  }
+
+  // The new process of a restart in place takes the old one's event stream (the same list and cursor: the Assistant
+  // reads on) and its turn; the old entry pushes nothing more.
+  var VIBE_ADOPTED_TURN_FIELDS = ["turnActive", "turnRequestId", "turnNudges", "turnPrintedCallRetries", "turnActed", "turnToolCalls",
+    "turnWriteRefused", "turnStartedAt", "turnMcpRestarts", "turnMcpResumes", "turnPromptBlocks", "turnPromptMessageId",
+    "planEntries", "seenToolNames", "gatewayBudgetRefusal", "gatewayBudgetProbed", "mcpConversationId"];
+
+  function adoptVibeTurn(entry, old) {
+    old.eventsDetached = true;
+    entry.events = old.events;
+    entry.firstIndex = old.firstIndex;
+    entry.nextIndex = old.nextIndex;
+    for (var i = 0; i < VIBE_ADOPTED_TURN_FIELDS.length; i++) {
+      var field = VIBE_ADOPTED_TURN_FIELDS[i];
+      if (typeof old[field] !== "undefined") {
+        entry[field] = old[field];
+      }
+    }
+    entry.adoptedTurn = true;
+    entry.turnInterrupted = false;
+    entry.turnTail = "";
+    entry.turnFinalText = "";
+    entry.turnFinalTextOverflow = false;
+    entry.turnMessageId = "";
+    entry.mcpLostFailures = 0;
+  }
+
   function normalizeSessionUpdate(entry, params) {
     var update = params.update || params.sessionUpdate || params;
     var kind = String(update.sessionUpdate || update.session_update || "");
@@ -15140,6 +15720,12 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
 
     if (kind === "agent_message_chunk") {
       eventData.text = extractContentText(update.content);
+      // Vibe's own notice that an MCP server failed to connect: a line of the work log, never the answer.
+      var connectNotices = entry.provider === "vibe" ? vibeMcpConnectNotices(eventData.text) : [];
+      if (connectNotices.length) {
+        noteVibeMcpConnectNotices(entry, connectNotices, trim(eventData.text));
+        return;
+      }
       // The text of the last agent message since the last tool call: what the turn ends on. Each Vibe message has its
       // own messageId and the panel shows the last one alone as the answer (the earlier ones go to the work log). A
       // turn that said "Je clique sur Enregistrer." then printed 'run_typescript({code": "..."})' as a second message
@@ -15215,6 +15801,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       } else if (eventData.status === "completed") {
         // a call that went through: only failures in a row count
         entry.mcpLostFailures = 0;
+        if (vibeConvertigoToolTitle(eventData.title || (entry.toolCallTitles && entry.toolCallTitles[trim(eventData.toolCallId)]) || "")) {
+          // this process has its Convertigo tools: a later "failed to connect" notice is a refresh that kept them
+          entry.convertigoMcpCalled = true;
+        }
       }
       return;
     }
@@ -15282,11 +15872,23 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     if (typeof message.id !== "undefined" && (typeof message.result !== "undefined" || typeof message.error !== "undefined")) {
       var key = String(message.id);
       var pending = entry.pending.get(key);
+      var recoveredTurn = false;
       if (pending !== null && typeof pending !== "undefined") {
         pending.response = message;
         pending.done = true;
         pending.completedAt = now();
-        if (pending.method === "session/prompt") {
+        var mcpRecovery = pending.method === "session/prompt" ? entry.mcpRecovery : null;
+        if (pending.method === "session/prompt" && entry.swallowedPrompts && entry.swallowedPrompts[key] === true) {
+          // the answer of a Vibe turn cancelled for its MCP whose recovery the user stopped: that turn already ended
+          delete entry.swallowedPrompts[key];
+          recoveredTurn = true;
+        } else if (mcpRecovery && trim(mcpRecovery.awaiting).length && key === trim(mcpRecovery.awaiting)) {
+          // The Vibe turn the Bridge cancelled to get the Convertigo MCP back: the turn goes on in a restarted Vibe
+          // (beginVibeMcpRecovery), or was already ended by a Stop.
+          mcpRecovery.awaiting = "";
+          recoveredTurn = true;
+          startVibeMcpRecovery(entry, mcpRecovery);
+        } else if (pending.method === "session/prompt") {
           // A turn that failed on a refusal of Vibe's core leaves the process to be replaced at the next start.
           var turnRefusal = entry.provider === "vibe" && message.error ? vibeCoreRefusal(message.error) : null;
           if (turnRefusal !== null && !trim(entry.restartReason).length) {
@@ -15322,7 +15924,11 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
           }
         }
       }
-      pushEvent(entry, message.error ? "acp/response_error" : "acp/response", {
+      // The answer to a Vibe turn the Bridge cancelled for its MCP is no failure of the turn, which goes on; nor is a
+      // step of a restart within the turn (a session/load that finds no session starts a new one): the Assistant reads
+      // every acp/response_error of the turn's stream as the end of the turn.
+      var turnStep = recoveredTurn || (entry.adoptedTurn === true && entry.status === "starting");
+      pushEvent(entry, message.error && !turnStep ? "acp/response_error" : "acp/response", {
         id: message.id,
         method: pending ? pending.method : "",
         response: message
@@ -15379,7 +15985,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
             pushEvent(entry, "error", { message: String(e), phase: streamName + "_reader" });
           }
         } finally {
-          if (streamName === "stdout" && entry.status !== "closed" && entry.status !== "completed" && !processAlive(entry.process)) {
+          if (streamName === "stdout" && entry.status !== "closed" && entry.status !== "completed" && entry.status !== "restarting" && !processAlive(entry.process)) {
             entry.status = entry.status === "error" ? "error" : "exited";
             entry.closedAt = now();
             pushEvent(entry, "system/exit", {
@@ -15529,10 +16135,17 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   function buildMcpServers(mcpEndpoint, options) {
     options = options || {};
     var tigoServers = typeof tigoVibeServers === "function" ? tigoVibeServers(options) : [];
-    // A Flow-only home: its one Convertigo server is `convertigo-flow`, declared in config.toml with the token of the
-    // process environment. A session server would replace that entry whole (headers and timeouts).
+    var convertigo = convertigoMcpSessionServer(mcpEndpoint, options);
+    return convertigo === null ? tigoServers : [convertigo].concat(tigoServers);
+  }
+
+  // The `Convertigo` server of a Vibe session (url and headers), or null for a Flow-only home: its one Convertigo
+  // server is `convertigo-flow`, declared in config.toml with the token of the process environment. A session server
+  // would replace that entry whole (headers and timeouts).
+  function convertigoMcpSessionServer(mcpEndpoint, options) {
+    options = options || {};
     if (vibeFlowFacade(mcpEndpoint, options)) {
-      return tigoServers;
+      return null;
     }
     var headers = [];
     var bearerToken = managedMcpBearerToken(options);
@@ -15587,16 +16200,18 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
         });
       }
     }
-    return [{
+    return {
       type: "http",
       name: "Convertigo",
       url: vibeMcpTransportEndpoint(vibeLegacyMcpEndpoint(mcpEndpoint), options),
       headers: headers
-    }].concat(tigoServers);
+    };
   }
 
   function statusOf(entry) {
-    if (entry.process !== null && entry.status !== "closed" && entry.status !== "completed" && entry.status !== "error" && entry.status !== "exited" && !processAlive(entry.process)) {
+    // "restarting": the Bridge replaces the process within its turn (restartVibeInPlace), the turn is not over.
+    if (entry.process !== null && entry.status !== "closed" && entry.status !== "completed" && entry.status !== "error" && entry.status !== "exited"
+        && entry.status !== "restarting" && !processAlive(entry.process)) {
       entry.status = "exited";
       entry.closedAt = entry.closedAt || now();
     }
@@ -15746,6 +16361,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     }
     // A stop stops the conversation's sub-agents too, its turn already over or its process gone.
     stopConversationSubagents(entry, "its conversation was stopped");
+    // A turn the Bridge holds while it gets the Convertigo MCP back ends at once.
+    if (abortVibeMcpRecovery(entry, "interrupted")) {
+      return { ok: true, status: "interrupted", handle: handle, state: statusOf(entry), timestamp: now() };
+    }
     if (!processAlive(entry.process)) {
       return { ok: false, status: "exited", handle: handle, timestamp: now() };
     }
@@ -15845,8 +16464,14 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     var limit = intValue(options.limit, DEFAULT_EVENT_LIMIT, 1, MAX_EVENT_LIMIT);
     var waitMs = intValue(options.waitMs, 25000, 0, 30000);
     var deadline = now() + waitMs;
-    while (entry.nextIndex <= cursor && processAlive(entry.process) && now() < deadline && !hostRequestWaiting(entry)) {
+    // A process the Bridge restarts within its turn (restartVibeInPlace) is waited for as a live one, and the read
+    // goes on with the new process, which continues the same event stream.
+    while (entry.nextIndex <= cursor && (processAlive(entry.process) || entry.status === "restarting") && now() < deadline && !hostRequestWaiting(entry)) {
       Thread.sleep(100);
+      var replaced = getRegistry().get(handle);
+      if (replaced !== null && typeof replaced !== "undefined" && replaced !== entry) {
+        entry = replaced;
+      }
     }
     entry.lastAccess = now();
 
@@ -15902,6 +16527,21 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   };
 
   function stopEntry(entry, removeFromRegistry) {
+    stopEntryProcess(entry);
+    entry.status = entry.status === "error" ? "error" : "closed";
+    entry.closedAt = entry.closedAt || now();
+    pushEvent(entry, "system/closed", {
+      handle: entry.handle,
+      exitCode: getExitCode(entry.process)
+    });
+    if (removeFromRegistry) {
+      getRegistry().remove(entry.handle);
+      forgetSessionHandle(entry.handle);
+    }
+  }
+
+  // Stops the process of an entry and nothing else: no event, the entry keeps its status and its registry place.
+  function stopEntryProcess(entry) {
     var stoppedTree = false;
     if (entryUsesPidTree(entry) && Number(entry.pid || 0) > 0) {
       try {
@@ -15931,16 +16571,6 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       } catch (_ignoreWriterClose) {}
     }
     deleteEntryPidFile(entry);
-    entry.status = entry.status === "error" ? "error" : "closed";
-    entry.closedAt = entry.closedAt || now();
-    pushEvent(entry, "system/closed", {
-      handle: entry.handle,
-      exitCode: getExitCode(entry.process)
-    });
-    if (removeFromRegistry) {
-      getRegistry().remove(entry.handle);
-      forgetSessionHandle(entry.handle);
-    }
   }
 
   // The sweep of the agent processes, at each Vibe start, at most every 10 s on event reads and every minute on the
@@ -15956,6 +16586,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   // why the sweep stops an entry, or null to keep it
   function sweepVerdict(entry, current, hardIdle) {
     if (entry.status === "starting" && current - Number(entry.createdAt || 0) < STARTING_GRACE_MILLIS) {
+      return null;
+    }
+    // its turn waits for the Convertigo MCP, its process stopped or not: the recovery replaces it or ends the turn
+    if (entry.mcpRecovery && entry.mcpRecovery.done !== true && current - Number(entry.mcpRecovery.at || 0) < VIBE_MCP_RECOVERY_MAX_MS) {
       return null;
     }
     if (!processAlive(entry.process)) {

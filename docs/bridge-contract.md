@@ -268,6 +268,53 @@ encore 15 s plus tard (`mcp_lost_process_stopped`). Le demarrage suivant
 remplace un process marque, sur la meme session (`warning` `mcp_lost_restart`) :
 le nouveau process relit ses outils et son jeton MCP.
 
+### MCP Convertigo absent au demarrage d'une session Vibe
+
+Vibe 3.1 resout ses serveurs MCP au demarrage d'une session (`session/new`,
+`session/load`). Si le MCP Convertigo refuse alors la connexion ou le jeton, la
+session n'a aucun outil Convertigo pendant toute sa vie, meme quand le MCP repond
+de nouveau. Vibe le dit une fois, par un message d'agent a lui juste apres le
+demarrage : `MCP server 'Convertigo' failed to connect: mcp_transport_failed.`
+(ou `authentication was rejected.`). Le Bridge :
+
+- sonde le MCP avant de demarrer un process qui l'utilise (Studio et No Code) :
+  un `initialize` MCP avec l'url et les en-tetes que Vibe utilisera, en direct
+  sans proxy pour une adresse locale (environ 12 ms quand il repond). S'il ne
+  repond pas, le demarrage l'attend jusqu'a 6 s, puis demarre le process marque ;
+- lit la notice : c'est une ligne du journal (`progress/message`, code
+  `mcp_connect_failed`), jamais la reponse. Une notice qui nomme `Convertigo` ou
+  `convertigo-flow` marque le process, sauf si un outil Convertigo y a deja
+  repondu (un rafraichissement rate garde ses outils) ;
+- ne lance jamais de tour sur un process marque : `agent_vibe_prompt` demarre le
+  tour sans l'envoyer a Vibe (`turn/start` avec `deferred: "convertigo_mcp"`,
+  `requestId` `mcp-wait-<ms>`), pousse `warning`
+  `convertigo_mcp_unavailable_at_start` (`source` `probe` ou `notice`, `error`),
+  attend le MCP (une sonde toutes les 2 s, une ligne `progress/message` de code
+  `convertigo_mcp_wait` toutes les 15 s, 60 s au plus), puis redemarre Vibe sur la
+  meme session dans le meme tour et lui envoie le message
+  (`warning` `convertigo_mcp_restarted`, `resent: false`) ;
+- pendant un tour, une notice annule le tour Vibe (`session/cancel`, `warning`
+  `convertigo_mcp_unavailable_at_start`, `source: "notice"`) ; a sa reponse (ou
+  15 s apres, process arrete), meme attente et meme redemarrage, puis Vibe recoit
+  de nouveau le message avec une note (`convertigo_mcp_restarted`,
+  `resent: true`), une fois par message de l'utilisateur ;
+- si le MCP ne revient pas (ou se coupe de nouveau apres ce redemarrage), le tour
+  finit par `warning` `convertigo_mcp_unreachable` (`code` : `connection_refused`,
+  `timeout`, `unauthorized`, `http_<status>`, `restart_limit`,
+  `restart_failed`...; `attempts`, `waitedMs`, `cause`) puis `turn/error`
+  `{code: "convertigo_mcp_unreachable", message}` dont le message, en francais puis
+  en anglais, dit a l'utilisateur que le MCP ne repond pas. Le process garde sa
+  marque : le message suivant redemarre Vibe des que le MCP repond.
+
+Le redemarrage dans le tour (`restartVibeInPlace`) repasse par `agent_vibe_start`
+avec les options du premier demarrage : le nouveau process prend le handle, le
+tour et le flux d'evenements de l'ancien (memes curseurs, indices croissants),
+l'ancien ne pousse plus rien. Pendant ce temps l'etat du handle est `restarting`
+(ni `exited` ni `closed`) et une lecture `agent_events` attend le nouveau process.
+Une session vide qui ne se recharge pas (`Session not found`) est remplacee par
+une nouvelle : un evenement `session/update` porte son `sessionId`. Un `Stop`
+pendant l'attente finit le tour (`turn/end`, `stopReason: "cancelled"`).
+
 Dans ce prototype, les demandes ACP `session/request_permission` sont traitees
 automatiquement en selectionnant l'option `allow_once` ou une option
 equivalente quand elle existe.

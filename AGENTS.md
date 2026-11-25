@@ -684,6 +684,25 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - Python/Vibe setup is separate from Codex setup. Keep the shared helper logic in
   `agent_bridge_common.js` and provider-specific behavior in the provider files.
 
+## Convertigo MCP missing at a Vibe session start
+
+- Vibe 3.1 resolves its MCP servers once, when a session starts: a Convertigo MCP that refuses the connection or the
+  token then leaves the session without Convertigo tools for its whole life. Vibe's only signal is an agent message
+  of its own, `MCP server 'Convertigo' failed to connect: <error>.` (live lines in
+  `tests/fixtures/vibe-3.1.0-mcp-connect-notice.ndjson`); `session/new` carries no tool list.
+- `vibeStartSteps` probes the MCP before spawning (`convertigoMcpProbeTarget`, `convertigoMcpProbeHttp`: an MCP
+  `initialize` with the session's url and headers, `Proxy.NO_PROXY` on loopback), waits up to 6 s, then starts the
+  process marked (`convertigoMcpMissing`). A notice marks it too. A marked process is replaced at the next start once
+  the MCP answers; its prompt waits for the MCP within the turn (`deferVibePromptUntilMcp`) and Vibe restarts on the
+  same session in the same turn (`restartVibeInPlace`, `adoptVibeTurn`: the new entry takes the handle, the turn and
+  the event list; the old one is `eventsDetached`). A notice during a turn cancels it and resends the message once.
+  No turn runs without its tools: an MCP that stays away ends the turn (`convertigo_mcp_unreachable`, 60 s).
+- Threads of the Bridge outlive the request that started them, and the engine then removes `context` and `server`
+  from the scope ("context" is not defined): `getServerStore` keeps the store of the last request
+  (`lastServerStore`), and `requestParameter`/`callLocalSequence` read no request on a `lib_ConvertigoAgentBridge-`
+  thread. Without it, a restart from a background thread lost the registry and every server secret.
+- Run `node --test tests/vibe_mcp_unavailable_at_start.test.js` and the Bridge suite.
+
 ## Event Flow
 
 - Assistant UI reads agent progress through `agent_events` / long polling.

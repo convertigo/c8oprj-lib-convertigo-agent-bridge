@@ -79,5 +79,6 @@ test("a store that cannot be read never breaks the wait for events", () => {
 });
 
 test("the wait for events of agent_events stops on it", () => {
-  assert.match(source, /while \(entry\.nextIndex <= cursor && processAlive\(entry\.process\) && now\(\) < deadline && !hostRequestWaiting\(entry\)\) \{/);
+  // a process the Bridge restarts within its turn ("restarting") is waited for as a live one
+  assert.match(source, /while \(entry\.nextIndex <= cursor && \(processAlive\(entry\.process\) \|\| entry\.status === "restarting"\) && now\(\) < deadline && !hostRequestWaiting\(entry\)\) \{/);
 });
