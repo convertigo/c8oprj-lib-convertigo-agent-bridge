@@ -167,7 +167,7 @@ test("a turn that fails on a refusal of the core marks the process too", () => {
 test("the next start replaces a process that lost the Convertigo MCP, on the same session", () => {
   const vibe = fs.readFileSync(path.join(root, "js/agent_bridge_vibe.js"), "utf8");
   const common = fs.readFileSync(path.join(root, "js/agent_bridge_common.js"), "utf8");
-  assert.match(common, /var VIBE_MCP_LOST_RESTARTS = \{ core_rejected_input: true, convertigo_mcp_suspended: true \};/);
+  assert.match(common, /var VIBE_MCP_LOST_RESTARTS = \{ core_rejected_input: true, convertigo_mcp_suspended: true, mcp_token_expired: true \};/);
   const branchStart = vibe.indexOf('VIBE_MCP_LOST_RESTARTS[trim(existing.restartReason)] === true) {');
   assert.ok(branchStart > 0, "the restart branch exists");
   assert.ok(branchStart < vibe.indexOf("var requestedMcpTokenFingerprint = mcpBearerTokenFingerprint(options);"), "before an alive process is reused");

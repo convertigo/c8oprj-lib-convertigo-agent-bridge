@@ -707,6 +707,27 @@ http://<host>/convertigo/api/mcp?jsonOnly=false&from_bridge=true&descriptorVersi
 - Run `node --test tests/vibe_mcp_unavailable_at_start.test.js tests/vibe_mcp_lost_resume.test.js tests/vibe_mcp_lost.test.js`
   and the Bridge suite.
 
+## Expired managed MCP token of a Vibe process
+
+- A Vibe process keeps its MCP token for its whole life; the panel's managed token is leased (lib_ConvertigoMCP) and
+  ends after its idle time. The MCP then answers a tools/call "MCP token expired" and refuses tools/list with a 401,
+  after which Vibe has no Convertigo tool (Toulouse 24/11). Restarting Vibe with the same token gives the same refusal.
+- `noteVibeMcpTokenExpired` (tool answer, a 401 with the lease gone `managedMcpLeaseEnded`, the lease keeper, a prompt
+  to an ended lease) pushes `mcp_token_expired` and sets `mcpTokenRenewal` (statusOf: "needed"). Only the Assistant can
+  create a token: its `agent_events` read brings `mcpBearerTokenHandle` (a request parameter, no YAML variable), taken
+  by `acceptMcpTokenRenewal` when it is another live token. The recovery (`runVibeMcpRecovery`) waits for it
+  (`waitForMcpTokenRenewal`, 60 s), puts it into `startOptions`, restarts Vibe within the turn and resumes.
+- Run `node --test tests/vibe_mcp_token_expired.test.js` (harness `tests/helpers/vibe_harness.js`).
+
+## "A turn is already running" (Vibe)
+
+- Vibe refuses a prompt or a `session/set_config_option` while a turn of its own runs, also an instant after it
+  answered a cancelled prompt. The prompt admission is one step (`claimPromptAdmission`, an AtomicBoolean per entry);
+  a refused turn prompt is sent again while Vibe may be closing a turn (`noteVibeTurnBusy`, `vibeBusyRecently`), else
+  the turn ends with `turn/error` `busy: true`; a start during a turn keeps its model and effort for the next prompt
+  (`configureOrDeferVibeSession`), and a refused setting is sent again (`vibeSetConfigOption`). These refusals push no
+  `acp/response_error`. Run `node --test tests/vibe_turn_busy.test.js`.
+
 ## Unproven changes at the end of a Vibe turn
 
 - Contract with lib_ConvertigoMCP (server store key `lib_ConvertigoMCP.proofState`, a map from the conversation id of

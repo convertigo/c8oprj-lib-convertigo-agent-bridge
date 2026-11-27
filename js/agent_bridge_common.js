@@ -5617,8 +5617,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
           try {
             while (entry.turnActive === true && processAlive(entry.process)) {
               Thread.sleep(MCP_LEASE_TOUCH_INTERVAL_MS);
-              if (entry.turnActive === true) {
-                touchManagedMcpLease(entry, true, store);
+              if (entry.turnActive === true && !touchManagedMcpLease(entry, true, store) && managedMcpLeaseEnded(entry, store)) {
+                // the lease ended under a running turn (revoked, the engine's leases lost): the process cannot call the
+                // MCP any more, and Vibe drops the Convertigo tools at its next tools/list
+                noteVibeMcpTokenExpired(entry, "lease_ended");
               }
             }
           } catch (_ignoreKeeperStop) {
@@ -5632,6 +5634,118 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     } catch (_ignoreKeeperStart) {
       entry.mcpLeaseKeeper = false;
     }
+  }
+
+  // The leased token of a process can no longer be used: its lease ended (no turn used it for its idle time), or the
+  // engine holds none any more (revoked, the engine restarted). false for a token without lease, or a store the Bridge
+  // cannot read: it cannot tell. The process keeps its token for its whole life (CONVERTIGO_MCP_TOKEN and the
+  // Authorization header of its config.toml): Toulouse, 24/11, a Vibe process called project-list 30 min after the last
+  // use of its token ("MCP token expired"), then a tools/list refused with 401 left it without any Convertigo tool.
+  function managedMcpLeaseEnded(entry, store) {
+    try {
+      var tokenId = trim(entry && entry.mcpLeaseTokenId);
+      if (!tokenId.length) {
+        return false;
+      }
+      store = store || getServerStore();
+      if (store === null || typeof store === "undefined") {
+        return false;
+      }
+      var leases = store.get(MCP_MANAGED_LEASES_KEY);
+      if (leases === null || typeof leases === "undefined") {
+        return true;
+      }
+      var current = leases.get(tokenId);
+      if (current === null || typeof current === "undefined") {
+        return true;
+      }
+      var lease = parseJsonSafe(String(current), null);
+      return !lease || !(now() < Number(lease.expiresAt));
+    } catch (_ignoreLeaseRead) {
+      return false;
+    }
+  }
+
+  // The renewal of the managed MCP token of a process whose token ended: the Bridge cannot create one (the MCP gives
+  // them to an authenticated administrator, McpManagedTokenCreate), the Assistant does, in the event read of the
+  // conversation (its user's session): statusOf says mcpTokenRenewal "needed", the next agent_events read brings the
+  // handle (mcpBearerTokenHandle), and the turn goes on in a Vibe restarted with it (runVibeMcpRecovery).
+  var MCP_TOKEN_RENEWAL_WAIT_MS = 60000;
+  var MCP_TOKEN_RENEWAL_POLL_MS = 500;
+  var MCP_TOKEN_EXPIRED_PATTERN = /MCP token expired/i;
+
+  function requestMcpTokenRenewal(entry, source) {
+    var renewal = entry.mcpTokenRenewal;
+    if (renewal && renewal.done !== true) {
+      return renewal;
+    }
+    renewal = {
+      source: trim(source) || "tool_answer",
+      neededAt: now(),
+      tokenId: trim(entry.mcpLeaseTokenId),
+      fingerprint: trim(entry.mcpBearerTokenFingerprint),
+      handle: "",
+      receivedAt: 0,
+      done: false
+    };
+    entry.mcpTokenRenewal = renewal;
+    return renewal;
+  }
+
+  function mcpTokenRenewalState(entry) {
+    var renewal = entry && entry.mcpTokenRenewal;
+    if (!renewal || renewal.done === true) {
+      return "";
+    }
+    return trim(renewal.handle).length ? "received" : "needed";
+  }
+
+  // The handle the Assistant gives for a renewal (agent_events): taken when its token is another one, and a live leased
+  // token (or a token without lease). true when taken.
+  function acceptMcpTokenRenewal(entry, handle) {
+    var renewal = entry && entry.mcpTokenRenewal;
+    handle = trim(handle);
+    if (!renewal || renewal.done === true || trim(renewal.handle).length || !handle.length) {
+      return false;
+    }
+    var options = { mcpBearerTokenHandle: handle, skillProfile: entry.noCode === true ? "nocode" : "" };
+    var fingerprint = mcpBearerTokenFingerprint(options);
+    if (!fingerprint.length || fingerprint === trim(renewal.fingerprint)) {
+      return false;
+    }
+    var renewed = { mcpLeaseTokenId: managedMcpTokenId(options) };
+    if (trim(renewed.mcpLeaseTokenId).length && managedMcpLeaseEnded(renewed)) {
+      return false;
+    }
+    renewal.handle = handle;
+    renewal.receivedAt = now();
+    pushEvent(entry, "progress/message", { code: "mcp_token_renewed", text: "Agent Bridge: the panel renewed the authorization of the Convertigo MCP." });
+    return true;
+  }
+
+  // The renewed handle goes into what the restart within the turn starts with (restartVibeInPlace), and into the probe.
+  function applyMcpTokenRenewal(entry) {
+    var renewal = entry.mcpTokenRenewal;
+    if (!renewal || !trim(renewal.handle).length) {
+      return false;
+    }
+    entry.startOptions = entry.startOptions || {};
+    entry.startOptions.mcpBearerTokenHandle = renewal.handle;
+    delete entry.startOptions.mcpBearerToken;
+    var token = managedMcpBearerToken({ mcpBearerTokenHandle: renewal.handle });
+    if (entry.mcpProbeTarget && token.length) {
+      var headers = [];
+      var previous = entry.mcpProbeTarget.headers || [];
+      for (var h = 0; h < previous.length; h++) {
+        if (String(previous[h].name).toLowerCase() !== "authorization") {
+          headers.push(previous[h]);
+        }
+      }
+      headers.push({ name: "Authorization", value: "Bearer " + token });
+      entry.mcpProbeTarget = { url: entry.mcpProbeTarget.url, headers: headers };
+    }
+    renewal.done = true;
+    return true;
   }
 
   function usesProtectedConvertigoMcp(mcpEndpoint, options) {
@@ -11895,6 +12009,150 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     return false;
   }
 
+  // Vibe refuses a prompt or a change of its settings while it runs a turn ("A turn is already running", its app server
+  // and its harness's _require_idle), and it can still be closing a turn an instant after it answered the prompt that
+  // a stop cancelled. ACOSS 26/11: a Stop then an immediate resend, or a model change right after, failed the new turn.
+  var VIBE_TURN_BUSY_PATTERN = /A turn is already running/i;
+  // Vibe still closing its previous turn: after a stop, the end of a turn or its own work outside a turn of the Bridge,
+  // a refused prompt or setting is sent again every VIBE_BUSY_RETRY_MS for at most VIBE_BUSY_RETRY_MAX_MS.
+  var VIBE_BUSY_RETRY_WINDOW_MS = 10000;
+  var VIBE_BUSY_RETRY_MS = 250;
+  var VIBE_BUSY_RETRY_MAX_MS = 15000;
+  var VIBE_BUSY_PROGRESS_MS = 2000;
+  var VIBE_TURN_BUSY_MESSAGE = "Tigo was still finishing a previous turn of this conversation, so this message was not sent. Send it again in a moment.";
+  var vibeBusySleep = function (ms) {
+    Thread.sleep(ms);
+  };
+
+  function vibeTurnBusyError(error) {
+    var text;
+    try {
+      text = typeof error === "string" ? error : JSON.stringify(error);
+    } catch (_ignoreBusyText) {
+      text = String(error);
+    }
+    return VIBE_TURN_BUSY_PATTERN.test(String(text || ""));
+  }
+
+  // When Vibe last had a reason to still run a turn the Bridge does not see: a cancel, the end of a turn, its own work.
+  function vibeBusyRecently(entry) {
+    var last = Math.max(Number(entry.lastCancelAt || 0), Number(entry.lastTurnEndAt || 0), Number(entry.lastIdleActivityAt || 0));
+    return last > 0 && now() - last < VIBE_BUSY_RETRY_WINDOW_MS;
+  }
+
+  function vibeSetConfigOption(entry, configId, value, timeoutMs) {
+    var started = now();
+    while (true) {
+      try {
+        return acpRequest(entry, "session/set_config_option", { sessionId: entry.sessionId, configId: configId, value: value }, timeoutMs);
+      } catch (configError) {
+        if (!vibeTurnBusyError(configError.acpError || String(configError)) || now() - started >= VIBE_BUSY_RETRY_MAX_MS) {
+          throw configError;
+        }
+        vibeBusySleep(VIBE_BUSY_RETRY_MS);
+      }
+    }
+  }
+
+  // A start that finds the process in a turn keeps the model and effort it asks for the next prompt.
+  function configureOrDeferVibeSession(entry, options, timeoutMs) {
+    if (entry.turnActive === true) {
+      var copy = {};
+      for (var key in (options || {})) {
+        if (Object.prototype.hasOwnProperty.call(options, key)) {
+          copy[key] = options[key];
+        }
+      }
+      entry.deferredSessionConfig = { options: copy, timeoutMs: timeoutMs };
+      return null;
+    }
+    entry.deferredSessionConfig = null;
+    return configureVibeSession(entry, options, timeoutMs);
+  }
+
+  function applyDeferredVibeSessionConfig(entry) {
+    var deferred = entry.deferredSessionConfig;
+    if (!deferred) {
+      return;
+    }
+    entry.deferredSessionConfig = null;
+    try {
+      configureVibeSession(entry, deferred.options, deferred.timeoutMs || 30000);
+    } catch (deferredError) {
+      pushEvent(entry, "warning", { phase: "session/config", message: String(deferredError) });
+    }
+  }
+
+  // Vibe refused a prompt: a turn of its own still runs. The turn's prompt is sent again, on a thread (the reader must not
+  // wait), every VIBE_BUSY_RETRY_MS while Vibe may still be closing a turn (vibeBusyRecently), for at most
+  // VIBE_BUSY_RETRY_MAX_MS; past that, or without such a reason, the turn ends as busy (turn/error, busy: true): the
+  // message was not sent. A refused prompt that is not the turn's is no failure of the turn.
+  function noteVibeTurnBusy(entry, key) {
+    key = trim(key);
+    if (entry.turnActive !== true || trim(entry.turnRequestId) !== key) {
+      pushEvent(entry, "warning", {
+        phase: "turn/admission",
+        reason: "turn_busy",
+        requestId: key,
+        otherRequest: true,
+        message: "Vibe refused a prompt sent while one of its turns ran; it was not sent."
+      });
+      return;
+    }
+    var at = now();
+    if (!Number(entry.turnBusySince || 0)) {
+      entry.turnBusySince = at;
+    }
+    var retry = !!entry.turnPromptParams && entry.turnInterrupted !== true
+      && (Number(entry.turnBusyRetries || 0) > 0 || vibeBusyRecently(entry))
+      && at - Number(entry.turnBusySince) < VIBE_BUSY_RETRY_MAX_MS;
+    if (!retry) {
+      pushEvent(entry, "turn/error", {
+        requestId: key,
+        method: "session/prompt",
+        busy: true,
+        retries: Number(entry.turnBusyRetries || 0),
+        error: { code: "turn_busy", message: VIBE_TURN_BUSY_MESSAGE }
+      });
+      return;
+    }
+    entry.turnBusyRetries = Number(entry.turnBusyRetries || 0) + 1;
+    var process = entry.process;
+    var worker = new Thread(new Runnable({
+      run: function () {
+        try {
+          vibeBusySleep(VIBE_BUSY_RETRY_MS);
+        } catch (_ignoreBusySleep) {}
+        retryVibeBusyPrompt(entry, key, process);
+      }
+    }), "lib_ConvertigoAgentBridge-vibe-busy-" + entry.handle);
+    worker.setDaemon(true);
+    worker.start();
+  }
+
+  function retryVibeBusyPrompt(entry, key, process) {
+    if (entry.turnActive !== true || trim(entry.turnRequestId) !== key || entry.process !== process || !processAlive(entry.process)) {
+      // the turn ended meanwhile (closed, restarted)
+      return;
+    }
+    if (entry.turnInterrupted === true) {
+      // a Stop while the message waited: Vibe never got it
+      pushEvent(entry, "turn/end", { requestId: key, method: "session/prompt", result: { stopReason: "cancelled" } });
+      return;
+    }
+    try {
+      var pending = sendAcpRequest(entry, "session/prompt", entry.turnPromptParams);
+      entry.turnRequestId = String(pending.id);
+      pushEvent(entry, "turn/retry", { reason: "turn_busy", endedRequestId: key, requestId: pending.id, attempt: Number(entry.turnBusyRetries || 0) });
+      if (entry.turnBusyNoted !== true && now() - Number(entry.turnBusySince || now()) >= VIBE_BUSY_PROGRESS_MS) {
+        entry.turnBusyNoted = true;
+        pushEvent(entry, "progress/message", { code: "turn_busy_wait", text: "Agent Bridge: Vibe is still closing its previous turn; the message goes as soon as it is done." });
+      }
+    } catch (retryError) {
+      pushEvent(entry, "turn/error", { requestId: key, method: "session/prompt", busy: true, error: { code: "turn_busy", message: String(retryError) } });
+    }
+  }
+
   function configureVibeSession(entry, options, timeoutMs) {
     options = options || {};
     var requestedModel = trim(options.model || options.agentModel);
@@ -11902,11 +12160,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     var configOptions = entry.configOptions || acpConfigOptions(entry.session);
     var modelOption = findAcpConfigOption(configOptions, "model");
     if (requestedModel.length && acpConfigOptionHasValue(modelOption, requestedModel) && requestedModel !== trim(modelOption.currentValue || modelOption.current_value)) {
-      var modelResult = acpRequest(entry, "session/set_config_option", {
-        sessionId: entry.sessionId,
-        configId: "model",
-        value: requestedModel
-      }, timeoutMs);
+      var modelResult = vibeSetConfigOption(entry, "model", requestedModel, timeoutMs);
       configOptions = acpConfigOptions(modelResult);
       updateVibeProviderSettings(entry, configOptions);
     } else if (requestedModel.length && !acpConfigOptionHasValue(modelOption, requestedModel)) {
@@ -11953,11 +12207,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       }
     }
     if (requestedReasoning.length && acpConfigOptionHasValue(thinkingOption, requestedReasoning) && requestedReasoning !== trim(thinkingOption.currentValue || thinkingOption.current_value)) {
-      var reasoningResult = acpRequest(entry, "session/set_config_option", {
-        sessionId: entry.sessionId,
-        configId: "thinking",
-        value: requestedReasoning
-      }, timeoutMs);
+      var reasoningResult = vibeSetConfigOption(entry, "thinking", requestedReasoning, timeoutMs);
       configOptions = acpConfigOptions(reasoningResult);
       updateVibeProviderSettings(entry, configOptions);
     } else if (requestedReasoning.length && !acpConfigOptionHasValue(thinkingOption, requestedReasoning)) {
@@ -12829,8 +13079,38 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       lastCodexProgressMessage: "",
       lastCodexAnswerChunk: "",
       codexTurnEnded: false,
+      // one prompt admitted at a time (claimPromptAdmission)
+      admissionGate: newAdmissionGate(),
       closedAt: 0
     };
+  }
+
+  // The admission of a prompt checks that no turn runs, then sends it and starts the turn: two prompts of one
+  // conversation (a resend, two tabs) both found no turn, both went to Vibe, which refused the second ("A turn is
+  // already running", ACOSS 26/11). The gate makes the check and the start one step. Replaced in tests.
+  var newAdmissionGate = function () {
+    try {
+      return new Packages.java.util.concurrent.atomic.AtomicBoolean(false);
+    } catch (_ignoreGate) {
+      return null;
+    }
+  };
+
+  // true when this request holds the entry's admission; an entry without gate (made by an older Bridge) is not gated.
+  function claimPromptAdmission(entry) {
+    var gate = entry && entry.admissionGate;
+    if (!gate || typeof gate.compareAndSet !== "function") {
+      return true;
+    }
+    var claimed = gate.compareAndSet(false, true);
+    return claimed === true || String(claimed) === "true";
+  }
+
+  function releasePromptAdmission(entry) {
+    var gate = entry && entry.admissionGate;
+    if (gate && typeof gate.set === "function") {
+      gate.set(false);
+    }
   }
 
   // Public quota snapshots contain only limits, timestamps and aggregate usage.
@@ -13739,6 +14019,8 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       entry.turnFinalText = "";
       entry.turnFinalTextOverflow = false;
       entry.turnPromptBlocks = null;
+      entry.turnPromptParams = null;
+      entry.lastTurnEndAt = event.at;
       touchManagedMcpLease(entry, true);
     }
     if (event.type === "turn/interrupt_requested") {
@@ -14614,7 +14896,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   var VIBE_CORE_REFUSAL_PATTERN = /Core rejected durable input: (RustRejectedApplyResult\([^\n"]*)/;
   var VIBE_MCP_LOST_CODES = { mcp_authorization_required: true, mcp_unknown_route: true };
   // The restart reasons vibeStart honours by replacing the process.
-  var VIBE_MCP_LOST_RESTARTS = { core_rejected_input: true, convertigo_mcp_suspended: true };
+  var VIBE_MCP_LOST_RESTARTS = { core_rejected_input: true, convertigo_mcp_suspended: true, mcp_token_expired: true };
 
   // The Convertigo MCP a Vibe session reads its tools from: the lib_ConvertigoMCP the engine has loaded, by its version
   // and the loaded project itself, so that a reinstall of the same version counts too. "absent" without the project,
@@ -15353,6 +15635,59 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     watchdog.start();
   }
 
+  // A Convertigo tool answered that the token of the process expired: the MCP answers a tools/call with an expired managed
+  // token as the tool's error, "MCP token expired: ... Do not call Convertigo tools again in this turn: tell the user."
+  function vibeMcpTokenExpiredAnswer(update, semanticError) {
+    if (semanticError && MCP_TOKEN_EXPIRED_PATTERN.test(String(semanticError.message || ""))) {
+      return true;
+    }
+    try {
+      return MCP_TOKEN_EXPIRED_PATTERN.test(JSON.stringify(update.rawOutput || update.raw_output || update.content || ""));
+    } catch (_ignoreExpiredRead) {
+      return false;
+    }
+  }
+
+  // The token of the process ended (a Convertigo tool said so, a 401 with its lease gone, or its keeper found the lease
+  // ended): restarting Vibe with the same token, as the recovery of a lost MCP did, gives the same refusal. The Bridge
+  // asks the Assistant for a new token (mcpTokenRenewal), cancels the running turn at once (the MCP tells the agent to stop
+  // and tell the user), and the turn goes on in a Vibe restarted with the new token, once per user message
+  // (beginVibeMcpRecovery, cause mcp_token_expired). Without a turn of the Bridge, the next start replaces the process.
+  function noteVibeMcpTokenExpired(entry, source) {
+    if (entry.mcpTokenRenewal && entry.mcpTokenRenewal.done !== true) {
+      return;
+    }
+    if (entry.mcpRecovery && entry.mcpRecovery.done !== true) {
+      // a recovery in progress renews the token itself when its lease ended (runVibeMcpRecovery)
+      return;
+    }
+    requestMcpTokenRenewal(entry, source);
+    if (!trim(entry.restartReason).length) {
+      entry.restartReason = "mcp_token_expired";
+      entry.restartDetail = { source: trim(source) };
+    }
+    var running = entry.turnActive === true ? runningVibePrompt(entry) : null;
+    var resume = running !== null && Number(entry.turnMcpResumes || 0) < VIBE_MCP_RESUMES_PER_MESSAGE && trim(entry.turnRequestId).length > 0;
+    pushEvent(entry, "warning", {
+      phase: "mcp/auth",
+      reason: "mcp_token_expired",
+      source: trim(source),
+      resume: resume,
+      message: "The authorization of the Convertigo MCP of this Vibe process expired (" + trim(source) + "): "
+        + (resume ? "the Bridge stops the turn, gets a new one from the panel, restarts Vibe on this conversation and resumes the work."
+          : "the next message restarts Vibe on this conversation with a new one.")
+    });
+    try { log.warn("(lib_ConvertigoAgentBridge) The Convertigo MCP token of a Vibe process expired (" + trim(source) + "), handle " + entry.handle); } catch (_ignoreExpiredLog) {}
+    if (!resume) {
+      return;
+    }
+    try {
+      TURN_INTERRUPT_ADAPTERS.acp(entry);
+      pushEvent(entry, "turn/interrupt_requested", { protocol: "acp", reason: "mcp_token_expired" });
+    } catch (_ignoreExpiredCancel) {}
+    beginVibeMcpRecovery(entry, "resume", "mcp_token_expired", true, String(running.id));
+  }
+
   function vibeMcpLostLabel(reason, detail) {
     if (reason !== "core_rejected_input") {
       return trim(detail && detail.code) || reason;
@@ -15684,11 +16019,24 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       endVibeTurnWithoutMcp(entry, recovery, { code: "restart_limit" });
       return;
     }
-    var target = entry.mcpProbeTarget;
-    if (!target) {
+    if (!entry.mcpProbeTarget) {
       endVibeTurnWithoutMcp(entry, recovery, { code: "no_endpoint" });
       return;
     }
+    // A process whose token ended gets the same refusal once restarted with it: the restart waits for a new one. The MCP
+    // probe (an initialize) cannot tell, the MCP lets an expired token open its sessions.
+    if (recovery.cause === "mcp_token_expired" || managedMcpLeaseEnded(entry)) {
+      var renewal = waitForMcpTokenRenewal(entry, recovery, gone);
+      if (gone()) {
+        recovery.done = true;
+        return;
+      }
+      if (!renewal.ok) {
+        endVibeTurnWithoutMcp(entry, recovery, { code: "token_expired", waitedMs: renewal.waitedMs });
+        return;
+      }
+    }
+    var target = entry.mcpProbeTarget;
     var lastLine = 0;
     var waited = waitForConvertigoMcp(target, CONVERTIGO_MCP_WAIT_MS, function (probe, waitedMs) {
       if (lastLine === 0 || waitedMs - lastLine >= CONVERTIGO_MCP_PROGRESS_MS) {
@@ -15726,7 +16074,37 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     sendVibeRecoveryPrompt(fresh, recovery, entry.sessionId);
   }
 
+  // Waits for the Assistant to give a new token (acceptMcpTokenRenewal, from its event read), then puts it into what the
+  // restart starts with: {ok, waitedMs}. A progress line every CONVERTIGO_MCP_PROGRESS_MS.
+  function waitForMcpTokenRenewal(entry, recovery, gone) {
+    var renewal = requestMcpTokenRenewal(entry, recovery.cause === "mcp_token_expired" ? "" : "recovery");
+    var started = now();
+    var lastLine = -1;
+    while (!trim(renewal.handle).length) {
+      var waited = now() - started;
+      if (gone() || waited >= MCP_TOKEN_RENEWAL_WAIT_MS) {
+        return { ok: false, waitedMs: waited };
+      }
+      if (lastLine < 0 || waited - lastLine >= CONVERTIGO_MCP_PROGRESS_MS) {
+        lastLine = waited;
+        pushEvent(entry, "progress/message", { code: "mcp_token_wait", text: lastLine === 0
+          ? "Agent Bridge: the authorization of the Convertigo MCP expired; Tigo waits for the panel to renew it, at most "
+            + Math.round(MCP_TOKEN_RENEWAL_WAIT_MS / 1000) + " s."
+          : "Agent Bridge: still waiting for the panel to renew the authorization of the Convertigo MCP (" + Math.round(waited / 1000) + " s)." });
+      }
+      convertigoMcpSleep(MCP_TOKEN_RENEWAL_POLL_MS);
+    }
+    applyMcpTokenRenewal(entry);
+    return { ok: true, waitedMs: now() - started };
+  }
+
   function vibeRecoveryPromptText(recovery) {
+    if (recovery.cause === "mcp_token_expired" && recovery.kind === "resume") {
+      return "Note from the Agent Bridge: the authorization of the Convertigo MCP (its token) expired during your turn, so the Convertigo "
+        + "tools answered \"MCP token expired\" or disappeared. The Bridge renewed it and restarted Vibe on this conversation: the tools work "
+        + "again. Disregard those answers and their advice to stop. Call again the tool that failed; if you were in the middle of a change, "
+        + "call `project-changes` first and repair any half-made change. Then continue the user's request.";
+    }
     if (recovery.kind === "resume") {
       return "Note from the Agent Bridge: the Convertigo MCP tools were lost during your last steps (" + recovery.cause + "), so the Bridge "
         + "stopped your turn and restarted Vibe on this conversation: the tools are back. Your last change may be incomplete. Call "
@@ -15782,7 +16160,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
         requestId: pending.id,
         message: "The Convertigo MCP was lost during the turn: Vibe restarted on this conversation and resumes the work, checking the last change first."
       });
-      pushEvent(fresh, "progress/message", { code: "mcp_lost_resumed", text: "Agent Bridge: the Convertigo tools are back; Tigo checks its last change, then goes on." });
+      pushEvent(fresh, "progress/message", { code: "mcp_lost_resumed", text: recovery.cause === "mcp_token_expired"
+        ? "Agent Bridge: Tigo has a new authorization for the Convertigo MCP; it calls the tool again, then goes on."
+        : "Agent Bridge: the Convertigo tools are back; Tigo checks its last change, then goes on." });
     } else {
       pushEvent(fresh, "warning", {
         phase: "vibe/mcp",
@@ -15798,6 +16178,12 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   }
 
   function convertigoMcpUnreachableMessage(code, kind) {
+    if (code === "token_expired") {
+      return "L'autorisation du MCP Convertigo de cette conversation a expiré et le panneau ne l'a pas renouvelée : Tigo ne peut pas "
+        + "travailler sans ses outils, le tour s'arrête ici. Renvoyez votre message : il renouvelle l'autorisation, le travail fait est gardé."
+        + "\n\nThe authorization of the Convertigo MCP of this conversation expired and the panel did not renew it: Tigo cannot work "
+        + "without its tools, so the turn stops here. Send your message again: it renews the authorization, the work done is kept.";
+    }
     var unauthorized = code === "unauthorized";
     var fr = unauthorized
       ? "Le MCP Convertigo refuse l'autorisation de cette conversation : Tigo ne peut pas travailler sans ses outils, le tour s'arr\u00eate ici. Renvoyez votre message pour relancer Tigo."
@@ -15922,6 +16308,10 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       sessionId: params.sessionId || params.session_id || entry.sessionId || "",
       update: update
     };
+    if (entry.turnActive !== true && /^(?:agent_message_chunk|agent_thought_chunk|tool_call|tool_call_update|plan)$/.test(kind)) {
+      // Vibe works outside a turn of the Bridge (a turn it started itself): a prompt now may be refused (vibeBusyRecently)
+      entry.lastIdleActivityAt = now();
+    }
 
     if (kind === "agent_message_chunk") {
       eventData.text = extractContentText(update.content);
@@ -15998,12 +16388,16 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       if (vibeWriteRefused(update)) {
         entry.turnWriteRefused = true;
       }
-      var lost = eventData.status === "failed"
-        ? vibeMcpLostReason(eventData.title || (entry.toolCallTitles && entry.toolCallTitles[trim(eventData.toolCallId)]) || "", failure, refusal)
-        : "";
+      var lostTitle = eventData.title || (entry.toolCallTitles && entry.toolCallTitles[trim(eventData.toolCallId)]) || "";
+      var lost = eventData.status === "failed" ? vibeMcpLostReason(lostTitle, failure, refusal) : "";
+      // The token of the process ended: the MCP said so, or refused it (401) while its lease is gone.
+      var tokenExpired = entry.provider === "vibe" && eventData.status === "failed" && vibeConvertigoToolTitle(lostTitle)
+        && (vibeMcpTokenExpiredAnswer(update, semanticError) || (lost === "convertigo_mcp_suspended" && managedMcpLeaseEnded(entry)));
       noteVibeBrowserProofDone(entry, eventData.toolCallId, eventData.status);
       pushEvent(entry, "tool/update", eventData);
-      if (lost.length) {
+      if (tokenExpired) {
+        noteVibeMcpTokenExpired(entry, lost.length ? "unauthorized" : "tool_answer");
+      } else if (lost.length) {
         noteVibeMcpLost(entry, lost, refusal !== null ? refusal : { code: failure.code });
       } else if (eventData.status === "completed") {
         // a call that went through: only failures in a row count
@@ -16095,6 +16489,22 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
           mcpRecovery.awaiting = "";
           recoveredTurn = true;
           startVibeMcpRecovery(entry, mcpRecovery);
+        } else if (pending.method === "session/prompt" && entry.provider === "vibe" && message.error && vibeTurnBusyError(message.error)) {
+          // Vibe refused the prompt, its own turn still running: sent again in the same turn, or the turn ends as busy.
+          recoveredTurn = true;
+          noteVibeTurnBusy(entry, key);
+        } else if (pending.method === "session/prompt" && message.error && trim(entry.turnRequestId).length && key !== trim(entry.turnRequestId)) {
+          // the error of another prompt than the turn's: the turn goes on, it is no error of it (an Assistant reads every
+          // turn/error of the stream as the end of its turn)
+          pushEvent(entry, "warning", {
+            phase: "turn/admission",
+            reason: "other_prompt_error",
+            requestId: message.id,
+            otherRequest: true,
+            error: message.error,
+            message: "Vibe refused a prompt sent beside the running turn; the turn goes on."
+          });
+          recoveredTurn = true;
         } else if (pending.method === "session/prompt") {
           // A turn that failed on a refusal of Vibe's core leaves the process to be replaced at the next start.
           var turnRefusal = entry.provider === "vibe" && message.error ? vibeCoreRefusal(message.error) : null;
@@ -16140,7 +16550,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       // step of a restart within the turn (a session/load that finds no session starts a new one): the Assistant reads
       // every acp/response_error of the turn's stream as the end of the turn.
       var turnStep = recoveredTurn || (entry.adoptedTurn === true && entry.status === "starting");
-      pushEvent(entry, message.error && !turnStep ? "acp/response_error" : "acp/response", {
+      // a setting Vibe refused during its turn is sent again (vibeSetConfigOption): no error of the turn either
+      var busyStep = entry.provider === "vibe" && !!message.error && vibeTurnBusyError(message.error);
+      pushEvent(entry, message.error && !turnStep && !busyStep ? "acp/response_error" : "acp/response", {
         id: message.id,
         method: pending ? pending.method : "",
         response: message
@@ -16439,6 +16851,8 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       phase: entry.phase,
       alive: processAlive(entry.process),
       turnActive: entry.turnActive === true,
+      // "needed": the token of the process ended, the Assistant's next event read gives a new one (mcpBearerTokenHandle)
+      mcpTokenRenewal: mcpTokenRenewalState(entry),
       pid: Number(entry.pid || processPid(entry.process) || 0),
       cwd: entry.cwd,
       command: entry.command,
@@ -16516,6 +16930,8 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
   var TURN_INTERRUPT_ADAPTERS = {
     "acp": function (entry) {
       if (!trim(entry.sessionId).length) { return false; }
+      // Vibe may still close the cancelled turn after it answers its prompt (vibeBusyRecently)
+      entry.lastCancelAt = now();
       writeJson(entry, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: entry.sessionId } });
       return true;
     },
@@ -16672,6 +17088,8 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       return { ok: false, status: "not_found", handle: handle, events: [], timestamp: now() };
     }
 
+    // the Assistant's answer to mcpTokenRenewal "needed" (its event read creates the token in its user's session)
+    acceptMcpTokenRenewal(entry, optionOrRequest(options, "mcpBearerTokenHandle"));
     var cursor = intValue(options.cursor, 0, 0, 2147483647);
     var limit = intValue(options.limit, DEFAULT_EVENT_LIMIT, 1, MAX_EVENT_LIMIT);
     var waitMs = intValue(options.waitMs, 25000, 0, 30000);

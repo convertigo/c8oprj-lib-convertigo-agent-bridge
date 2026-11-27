@@ -665,7 +665,8 @@
       // its prompt follows: a sweep in between must not take this process for an idle one
       existing.lastAccess = now();
       try {
-        configureVibeSession(existing, options, timeoutMs);
+        // not during a turn: Vibe refuses it then, the next prompt applies it (applyDeferredVibeSessionConfig)
+        configureOrDeferVibeSession(existing, options, timeoutMs);
       } catch (configureExistingError) {
         pushEvent(existing, "warning", {
           phase: "session/config",
@@ -1333,25 +1334,50 @@
     if (messageId.length) {
       params.messageId = messageId;
     }
-    // Vibe runs one turn at a time and refuses a prompt sent during a turn: it is not sent, and the turn goes on.
-    if (entry.turnActive === true) {
-      return { ok: false, status: "busy", handle: handle, error: "A turn is already running in this conversation", state: statusOf(entry), timestamp: now() };
+    // Vibe runs one turn at a time and refuses a prompt sent during a turn: it is not sent, and the turn goes on. The
+    // check and the start of the turn are one step (claimPromptAdmission): two prompts at once both passed the check.
+    var busy = { ok: false, status: "busy", handle: handle, error: "A turn is already running in this conversation", state: statusOf(entry), timestamp: now() };
+    if (!claimPromptAdmission(entry)) {
+      return busy;
     }
+    try {
+      if (entry.turnActive === true) {
+        return busy;
+      }
+      return admitVibePrompt(entry, handle, options, params, messageId, promptBlocks, promptText.length, images.blocks.length, described);
+    } finally {
+      releasePromptAdmission(entry);
+    }
+  };
+
+  // The admitted prompt: the turn starts here, Vibe gets it, or the turn waits for its Convertigo MCP first.
+  function admitVibePrompt(entry, handle, options, params, messageId, promptBlocks, textLength, imageCount, described) {
     if (entry.convertigoMcpMissing && entry.mcpProbeTarget) {
-      return deferVibePromptUntilMcp(entry, handle, messageId, promptBlocks, promptText.length, images.blocks.length, described);
+      return deferVibePromptUntilMcp(entry, handle, messageId, promptBlocks, textLength, imageCount, described);
     }
+    // The token of this process ended (its lease is gone): Vibe would get "MCP token expired", then lose its tools.
+    if (entry.mcpProbeTarget && managedMcpLeaseEnded(entry)) {
+      return deferVibePromptUntilMcp(entry, handle, messageId, promptBlocks, textLength, imageCount, described, "mcp_token_expired");
+    }
+    // a model or effort asked while a turn ran: applied now, before the turn (configureVibeSession refuses during one)
+    applyDeferredVibeSessionConfig(entry);
 
     try {
       entry.mcpLostFailures = 0;
       var pending = sendAcpRequest(entry, "session/prompt", params);
-      // the message, for a restart of Vibe within this turn (restartVibeInPlace)
+      // the message, for a restart of Vibe within this turn (restartVibeInPlace), and for a prompt Vibe refused because
+      // it was still closing its previous turn (retryVibeBusyPrompt)
       entry.turnPromptBlocks = promptBlocks;
       entry.turnPromptMessageId = messageId;
+      entry.turnPromptParams = params;
+      entry.turnBusyRetries = 0;
+      entry.turnBusySince = 0;
+      entry.turnBusyNoted = false;
       pushEvent(entry, "turn/start", {
         requestId: pending.id,
         messageId: messageId,
-        textLength: promptText.length,
-        imageCount: images.blocks.length
+        textLength: textLength,
+        imageCount: imageCount
       });
       // the turn's events start here: the images described for it come first
       var turnCursor = entry.nextIndex;
@@ -1396,13 +1422,14 @@
         timestamp: now()
       };
     }
-  };
+  }
 
-  // A prompt to a process that started without its Convertigo tools: the turn starts now, without Vibe, waits for the
-  // MCP (progress lines), then Vibe restarts on the same session and gets the message, or the turn ends saying the MCP
-  // does not answer (beginVibeMcpRecovery).
-  function deferVibePromptUntilMcp(entry, handle, messageId, promptBlocks, textLength, imageCount, described) {
+  // A prompt to a process that started without its Convertigo tools, or whose MCP token ended (cause
+  // mcp_token_expired): the turn starts now, without Vibe, waits for the MCP or a new token (progress lines), then Vibe
+  // restarts on the same session and gets the message, or the turn ends saying why (beginVibeMcpRecovery).
+  function deferVibePromptUntilMcp(entry, handle, messageId, promptBlocks, textLength, imageCount, described, cause) {
     var missing = entry.convertigoMcpMissing || {};
+    var tokenExpired = cause === "mcp_token_expired";
     var requestId = "mcp-wait-" + now();
     entry.mcpLostFailures = 0;
     pushEvent(entry, "turn/start", {
@@ -1410,21 +1437,33 @@
       messageId: messageId,
       textLength: textLength,
       imageCount: imageCount,
-      deferred: "convertigo_mcp"
+      deferred: tokenExpired ? "mcp_token" : "convertigo_mcp"
     });
     entry.turnPromptBlocks = promptBlocks;
     entry.turnPromptMessageId = messageId;
     var turnCursor = entry.nextIndex;
     pushDescribedImageEvents(entry, described);
-    pushEvent(entry, "warning", {
-      phase: "vibe/mcp",
-      reason: "convertigo_mcp_unavailable_at_start",
-      source: trim(missing.source) || "probe",
-      error: trim(missing.error),
-      message: "Vibe started this session without the Convertigo MCP (" + (trim(missing.error) || "no answer")
-        + "): the turn waits for the MCP, then Vibe restarts on this conversation."
-    });
-    beginVibeMcpRecovery(entry, "deferred", "convertigo_mcp_unavailable_at_start", false);
+    if (tokenExpired) {
+      requestMcpTokenRenewal(entry, "lease_ended");
+      pushEvent(entry, "warning", {
+        phase: "mcp/auth",
+        reason: "mcp_token_expired",
+        source: "lease_ended",
+        resume: true,
+        message: "The authorization of the Convertigo MCP of this Vibe process expired: the turn waits for a new one from the panel, "
+          + "then Vibe restarts on this conversation and gets the message."
+      });
+    } else {
+      pushEvent(entry, "warning", {
+        phase: "vibe/mcp",
+        reason: "convertigo_mcp_unavailable_at_start",
+        source: trim(missing.source) || "probe",
+        error: trim(missing.error),
+        message: "Vibe started this session without the Convertigo MCP (" + (trim(missing.error) || "no answer")
+          + "): the turn waits for the MCP, then Vibe restarts on this conversation."
+      });
+    }
+    beginVibeMcpRecovery(entry, "deferred", tokenExpired ? "mcp_token_expired" : "convertigo_mcp_unavailable_at_start", false);
     return { ok: true, status: "submitted", handle: handle, requestId: requestId, cursor: turnCursor, state: statusOf(entry), timestamp: now() };
   }
 

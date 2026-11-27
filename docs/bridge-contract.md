@@ -367,6 +367,62 @@ Une session vide qui ne se recharge pas (`Session not found`) est remplacee par
 une nouvelle : un evenement `session/update` porte son `sessionId`. Un `Stop`
 pendant l'attente finit le tour (`turn/end`, `stopReason: "cancelled"`).
 
+### Jeton MCP gere expire (Vibe)
+
+Un process Vibe garde son jeton MCP toute sa vie (`CONVERTIGO_MCP_TOKEN`, en-tete
+`Authorization` de son `config.toml`). Le jeton gere du panneau a un bail
+(lib_ConvertigoMCP) : il finit apres son temps d'inactivite (30 min) ou quand
+le moteur ne le tient plus. Le MCP repond alors a un `tools/call` par l'erreur
+de l'outil `MCP token expired: ...`, et refuse un `tools/list` par un 401 apres
+lequel Vibe n'a plus d'outil Convertigo. Le Bridge :
+
+- reconnait la fin du jeton : la reponse `MCP token expired` d'un outil
+  Convertigo, un `mcp_authorization_required`/`mcp_unknown_route` alors que le
+  bail est fini, le bail fini sous un tour (son gardien) ou au moment d'un
+  prompt ;
+- pousse `warning` `mcp_token_expired` (`phase: "mcp/auth"`, `source` :
+  `tool_answer`, `unauthorized`, `lease_ended`; `resume`), et son etat
+  (`state.mcpTokenRenewal`) vaut `"needed"` ;
+- ne peut pas creer de jeton (McpManagedTokenCreate demande un administrateur) :
+  l'Assistant en donne un dans sa lecture `agent_events` (parametre de requete
+  `mcpBearerTokenHandle`, le handle d'un jeton vivant en memoire serveur) ; le
+  Bridge ne prend qu'un autre jeton dont le bail vit (`"received"`) ;
+- pendant un tour, annule le tour Vibe, attend le jeton (une ligne
+  `progress/message` de code `mcp_token_wait` toutes les 15 s, 60 s au plus),
+  redemarre Vibe avec lui dans le meme tour (`restartVibeInPlace`) et reprend
+  (`warning` `mcp_lost_resumed`, `cause: "mcp_token_expired"`), une fois par
+  message ; un prompt a un process dont le bail est fini attend de meme
+  (`turn/start` avec `deferred: "mcp_token"`) puis Vibe recoit le message ;
+- sans jeton dans les 60 s, finit le tour par `warning`
+  `convertigo_mcp_unreachable` (`code: "token_expired"`) et `turn/error`
+  `{code: "convertigo_mcp_unreachable", message}` ; le demarrage suivant remplace
+  le process (`restartReason` `mcp_token_expired`).
+
+La reprise d'un MCP perdu (`convertigo_mcp_suspended`) renouvelle de meme le
+jeton avant de redemarrer Vibe quand son bail est fini.
+
+### Tour deja en cours (Vibe)
+
+Vibe refuse un prompt, ou un reglage (`session/set_config_option`), quand un
+tour a lui tourne : `A turn is already running`. Il peut encore fermer un tour
+juste apres avoir repondu au prompt qu'un Stop a annule. Le Bridge :
+
+- admet un prompt en une etape : la verification qu'aucun tour ne tourne et le
+  debut du tour se font sous la porte du process (`admissionGate`) ; un second
+  prompt repond `busy` sans aller a Vibe ;
+- renvoie un prompt que Vibe refuse ainsi quand Vibe peut fermer un tour (moins
+  de 10 s apres un `session/cancel`, la fin d'un tour, ou son travail hors d'un
+  tour du Bridge) : toutes les 250 ms, 15 s au plus, dans le meme tour (evenement
+  `turn/retry`, `progress/message` de code `turn_busy_wait` apres 2 s) ; sinon le
+  tour finit par `turn/error` `{busy: true, error: {code: "turn_busy", message}}` :
+  le message n'a pas ete envoye ;
+- ne change aucun reglage pendant un tour : un modele ou un effort demande par
+  un demarrage pendant un tour s'applique au prompt suivant, et un reglage refuse
+  pendant la fermeture d'un tour est renvoye (meme budget) ;
+- ne pousse pour ces refus ni `turn/error` ni `acp/response_error` du tour : le
+  refus d'un prompt qui n'est pas celui du tour est un `warning` `turn_busy` ou
+  `other_prompt_error` (`otherRequest: true`).
+
 Dans ce prototype, les demandes ACP `session/request_permission` sont traitees
 automatiquement en selectionnant l'option `allow_once` ou une option
 equivalente quand elle existe.

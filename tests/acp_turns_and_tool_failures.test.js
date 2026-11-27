@@ -81,7 +81,8 @@ test("the end of a refused second prompt does not end the running turn", () => {
 
 test("Vibe gets no prompt while a turn runs: the Bridge answers busy", () => {
   const vibe = fs.readFileSync(path.join(root, "js/agent_bridge_vibe.js"), "utf8");
-  const guard = vibe.indexOf("if (entry.turnActive === true) {");
+  const guard = vibe.indexOf("if (entry.turnActive === true) {\n        return busy;");
   assert.ok(guard > 0 && guard < vibe.indexOf('sendAcpRequest(entry, "session/prompt", params)'), "checked before the prompt is sent");
-  assert.match(vibe.slice(guard, guard + 220), /status: "busy"/);
+  assert.ok(vibe.lastIndexOf("if (!claimPromptAdmission(entry)) {", guard) > 0, "under the admission gate");
+  assert.match(vibe.slice(vibe.lastIndexOf("var busy = ", guard), guard), /status: "busy"/);
 });
