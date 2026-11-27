@@ -3894,7 +3894,19 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     } catch (_ignoreHttpRequest) {
       requester = new InternalRequester(params);
     }
-    var response = requester.processRequest();
+    // A detached worker has no HTTP log context. The 8.4.6 InternalRequester also ignores __nolog in its map.
+    var quiet = mcpNoLogEnabled();
+    var mdc = Packages.org.apache.log4j.MDC;
+    var previousNoLog = quiet ? mdc.get("nolog") : null;
+    var response;
+    try {
+      if (quiet) { mdc.put("nolog", true); }
+      response = requester.processRequest();
+    } finally {
+      if (quiet) {
+        if (previousNoLog == null) { mdc.remove("nolog"); } else { mdc.put("nolog", previousNoLog); }
+      }
+    }
     try {
       var json = JSON.parse(XMLUtils.XmlToJson(response.getDocumentElement(), true, true, JsonOutput.JsonRoot.docNode).toString());
       return json;
@@ -6304,9 +6316,11 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       } else {
         body = body.length ? body + ", " + guidanceHeaderEntry : guidanceHeaderEntry;
       }
-      var noLogPattern = /(["']X-Convertigo-No-Log["']\s*=\s*)["'][^"']*["']/;
+      var noLogPattern = /(^|,\s*)["']?X-Convertigo-No-Log["']?\s*=\s*["'][^"']*["']/i;
       if (noLogPattern.test(body)) {
-        body = noLogHeaderEntry.length ? body.replace(noLogPattern, noLogHeaderEntry) : body.replace(/,?\s*["']X-Convertigo-No-Log["']\s*=\s*["'][^"']*["']/, "").replace(/^\s*,\s*/, "");
+        body = body.replace(noLogPattern, function (entry, separator) {
+          return noLogHeaderEntry.length ? separator + noLogHeaderEntry : "";
+        }).replace(/^\s*,\s*/, "");
       } else if (noLogHeaderEntry.length) {
         body = body.length ? body + ", " + noLogHeaderEntry : noLogHeaderEntry;
       }
@@ -6703,7 +6717,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     return match === null ? "" : match[1];
   }
 
-  function refreshMcpSessionCookie(mcpEndpoint, existingCookie) {
+  function refreshMcpSessionCookie(mcpEndpoint, existingCookie, options) {
     var endpoint = managedMcpTransportEndpoint(mcpEndpoint);
     var connection = null;
     var stream = null;
@@ -6717,6 +6731,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       connection.setConnectTimeout(5000);
       connection.setReadTimeout(5000);
       connection.setRequestMethod("GET");
+      if (mcpNoLogEnabled(options)) { connection.setRequestProperty("X-Convertigo-No-Log", "true"); }
       connection.setRequestProperty("Accept", "application/json");
       connection.setRequestProperty(
         "Cookie",
@@ -6754,7 +6769,7 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
       var serverName = managedMcpServerName(options);
       next.mcpSessionCookie = refreshMcpSessionCookie(
         mcpEndpoint,
-        mcpSessionCookieFromConfig(existingConfig, serverName)
+        mcpSessionCookieFromConfig(existingConfig, serverName), options
       );
     }
     return next;
@@ -15417,10 +15432,9 @@ if (typeof C8O.tigoStopConversationSubagents !== "function") {
     }
     // a Flow-only home: its `convertigo-flow` server is served by the same engine as the Legacy endpoint
     var token = managedMcpBearerToken(options);
-    return {
-      url: vibeMcpTransportEndpoint(vibeLegacyMcpEndpoint(mcpEndpoint), options),
-      headers: token.length ? [{ name: "Authorization", value: "Bearer " + token }] : []
-    };
+    var headers = token.length ? [{ name: "Authorization", value: "Bearer " + token }] : [];
+    if (mcpNoLogEnabled(options)) { headers.push({ name: "X-Convertigo-No-Log", value: "true" }); }
+    return { url: vibeMcpTransportEndpoint(vibeLegacyMcpEndpoint(mcpEndpoint), options), headers: headers };
   }
 
   function readStreamText(stream, maxChars) {
