@@ -565,6 +565,12 @@ const compactCodexConfig = patchCodexMcpConfigText(
   "/tmp/codex-home"
 );
 assert.match(compactCodexConfig.text, /url = "http:\/\/localhost:18082\/convertigo\/api\/mcp\?jsonOnly=true"/);
+const bareNoLog = compactCodexConfig.text.replace('"X-Convertigo-No-Log"', 'X-Convertigo-No-Log');
+for (const enabled of [true, false]) {
+  const patched = patchCodexMcpConfigText(bareNoLog, "http://localhost:18082/convertigo/api/mcp",
+    { mcpNoLog: String(enabled) }, "/tmp/codex-home");
+  assert.equal((patched.text.match(/X-Convertigo-No-Log/gi) || []).length, enabled ? 1 : 0);
+}
 const sessionCodexConfig = patchCodexMcpConfigText(
   compactCodexConfig.text,
   "http://localhost:18082/convertigo/api/mcp",
